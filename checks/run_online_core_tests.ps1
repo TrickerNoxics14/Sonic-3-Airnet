@@ -9,6 +9,7 @@ $vsDevCmd = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Too
 $engineInclude = Join-Path $sourceRoot "Oxygen\oxygenengine\source"
 $rmxInclude = Join-Path $sourceRoot "librmx\source"
 $relayInclude = Join-Path $sourceRoot "Oxygen\oxygenserver\source\relay"
+$sonic3airInclude = Join-Path $sourceRoot "Oxygen\sonic3air\source"		# sonic3air/client/SelfUpdateCore.h (the in-game updater logic)
 $protocolInclude = Join-Path $engineInclude "oxygen_netcore\network"		# RelayProtocol.h, which the relay's own files include by plain name
 $netcoreLib = Join-Path $sourceRoot "Oxygen\oxygenengine\build\_vstudio\lib\Release_x64"
 $rmxLib = Join-Path $sourceRoot "librmx\lib\x64"
@@ -23,7 +24,7 @@ $batch = @"
 @echo off
 call "$vsDevCmd" -arch=x64 -host_arch=x64 >nul 2>&1
 if errorlevel 1 exit /b 1
-cl.exe /nologo /EHsc /std:c++17 /I"$engineInclude" /I"$rmxInclude" /I"$relayInclude" /I"$protocolInclude" "$testSource" /Fe:"$testExe" /link /LTCG /LIBPATH:"$netcoreLib" /LIBPATH:"$rmxLib" /LIBPATH:"$zlibLib" oxygen_netcore.lib rmxbase.lib zlib.lib ws2_32.lib user32.lib
+cl.exe /nologo /EHsc /std:c++17 /I"$engineInclude" /I"$rmxInclude" /I"$relayInclude" /I"$protocolInclude" /I"$sonic3airInclude" "$testSource" /Fe:"$testExe" /link /LTCG /LIBPATH:"$netcoreLib" /LIBPATH:"$rmxLib" /LIBPATH:"$zlibLib" oxygen_netcore.lib rmxbase.lib zlib.lib ws2_32.lib user32.lib
 if errorlevel 1 exit /b %errorlevel%
 "$testExe"
 exit /b %errorlevel%

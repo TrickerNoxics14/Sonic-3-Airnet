@@ -609,6 +609,7 @@ void Configuration::serializeStandardSettings(JsonSerializer& serializer)
 	{
 		serializer.serialize("PlayerName", mOnlinePlayerName);
 		serializer.serialize("RelayServer", mOnlineRelayServer);
+		serializer.serialize("UpdateRepo", mOnlineUpdateRepo);
 		serializer.endObject();
 	}
 

@@ -13,7 +13,7 @@
 #include "sonic3air/menu/SharedResources.h"
 #include "sonic3air/audio/AudioOut.h"
 #include "sonic3air/client/GameClient.h"
-#include "sonic3air/client/UpdateCheck.h"
+#include "sonic3air/client/SelfUpdater.h"
 #include "sonic3air/ConfigurationImpl.h"
 #include "sonic3air/Game.h"
 #include "sonic3air/version.inc"
@@ -274,52 +274,129 @@ void UpdateCheckMenuEntry::renderEntry(RenderContext& renderContext_)
 	int& py = renderContext.mCurrentPosition.y;
 	const float alpha = renderContext.mTabAlpha;
 
-	drawer.printText(global::mOxyfontSmall, Recti(baseX - 100, py, 0, 10), "Your Game Version:", 4, Color(1.0f, 1.0f, 1.0f, alpha));
-	drawer.printText(global::mOxyfontSmall, Recti(baseX + 100, py, 0, 10), "v" BUILD_STRING, 6, Color(0.8f, 1.0f, 0.8f, alpha));
+	SelfUpdater& updater = SelfUpdater::instance();
+	const SelfUpdater::Snapshot snapshot = updater.getSnapshot();
+	const Color white(1.0f, 1.0f, 1.0f, alpha);
+	const Color green(0.8f, 1.0f, 0.8f, alpha);
+	const Color yellow(1.0f, 1.0f, 0.6f, alpha);
+	const Color red(1.0f, 0.4f, 0.4f, alpha);
+
+	// Wraps a message into lines of at most 46 characters and prints them centered
+	auto printWrapped = [&](const std::string& text, const Color& color, int maxLines)
+	{
+		int lines = 0;
+		size_t pos = 0;
+		while (pos < text.size() && lines < maxLines)
+		{
+			size_t lineEnd = text.find('\n', pos);
+			if (lineEnd == std::string::npos)
+				lineEnd = text.size();
+			std::string line = text.substr(pos, lineEnd - pos);
+			size_t next = lineEnd + 1;
+			if (line.size() > 46)
+			{
+				size_t cut = line.rfind(' ', 46);
+				if (cut == std::string::npos || cut < 20)
+					cut = 46;
+				next = pos + cut + (line[cut] == ' ' ? 1 : 0);
+				line = line.substr(0, cut);
+			}
+			if (!line.empty())
+			{
+				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), line, 5, color);
+				py += 10;
+				++lines;
+			}
+			pos = next;
+		}
+	};
+
+	drawer.printText(global::mOxyfontSmall, Recti(baseX - 100, py, 0, 10), "Your Game Version:", 4, white);
+	drawer.printText(global::mOxyfontSmall, Recti(baseX + 100, py, 0, 10), snapshot.mCurrentVersion.empty() ? std::string("unknown (development build)") : ("v" + snapshot.mCurrentVersion), 6, green);
 	py += 12;
 
-	UpdateCheck& updateCheck = GameClient::instance().getUpdateCheck();
-	switch (updateCheck.getState())
+	switch (snapshot.mState)
 	{
-		case UpdateCheck::State::FAILED:
-		{
-			drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Can't connect to server", 5, Color(1.0f, 0.0f, 0.0f, alpha));
+		case SelfUpdater::State::CHECKING:
+			drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Asking GitHub for the latest release...", 5, white);
+			py += 10;
 			break;
-		}
-		case UpdateCheck::State::SEND_QUERY:
-		case UpdateCheck::State::WAITING_FOR_RESPONSE:
-		{
-			drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Connecting to server...", 5, Color(1.0f, 1.0f, 1.0f, alpha));
+
+		case SelfUpdater::State::UP_TO_DATE:
+			drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "You're using the latest version", 5, green);
+			py += 10;
 			break;
-		}
-		case UpdateCheck::State::HAS_RESPONSE:
+
+		case SelfUpdater::State::UPDATE_AVAILABLE:
+		case SelfUpdater::State::DOWNLOADING:
+		case SelfUpdater::State::VERIFYING:
+		case SelfUpdater::State::STAGING:
+		case SelfUpdater::State::READY_TO_INSTALL:
+		case SelfUpdater::State::INSTALLING:
 		{
-			if (updateCheck.hasUpdate())
+			drawer.printText(global::mOxyfontSmall, Recti(baseX - 100, py, 0, 10), "Update available:", 4, white);
+			drawer.printText(global::mOxyfontSmall, Recti(baseX + 100, py, 0, 10), "v" + snapshot.mLatestVersion, 6, yellow);
+			py += 12;
+			if (snapshot.mState == SelfUpdater::State::DOWNLOADING)
 			{
-				drawer.printText(global::mOxyfontSmall, Recti(baseX - 100, py, 0, 10), "Update available:", 4, Color(1.0f, 1.0f, 1.0f, alpha));
-				drawer.printText(global::mOxyfontSmall, Recti(baseX + 100, py, 0, 10), getVersionString(updateCheck.getResponse()->mAvailableAppVersion), 6, Color(1.0f, 1.0f, 0.6f, alpha));
+				char text[96];
+				const double done = (double)snapshot.mBytesDone / (1024.0 * 1024.0);
+				if (snapshot.mBytesTotal > 0)
+					snprintf(text, sizeof(text), "Downloading... %.1f of %.1f MB (%d%%)", done, (double)snapshot.mBytesTotal / (1024.0 * 1024.0), (int)(100.0 * snapshot.mBytesDone / snapshot.mBytesTotal));
+				else
+					snprintf(text, sizeof(text), "Downloading... %.1f MB", done);
+				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), text, 5, white);
+				py += 10;
 			}
-			else
+			else if (snapshot.mState == SelfUpdater::State::VERIFYING)
 			{
-				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "You're using the latest version", 5, Color(0.8f, 1.0f, 0.8f, alpha));
+				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Checking the download (SHA-256)...", 5, white);
+				py += 10;
+			}
+			else if (snapshot.mState == SelfUpdater::State::STAGING)
+			{
+				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Unpacking the update...", 5, white);
+				py += 10;
+			}
+			else if (snapshot.mState == SelfUpdater::State::READY_TO_INSTALL)
+			{
+				printWrapped("Downloaded and checked. Installing closes the game and starts it again.", green, 2);
+			}
+			else if (snapshot.mState == SelfUpdater::State::INSTALLING)
+			{
+				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Closing the game...", 5, white);
+				py += 10;
+			}
+			if (!snapshot.mNotes.empty() && snapshot.mState == SelfUpdater::State::UPDATE_AVAILABLE)
+			{
+				py += 2;
+				drawer.printText(global::mOxyfontSmall, Recti(baseX - 100, py, 0, 10), "What's new:", 4, white);
+				py += 11;
+				printWrapped(snapshot.mNotes, Color(0.85f, 0.85f, 1.0f, alpha), 6);
 			}
 			break;
 		}
+
+		case SelfUpdater::State::FAILED:
+		case SelfUpdater::State::OLDER_THAN_CURRENT:
+		case SelfUpdater::State::CANCELLED:
+		case SelfUpdater::State::DISABLED:
+			printWrapped(snapshot.mMessage, (snapshot.mState == SelfUpdater::State::FAILED) ? red : white, 5);
+			break;
+
 		default:
-		{
 			drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Ready to check for updates", 5, Color(0.8f, 0.8f, 0.8f, alpha));
+			py += 10;
 			break;
-		}
 	}
-	py += 20;
 
-	const bool useTextUpdateLink = updateCheck.hasUpdate();
-	if (mTextUpdateLink != useTextUpdateLink)
+	if (!snapshot.mLastResult.empty() && snapshot.mState != SelfUpdater::State::DOWNLOADING)
 	{
-		mTextUpdateLink = useTextUpdateLink;
-		mText = useTextUpdateLink ? "Open download page" : "Check for updates";
+		printWrapped("Last update: " + snapshot.mLastResult, Color(0.7f, 0.7f, 0.7f, alpha), 2);
 	}
+	py += 10;
 
+	mText = updater.getButtonText();
 	OptionsMenuEntry::renderEntry(renderContext);
 }
 

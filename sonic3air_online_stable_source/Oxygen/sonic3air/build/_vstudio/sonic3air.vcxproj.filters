@@ -139,6 +139,9 @@
     <ClCompile Include="..\..\source\sonic3air\client\GameClient.cpp">
       <Filter>client</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\sonic3air\client\SelfUpdater.cpp">
+      <Filter>client</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\sonic3air\client\UpdateCheck.cpp">
       <Filter>client</Filter>
     </ClCompile>
@@ -282,6 +285,12 @@
       <Filter>menu\options</Filter>
     </ClInclude>
     <ClInclude Include="..\..\source\sonic3air\client\GameClient.h">
+      <Filter>client</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\source\sonic3air\client\SelfUpdateCore.h">
+      <Filter>client</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\source\sonic3air\client\SelfUpdater.h">
       <Filter>client</Filter>
     </ClInclude>
     <ClInclude Include="..\..\source\sonic3air\client\UpdateCheck.h">

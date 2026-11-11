@@ -51,6 +51,21 @@ try {
     }
     if ($runtimeExitCode -ne 0) { throw "Stable online runtime checks returned exit code $runtimeExitCode" }
     $results.Add("PASS stable online runtime checks: join by code, join secret, failure reasons, network stress, four peers, reconnect, lobby, relay fallback, packaged game")
+
+    # Stage T: the in-game updater (install helper alone, the real game against a loopback server that plays GitHub, release.ps1 dry run and the real release zip).
+    # It runs last because its release dry run rebuilds the package with a test version and then puts the normal package back.
+    $updateScript = Join-Path $checksDir "run_update_checks.ps1"
+    $updateOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $updateScript 2>&1
+    $updateExitCode = $LASTEXITCODE
+    $updateOutput | ForEach-Object { Write-Output $_ }
+    $updateReport = Join-Path $checksDir "update_checks_report.txt"
+    if (Test-Path -LiteralPath $updateReport) {
+        foreach ($line in Get-Content -LiteralPath $updateReport) {
+            if ($line -match '^(PASS|FAIL)\s+') { $results.Add($line.Trim()) }
+        }
+    }
+    if ($updateExitCode -ne 0) { throw "Update checks (stage T) returned exit code $updateExitCode" }
+    $results.Add("PASS update checks: install helper, in-game updater against a loopback GitHub, release script, real release package")
 }
 catch {
     $results.Add("FAIL $($_.Exception.Message)")

@@ -12,6 +12,8 @@
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include "RelayCore.h"
+#include "rmxbase.h"
+#include "sonic3air/client/SelfUpdateCore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -943,6 +945,170 @@ namespace
 	}
 }
 
+namespace
+{
+	Json::Value parseJson(const std::string& text)
+	{
+		std::string errors;
+		return rmx::JsonHelper::loadFromMemory(std::vector<uint8>(text.begin(), text.end()), &errors);
+	}
+
+	// Self-update (the in-game updater): pure logic from SelfUpdateCore.h
+	void runSelfUpdateTests()
+	{
+		using namespace selfupdate;
+
+		// --- Versions ---
+		Version v;
+		report("update version: 1.2.3 is read", parseVersion("1.2.3", v) && v.mPart[0] == 1 && v.mPart[1] == 2 && v.mPart[2] == 3);
+		report("update version: a leading v and a trailing line break are allowed", parseVersion("v10.0.7\r\n", v) && v.mPart[0] == 10 && v.mPart[2] == 7);
+		bool allBadRejected = true;
+		for (const char* bad : { "", " ", "1", "1.2", "1.2.3.4", "1.2.3-beta", "1.2.3+5", "a.b.c", "1..3", ".1.2", "1.2.", "-1.2.3", "1.2.-3", "100000.0.0", "1.2.3 4", "v", "vv1.2.3", "1,2,3", "0x1.2.3" })
+		{
+			if (parseVersion(bad, v))
+				allBadRejected = false;
+		}
+		report("update version: malformed version strings are rejected", allBadRejected);
+		Version a, b;
+		parseVersion("1.2.9", a); parseVersion("1.2.10", b);
+		report("update version: 1.2.10 is newer than 1.2.9 (numbers, not text)", compareVersions(b, a) > 0 && compareVersions(a, b) < 0);
+		parseVersion("1.9.9", a); parseVersion("1.10.0", b);
+		report("update version: 1.10.0 is newer than 1.9.9", compareVersions(b, a) > 0);
+		parseVersion("2.0.0", a); parseVersion("1.99.99", b);
+		report("update version: 2.0.0 is newer than 1.99.99", compareVersions(a, b) > 0);
+		parseVersion("1.2.3", a); parseVersion("v1.2.3", b);
+		report("update version: equal versions compare equal", compareVersions(a, b) == 0);
+		Version older, same, newer, invalid;
+		parseVersion("1.0.0", older); parseVersion("1.1.0", same); parseVersion("1.2.0", newer);
+		report("update decision: newer release is offered", decide(same, newer) == Decision::UPDATE_AVAILABLE);
+		report("update decision: the same version is up to date", decide(same, same) == Decision::UP_TO_DATE);
+		report("update decision: an older release is never offered (no downgrade)", decide(same, older) == Decision::OLDER_THAN_CURRENT);
+		report("update decision: an unreadable version is invalid", decide(same, invalid) == Decision::INVALID && decide(invalid, same) == Decision::INVALID);
+
+		// --- SHA-256 ---
+		report("update sha256: empty input", Sha256::hashHex("", 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+		report("update sha256: abc", Sha256::hashHex("abc", 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+		{
+			const std::string text = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+			report("update sha256: 56 byte message (padding edge)", Sha256::hashHex(text.data(), text.size()) == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+			Sha256 sha;
+			const std::string chunk(1000, 'a');
+			for (int i = 0; i < 1000; ++i)
+				sha.update(chunk.data(), chunk.size());
+			report("update sha256: one million 'a' in chunks", sha.finishHex() == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+			Sha256 streamed;
+			for (size_t i = 0; i < text.size(); i += 7)
+				streamed.update(text.data() + i, std::min<size_t>(7, text.size() - i));
+			report("update sha256: odd chunk sizes give the same hash as one piece", streamed.finishHex() == Sha256::hashHex(text.data(), text.size()));
+		}
+
+		// --- Zip-slip protection: names of an update package ---
+		std::string path;
+		bool isDirectory = false;
+		report("update path: a plain relative path is accepted", normalizeEntryPath("data/sprites/a.png", path, isDirectory) && path == "data/sprites/a.png" && !isDirectory);
+		report("update path: backslashes become slashes", normalizeEntryPath("data\\scripts\\a.lemon", path, isDirectory) && path == "data/scripts/a.lemon");
+		report("update path: a trailing slash marks a directory", normalizeEntryPath("Sonic3AIR_Online/data/", path, isDirectory) && isDirectory && path == "Sonic3AIR_Online/data");
+		bool allUnsafeRefused = true;
+		std::string firstAccepted;
+		const std::vector<std::string> unsafeNames = { "../evil.txt", "a/../../b", "..\\..\\evil", "a/..\\b", "..", "/abs/path", "\\abs\\path", "C:\\Windows\\x", "C:/x", "c:x", "D:", "a/b:stream", "a//b", "./a", "a/./b", "con", "data/NUL.txt", "COM1", "lpt9.bin", "a/b.", "a/b ", "a/ ", "", "/", std::string("a\x01") + "b", "x*y", "x?y", "x<y", "a|b", "//server/share/x", "....//x", "a/../b" };
+		for (const std::string& bad : unsafeNames)
+		{
+			if (normalizeEntryPath(bad, path, isDirectory))
+			{
+				allUnsafeRefused = false;
+				if (firstAccepted.empty())
+					firstAccepted = bad;
+			}
+		}
+		report("update path: absolute paths, drive letters, .., stream markers, device names and bad characters are all refused", allUnsafeRefused);
+		if (!allUnsafeRefused)
+			std::cout << "     (accepted by mistake: " << firstAccepted << ")\n";
+		report("update path: an over-long name is refused", !normalizeEntryPath(std::string(300, 'a'), path, isDirectory));
+
+		// --- Things an update must never carry ---
+		report("update forbidden: saves, states, savedata and mods folders", isForbiddenPackagePath("saves/save1.sav", 10) && isForbiddenPackagePath("data/States/x.state", 10) && isForbiddenPackagePath("savedata/a", 1) && isForbiddenPackagePath("mods/MyMod/mod.json", 10));
+		report("update forbidden: user settings and active mods", isForbiddenPackagePath("settings.json", 10) && isForbiddenPackagePath("Settings_global.json", 10) && isForbiddenPackagePath("active-mods.json", 10));
+		report("update forbidden: the test marker and test fixtures", isForbiddenPackagePath("testhooks.enabled", 1) && isForbiddenPackagePath("harness/ChecksHarness/mod.json", 1) && isForbiddenPackagePath("x/PartyHarness/a", 1));
+		report("update forbidden: ROM-like files", isForbiddenPackagePath("Sonic_Knuckles_wSonic3.bin", 10) && isForbiddenPackagePath("rom.gen", 1) && isForbiddenPackagePath("rom.SMD", 1) && isForbiddenPackagePath("a.md", 1) && isForbiddenPackagePath("data/big.bin", 600 * 1024));
+		report("update allowed: the game's own files", !isForbiddenPackagePath("Sonic3AIR.exe", 100000000) && !isForbiddenPackagePath("data/audio.bin", 1000) && !isForbiddenPackagePath("bundled_mods/DropInCoop/mod.json", 100) && !isForbiddenPackagePath("scripts/main_gameapp.lemon", 100) && !isForbiddenPackagePath("README_ONLINE.txt", 10) && !isForbiddenPackagePath("config.json", 10) && !isForbiddenPackagePath("version.txt", 5));
+		report("update: config.json is kept if it exists, nothing else is", isKeepIfExistsPath("config.json") && isKeepIfExistsPath("Config.JSON") && !isKeepIfExistsPath("data/config.json") && !isKeepIfExistsPath("Sonic3AIR.exe"));
+		report("update: the single top folder of a package is stripped", stripPackageFolder("Sonic3AIR_Online/data/a.txt", true) == "data/a.txt" && stripPackageFolder("other/a.txt", true).empty() && stripPackageFolder("data/a.txt", false) == "data/a.txt");
+
+		// --- Addresses ---
+		Endpoints production;
+		Endpoints test;
+		test.mApiBase = "http://127.0.0.1:34567";
+		test.mTestMode = true;
+		Endpoints testWithoutFlag;
+		testWithoutFlag.mApiBase = "http://127.0.0.1:34567";
+		Endpoints evil;
+		evil.mApiBase = "https://api.github.com.evil.example";
+		report("update address: the public GitHub API is accepted", isAcceptedApiBase(production));
+		report("update address: a loopback test server is accepted only in test mode", isAcceptedApiBase(test) && !isAcceptedApiBase(testWithoutFlag) && !isAcceptedApiBase(evil));
+		const std::string repo = "owner/repo";
+		report("update address: the release download of the repository is accepted", isAcceptedAssetUrl("https://github.com/owner/repo/releases/download/v1.2.3/Sonic3AIR_Online.zip", repo, production));
+		bool badUrlsRefused = true;
+		const std::vector<std::string> badUrls = { "http://github.com/owner/repo/releases/download/v1/x.zip", "https://github.com/other/repo/releases/download/v1/x.zip", "https://github.com.evil.com/owner/repo/releases/download/v1/x.zip", "https://github.com@evil.com/owner/repo/releases/download/v1/x.zip", "https://evil.com/owner/repo/releases/download/v1/x.zip", "https://github.com/owner/repo/releases/download/../../x.zip", "https://github.com/owner/repo/archive/main.zip", "https://github.com:8443/owner/repo/releases/download/v1/x.zip", "https://objects.githubusercontent.com/x.zip", "ftp://github.com/owner/repo/releases/download/v1/x.zip", "https://github.com/owner/repo/releases/download/v1/x y.zip", "https://github.com\\@evil.com/owner/repo/releases/download/x", "file:///c:/x" };
+		for (const std::string& bad : badUrls)
+		{
+			if (isAcceptedAssetUrl(bad, repo, production))
+				badUrlsRefused = false;
+		}
+		report("update address: other hosts, http, user info, other repositories and path tricks are refused", badUrlsRefused);
+		report("update address: a loopback asset is accepted only in test mode and only on the same port", isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, test) && !isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, production) && !isAcceptedAssetUrl("http://127.0.0.1:34568/dl/a.zip", repo, test) && !isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, testWithoutFlag));
+		report("update address: repository names", isValidRepoName("TrickerNoxics14/sonic3-coop-mod") && !isValidRepoName("") && !isValidRepoName("owner") && !isValidRepoName("a/b/c") && !isValidRepoName("a/../b") && !isValidRepoName("a b/c") && !isValidRepoName("/b") && !isValidRepoName("a/"));
+
+		// --- Release information ---
+		const std::string goodUrl = "https://github.com/owner/repo/releases/download/v1.2.0/";
+		const std::string hash64(64, 'a');
+		auto releaseJson = [&](const std::string& tag, const std::string& assets, const std::string& extra = "")
+		{
+			return parseJson("{\"tag_name\":\"" + tag + "\",\"body\":\"Notes here\"" + extra + ",\"assets\":" + assets + "}");
+		};
+		const std::string goodAssets = "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":1000,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.zip\",\"digest\":\"sha256:" + hash64 + "\"},"
+			"{\"name\":\"Sonic3AIR_Online.manifest.json\",\"size\":200,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.manifest.json\"}]";
+		ReleaseInfo release;
+		std::string error;
+		report("update release: a good release is read (version, package, digest, manifest)",
+			parseRelease(releaseJson("v1.2.0", goodAssets), repo, production, release, error) && release.mVersion.mPart[1] == 2 && release.mPackageSize == 1000 && release.mPackageDigest == hash64 && release.mHasManifest && release.mNotes == "Notes here");
+		report("update release: a tag that is not a version is refused", !parseRelease(releaseJson("latest", goodAssets), repo, production, release, error) && !error.empty());
+		report("update release: a pre-release is refused", !parseRelease(releaseJson("v1.2.0", goodAssets, ",\"prerelease\":true"), repo, production, release, error));
+		report("update release: a release without the package is refused", !parseRelease(releaseJson("v1.2.0", "[]"), repo, production, release, error));
+		report("update release: a package from another host is refused",
+			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":1,\"browser_download_url\":\"https://evil.example/Sonic3AIR_Online.zip\"}]"), repo, production, release, error));
+		report("update release: a package that is too large is refused",
+			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":999999999999,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.zip\"}]"), repo, production, release, error));
+		report("update release: garbage instead of an object is refused", !parseRelease(parseJson("[1,2,3]"), repo, production, release, error) && !parseRelease(parseJson("not json"), repo, production, release, error));
+		report("update release: notes are plain ASCII without markup noise", sanitizeNotes("## Title\r\n**bold** `code` caf\xc3\xa9\n\n\n\n\nend") == " Title\nbold code caf??\n\nend");
+		report("update release: very long notes are shortened", sanitizeNotes(std::string(5000, 'x')).size() < 800);
+
+		// --- Which hash must the package have ---
+		Manifest manifest;
+		ExpectedPackage expected;
+		const std::string manifestOk = "{\"version\":\"1.2.0\",\"asset\":\"Sonic3AIR_Online.zip\",\"size\":1000,\"sha256\":\"" + hash64 + "\"}";
+		report("update manifest: a good manifest is read", parseManifest(parseJson(manifestOk), manifest, error) && manifest.mSize == 1000 && manifest.mSha256 == hash64);
+		report("update manifest: a hash that is not 64 hex digits is refused", !parseManifest(parseJson("{\"version\":\"1.2.0\",\"asset\":\"x\",\"size\":1,\"sha256\":\"abc\"}"), manifest, error) && !parseManifest(parseJson("{\"version\":\"1.2.0\"}"), manifest, error));
+		parseRelease(releaseJson("v1.2.0", goodAssets), repo, production, release, error);
+		parseManifest(parseJson(manifestOk), manifest, error);
+		report("update verify: manifest and digest agree, the hash to check is known", resolveExpectedPackage(release, &manifest, expected, error) && expected.mSha256 == hash64 && expected.mSize == 1000);
+		Manifest other = manifest;
+		other.mSha256 = std::string(64, 'b');
+		report("update verify: manifest and GitHub digest that disagree are refused", !resolveExpectedPackage(release, &other, expected, error));
+		other = manifest; other.mVersion = "1.1.0";
+		report("update verify: a manifest of another version is refused", !resolveExpectedPackage(release, &other, expected, error));
+		other = manifest; other.mAsset = "Other.zip";
+		report("update verify: a manifest for another file is refused", !resolveExpectedPackage(release, &other, expected, error));
+		other = manifest; other.mSize = 999;
+		report("update verify: a manifest with another size than the release is refused", !resolveExpectedPackage(release, &other, expected, error));
+		ReleaseInfo noDigest = release;
+		noDigest.mPackageDigest.clear();
+		report("update verify: the manifest alone is enough", resolveExpectedPackage(noDigest, &manifest, expected, error) && expected.mSha256 == hash64);
+		report("update verify: the GitHub digest alone is enough", resolveExpectedPackage(release, nullptr, expected, error) && expected.mSha256 == hash64);
+		report("update verify: without manifest and without digest nothing is installed", !resolveExpectedPackage(noDigest, nullptr, expected, error) && expected.mSha256.empty());
+		report("update http: status texts", describeHttpStatus(404, false).find("No release") != std::string::npos && describeHttpStatus(403, true).find("too many") != std::string::npos && describeHttpStatus(503, false).find("Try again") != std::string::npos);
+	}
+}
+
 int main()
 {
 	for (const std::string& line : NetplayCodes::runSelfTest())
@@ -1035,6 +1201,7 @@ int main()
 	Sockets::startupSockets();
 	runRelayTests();
 	Sockets::shutdownSockets();
+	runSelfUpdateTests();
 	report("test hooks are off by default (no marker file next to this test program)", !TestHooks::isEnabled() && TestHooks::getEnv("PATH") == nullptr);
 	report("LAN discovery finds a host with the matching session code", lanFound);
 	report("LAN discovery rejects a different session code", lanMismatchRejected);

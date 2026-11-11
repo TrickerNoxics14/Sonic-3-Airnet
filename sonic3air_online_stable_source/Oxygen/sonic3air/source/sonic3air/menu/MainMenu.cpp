@@ -147,6 +147,18 @@ void MainMenu::update(float timeElapsed)
 		}
 	}
 
+	// Test hook: open the options menu on the update entry right away (used by the automated screenshot check of the updater)
+	if (mState == State::SHOW && nullptr != TestHooks::getEnv("S3AIR_OPTIONS_OPEN"))
+	{
+		static bool optionsOpened = false;
+		if (!optionsOpened)
+		{
+			optionsOpened = true;
+			openOptions();
+			return;
+		}
+	}
+
 	// Don't react to input during transitions
 	if (mState == State::SHOW)
 	{

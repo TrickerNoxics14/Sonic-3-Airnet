@@ -103,6 +103,38 @@ IF SOMETHING GOES WRONG
   codes, not with IP join codes.
 
 
+UPDATES (Options > System > Update > Check for updates)
+--------------------------------------------------------
+Everybody who plays together needs the same version. The game can update itself from the releases of its GitHub repository:
+  1. Options > System > Update > "Check for updates". The game asks GitHub once for the latest release and shows your version, the
+     latest version and the release notes. Nothing is contacted before you press that button, and nothing is downloaded before
+     you press "Update now".
+  2. "Update now" downloads the package, checks its SHA-256 against the manifest of the release (and against GitHub's own checksum if
+     it shows one), and unpacks it into a staging folder. A package with unsafe file names (a file that would land outside the
+     game folder), or with saves, settings, ROM files or test files in it, is refused as a whole. You can cancel at any time.
+  3. Then the button says "Close the game and install". The game closes, update_helper.ps1 (the one that came with your current
+     version, not anything from the download) waits for the game to exit, backs up every file it replaces, copies the new files over,
+     installs the co-op mod into %APPDATA%\Sonic3AIR\mods\DropInCoop, and starts the new game. If anything fails it puts every file
+     back and starts the old game again. The message is shown under the button ("Last update: ...") and kept in
+     %APPDATA%\Sonic3AIR\update\last_result.txt; the log is update\update_log.txt and update\helper_log.txt in the same folder.
+  What an update never touches: your saves, save states, settings.json, the mods you installed yourself, your ROM, and
+  config.json (kept as it is). Files that are not part of the package stay. One backup (the one before the last update) is kept in
+  %APPDATA%\Sonic3AIR\update\backup\ .
+  What it does not do: go back to an older version (if the latest release is older than yours, it says so and stops), update
+  without your click, or install a package that does not match its checksum.
+  Limits worth knowing:
+  - The checksum comes from the same GitHub page as the package. It protects against a broken or tampered download, not against
+    somebody who controls the GitHub repository (the updates are not signed).
+  - The repository is read from settings.json (section Online, UpdateRepo; default TrickerNoxics14/sonic3-coop-mod). GitHub only
+    lets friends download release files if the releases are PUBLIC. While the repository is private, the check says that no release
+    was found and nobody except the owner can update this way. A separate public repository for the releases only is the usual fix.
+  - If the game lies in a folder you cannot write to (for example Program Files) the update says so and does not start. A copy of the
+    game without version.txt (a development build) has the updater switched off.
+  - GitHub allows only a limited number of anonymous requests per hour from one network. The game says so if you hit it.
+  - The stock "Check for updates" of Sonic 3 A.I.R. (which asks sonic3air.org about the STOCK game and offers its download page)
+    is switched off in this fork; it would have reported updates for a different program.
+  For the person who publishes a release: checks\release.ps1 -Version x.y.z -Notes "..." (see the comments in that script).
+
 NOTES
 -----
 - Each player has their own rings and score. Getting hit only takes away your own rings.

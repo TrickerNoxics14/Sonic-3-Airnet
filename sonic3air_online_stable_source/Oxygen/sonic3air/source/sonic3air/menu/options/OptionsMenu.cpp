@@ -7,6 +7,7 @@
 */
 
 #include "sonic3air/pch.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "sonic3air/menu/options/OptionsMenu.h"
 #include "sonic3air/menu/options/ControllerSetupMenu.h"
 #include "sonic3air/menu/options/OptionsMenuEntries.h"
@@ -16,6 +17,7 @@
 #include "sonic3air/menu/SharedResources.h"
 #include "sonic3air/audio/AudioOut.h"
 #include "sonic3air/ConfigurationImpl.h"
+#include "sonic3air/client/SelfUpdater.h"
 #include "sonic3air/Game.h"
 
 #include "oxygen/application/Application.h"
@@ -315,6 +317,24 @@ void OptionsMenu::onFadeIn()
 
 	AudioOut::instance().setMenuMusic(0x2f);
 	mPlayingSoundTest = nullptr;
+
+	// Test hook of the automated checks: show the System tab with the update entry selected (for a picture of the updater's texts)
+	if (nullptr != TestHooks::getEnv("S3AIR_OPTIONS_OPEN") && mTabMenuEntries[0].mOptions[Tab::Id::SYSTEM].mVisible)
+	{
+		mTabMenuEntries[0].mSelectedIndex = Tab::Id::SYSTEM;
+		mActiveTab = Tab::Id::SYSTEM;
+		mActiveTabAnimated = (float)mActiveTab;
+		GameMenuEntries& entries = mTabs[mActiveTab].mMenuEntries;
+		for (int i = 0; i < (int)entries.size(); ++i)
+		{
+			if (entries[i].mData == option::_CHECK_FOR_UPDATE)
+			{
+				entries.mSelectedEntryIndex = i;
+				mActiveMenu = &entries;
+				break;
+			}
+		}
+	}
 }
 
 bool OptionsMenu::canBeRemoved()
@@ -672,17 +692,9 @@ void OptionsMenu::update(float timeElapsed)
 						}
 
 						case option::_CHECK_FOR_UPDATE:
-						case option::RELEASE_CHANNEL:
 						{
-							UpdateCheck& updateCheck = GameClient::instance().getUpdateCheck();
-							if (updateCheck.hasUpdate())
-							{
-								PlatformFunctions::openURLExternal(updateCheck.getResponse()->mUpdateInfoURL.empty() ? "https://sonic3air.org" : updateCheck.getResponse()->mUpdateInfoURL);
-							}
-							else
-							{
-								updateCheck.startUpdateCheck();
-							}
+							// The fork's own updater (releases of its GitHub repository); the stock check of sonic3air.org is not used
+							SelfUpdater::instance().onMenuButton();
 							break;
 						}
 
@@ -1105,11 +1117,8 @@ void OptionsMenu::createOptionMenuEntry(GameMenuEntries& entries, const OptionsC
 	{
 		case option::_CHECK_FOR_UPDATE:
 		{
+			// No release channel selector: the stock channels (stable, preview, test) mean nothing for the fork
 			entries.addEntry<UpdateCheckMenuEntry>().initEntry(setting.mName, option::_CHECK_FOR_UPDATE);
-			entries.addEntry<OptionsMenuEntry>()
-				.setUseSmallFont(true)
-				.initEntry("", option::RELEASE_CHANNEL)
-				.addOptions(setting);
 			break;
 		}
 

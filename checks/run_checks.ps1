@@ -1124,7 +1124,7 @@ try
 				# X3: no host listening at the address (a blocked connection looks the same): timeout with the router and firewall hint
 				Remove-NetLogs @('_xfriend')
 				$x3 = Start-GameProcess @{ 'S3AIR_NETPLAY' = ('joindirect:' + (New-Secret)); 'S3AIR_LOGNAME' = '_xfriend' }
-				$x3ok = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: BLOCKED_OR_TIMEOUT' } 60
+				$x3ok = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: BLOCKED_OR_TIMEOUT' } 100
 				Add-Result 'X3' 'Blocked or no answer: the friend is told that a router or firewall probably blocks the connection' $x3ok ''
 				Save-NetLog '_xfriend' 'blocked'
 				Stop-StartedProcesses

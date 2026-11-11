@@ -196,3 +196,22 @@ Offline core tests (about 30 new lines starting with "relay"): the wire format a
 | Y4 | The real relay program (s3air_relay.exe) attacked over the loopback: register and join, data both ways, wrong keys get no answer and 8 block an address, a flood of 40000 datagrams is rate limited, it keeps serving afterwards, garbage / oversized / truncated datagrams do not crash it |
 
 Limits: everything on one computer. "Direct path blocked" is a proxy that drops all datagrams, not a real strict NAT; the relay ran on 127.0.0.1, so the extra delay of a real detour through a server was not measured. The fallback after "the game server did not answer" and "the server does not know the code" is in the code but has no runtime test (the test switch that drops all of one game's UDP traffic would also drop the relay's). Direct IP join codes never use the relay. Nobody hosts a relay: no server was deployed, and the public matchmaking server protocol was not touched.
+
+## In-game updater and releases (2026-11-11, stage E)
+
+Run with `checks\run_update_checks.ps1` (part of `run_online_backend_checks.ps1`, runs last). Offline core tests: about 55 lines starting with "update" (versions, SHA-256 test vectors, zip-slip names, forbidden content, addresses, release JSON, manifest and digest rules).
+
+| Stage | What it proves |
+| --- | --- |
+| H1-H11 | The install helper alone on throw-away folders: installs, deletes stale files, keeps saves/settings/user mods/config.json, backup; rollback after a really locked file, after the game files and after the mods; locked program file; tampered staging; unsafe path; protected files skipped; waits for the game process; no deletions without a list |
+| T4-T5 | Same version and older release: nothing is downloaded (no downgrade) |
+| T6-T7 | No network, rate limit, 404 (private repository), server error, garbage answer: plain messages, game folder untouched |
+| T2 | Wrong SHA-256, manifest and digest that disagree, no manifest and no digest: nothing unpacked or installed |
+| T3 | Zip-slip (.., absolute, drive letter, backslashes), saves/settings in the package, no program file, wrong version inside: refused, nothing written outside the staging folder |
+| T8-T9 | Partial download and cancel: leftovers deleted, nothing installed |
+| T12 | Build without version.txt: updater off, server not asked |
+| T1 | Happy path with the real game: check, download through a 302 redirect, SHA-256, unpack, helper, new files in, stale file gone, saves/config/mods untouched, backup kept, new game starts and says "up to date" |
+| R1 | `release.ps1 -DryRun`: refuses a dirty tree and a bad version, builds, writes zip + .sha256 + manifest, creates no tag, no save/ROM/settings/test marker in the zip |
+| R2 | The real release zip (about 134 MB) installed by the real updater over an older copy: every file equal byte for byte |
+
+Limits: the server is a loopback program that imitates GitHub (JSON shape, `digest` field, 302 redirect), not GitHub itself; HTTPS, certificate checks and the real CDN redirect were not exercised (the code only follows https redirects to github.com / githubusercontent.com in normal mode, but that path was only unit tested). Nothing was published. The Options menu entry was built but only exercised through the test switch (see the handoff).

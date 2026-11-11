@@ -208,3 +208,53 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Fix: the line is logged at the top of the function, before the optional restriction
 - Guard: Y2b
 - Lesson: log the outcome where every route passes (same as test-pins-internal-path).
+
+## 2026-11-11 · detached-child-never-ran · cpp
+- Seed: SelfUpdater::installNow started powershell.exe with CREATE_NO_WINDOW | DETACHED_PROCESS; the game closed and nothing was installed, the helper did not even write its first log line (run_update_checks T1b: empty result)
+- Broken assumption: a console program that must outlive the game should be detached from every console
+- Root cause: PowerShell needs a console (a hidden one is enough); with DETACHED_PROCESS it exits silently
+- Search: `grep -rn "CreateProcess" sonic3air oxygenengine --include=*.cpp` (only this call starts a console tool)
+- Fix: CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP; the game also logs the exact command line
+- Guard: T1b-T1e (the helper must write its result and the new game must start)
+- Lesson: after launching a helper, check for a sign of life it writes itself; "started" only means the process was created.
+
+## 2026-11-11 · rollback-restores-what-never-changed · powershell
+- Seed: update_helper.ps1 added every file to the "changed" list BEFORE overwriting it; when the overwrite failed (file open elsewhere) the rollback tried to copy the backup over that same locked file, failed, and reported "rollback incomplete" although nothing needed restoring (run_update_checks H2a: exit 2 instead of 1)
+- Broken assumption: everything on the rollback list was really modified
+- Fix: Restore-Everything skips a file that already equals its backup (Test-SameFile); a file that cannot be read at all still counts as a problem
+- Siblings: the added-files list is safe (removing a file that was never created is a no-op); the mods folder restore replaces the whole folder
+- Guard: H2a (real lock, not simulated), H3/H4 (failure injected after the files / after the mods)
+- Lesson: a journal written before the action must be undone only as far as the action got, or the undo must be idempotent and tolerant.
+
+## 2026-11-11 · helper-needs-module-autoload · powershell
+- Seed: update_helper.ps1 used Get-FileHash; started from a PowerShell 7 session (PSModulePath of 7 inherited by Windows PowerShell 5.1) it died with "Get-FileHash is not recognized", before changing anything
+- Broken assumption: the cmdlets of the utility module are always loadable in the helper's environment
+- Fix: SHA-256 through [System.Security.Cryptography.SHA256] (Get-Sha256Hex); no Get-FileHash left
+- Search: `grep -n "Get-FileHash" checks/package_files/update_helper.ps1` (none); the other scripts of checks\ run under the developer's own shell and are not shipped
+- Guard: the helper tests H1-H10 now pass from either shell
+- Lesson: a script shipped to players should depend on the language and the .NET base classes, not on modules that autoload.
+
+## 2026-11-11 · evil-test-name-collides-with-real-file · powershell
+- Seed: run_update_checks T3f used the file name "settings.json" for the forbidden entry and then checked that no such file appeared in the data folder; the player's real settings.json is there, so a correct refusal failed the check
+- Broken assumption: the marker name of a "nothing escaped" check does not exist anywhere yet
+- Fix: unique marker names (evil_*.txt, settings_evil.json), which still match the forbidden-name rule
+- Guard: T3a-T3f
+- Lesson: a "did not appear" check needs a name that cannot exist beforehand.
+
+## 2026-11-11 · std-name-clash-by-adl · cpp
+- Seed: a helper function named `quoted(const std::wstring&)` in an anonymous namespace was shadowed by std::quoted through argument-dependent lookup, giving an unreadable operator<< error
+- Fix: renamed to quotePath
+- Lesson: do not name local helpers after standard library functions when the arguments are std types.
+
+## 2026-11-11 · stock-feature-answers-for-another-program · cpp
+- Seed: the stock "Check for updates" of Sonic 3 A.I.R. asks sonic3air.org whether a newer STOCK build exists (build number 26.03.28.0) and offers the stock download page. In this fork it would show a wrong "Update available" and send friends to a program that has no online co-op
+- Fix: UpdateCheck::startUpdateCheck() is inert (compile time constant ENABLE_STOCK_UPDATE_CHECK = false), the options entry and its release channel selector now belong to SelfUpdater; nothing ever installed the stock game (the stock check only ever opened a web page)
+- Siblings: the remastered soundtrack download (RemasteredMusicDownload) uses the same server but only downloads audio on the player's click; the game server (gameserver.sonic3air.org) is still used for matchmaking and ghost sync, not for updates
+- Lesson: when forking, list every feature that talks to the upstream project and decide for each what it should say about the fork.
+
+## 2026-11-11 · wait-window-equals-the-timeout · powershell
+- Seed: run_checks.ps1 X3 waited 60 s for the friend to give up (BLOCKED_OR_TIMEOUT); the game needs about 50 s for that plus 10 s of start-up, so on a slower moment of the machine the check failed twice in a row although the game behaved as designed (measured: 63 s from process start)
+- Broken assumption: the check's wait window is longer than the thing it waits for
+- Fix: the window is 100 s
+- Siblings: the other X checks wait 60-80 s for events that take about 15-25 s; W/Y waits have large margins
+- Lesson: a wait window must be a multiple of the measured time, not the design value; a check that sits on the edge fails only on busy days.

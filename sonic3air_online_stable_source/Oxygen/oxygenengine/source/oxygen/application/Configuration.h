@@ -238,6 +238,9 @@ public:
 	// Only if both the host and the friend have the same relay set, players whose direct connection fails can still play, through the relay (more lag).
 	std::string mOnlineRelayServer;
 
+	// Online fork: the GitHub repository (owner/name) the in-game updater asks for releases (public REST API, releases/latest).
+	std::string mOnlineUpdateRepo = "TrickerNoxics14/sonic3-coop-mod";
+
 	// Internal
 	bool mForceCompileScripts = false;
 	int mScriptOptimizationLevel = -1;		// -1: Auto, 0: No optimization at all, up to 3: Full optimization

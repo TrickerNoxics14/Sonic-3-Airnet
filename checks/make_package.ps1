@@ -3,6 +3,7 @@
 #   Sonic3AIR_Online.zip
 # Excluded on purpose: saves, compiled script caches, save states, developer test mods and the ROM.
 
+param([string]$Version = "")		# x.y.z: written into the package as version.txt (release.ps1 passes it); without it the package is an unversioned development build, and its updater stays off
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -48,6 +49,12 @@ Set-Content -Path (Join-Path $out "config.json") -Value $config -Encoding utf8
 
 # Readme and the co-op mod, which the game installs by itself at start
 Copy-Item (Join-Path $root "checks\package_files\README_ONLINE.txt") $out
+# The in-game updater (Options > Check for updates) starts this script to install a downloaded update. It lies in the game folder, so what runs is what was installed earlier, never what was downloaded.
+Copy-Item (Join-Path $root "checks\package_files\update_helper.ps1") $out
+if ($Version -ne "") {
+	if ($Version -notmatch '^\d{1,5}\.\d{1,5}\.\d{1,5}$') { throw "Version must look like 1.2.3, got: $Version" }
+	Set-Content -LiteralPath (Join-Path $out "version.txt") -Value $Version -Encoding ascii -NoNewline
+}
 # The optional relay server: how to run one, and its source (a program for somebody who hosts a server; nothing in the game starts it, and no relay is deployed by us)
 Copy-Item (Join-Path $root "checks\package_files\DEPLOY_RELAY.txt") $out
 $relaySourceOut = Join-Path $out "relay_server_source"

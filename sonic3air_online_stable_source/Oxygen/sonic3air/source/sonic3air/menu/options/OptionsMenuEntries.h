@@ -106,8 +106,6 @@ class UpdateCheckMenuEntry : public OptionsMenuEntry
 public:
 	void renderEntry(RenderContext& renderContext) override;
 
-private:
-	bool mTextUpdateLink = false;
 };
 
 

@@ -8,6 +8,7 @@
 
 #include "sonic3air/pch.h"
 #include "sonic3air/Game.h"
+#include "sonic3air/client/SelfUpdater.h"
 #include "sonic3air/ConfigurationImpl.h"
 #include "sonic3air/audio/AudioOut.h"
 #include "sonic3air/data/SharedDatabase.h"
@@ -100,6 +101,7 @@ void Game::update(float timeElapsed)
 {
 	// Update game client
 	mGameClient.updateClient(timeElapsed);
+	SelfUpdater::instance().update();
 	mCrowdControlClient.updateConnection(timeElapsed);
 
 	// Update sprite redirects (like input icons)

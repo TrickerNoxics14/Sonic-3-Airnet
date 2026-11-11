@@ -19,6 +19,9 @@
 
 namespace
 {
+	// Never switch this on in the online fork (see startUpdateCheck)
+	constexpr bool ENABLE_STOCK_UPDATE_CHECK = false;
+
 	const char* getPlatformName()
 	{
 	#if defined(PLATFORM_WINDOWS)
@@ -77,6 +80,11 @@ const network::AppUpdateCheckRequest::Response* UpdateCheck::getResponse() const
 
 void UpdateCheck::startUpdateCheck()
 {
+	// The online fork does not ask sonic3air.org whether a newer STOCK game exists: that answer would be about a different program (and its download page
+	// is the stock game). The fork's own update check is SelfUpdater (releases of the fork's GitHub repository). Nothing calls this any more; it stays inert.
+	if (!ENABLE_STOCK_UPDATE_CHECK)
+		return;
+
 	EngineServerClient& engineServerClient = EngineServerClient::instance();
 	if (!engineServerClient.isConnected())
 	{
