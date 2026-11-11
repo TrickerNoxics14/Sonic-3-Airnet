@@ -7,7 +7,7 @@ Run the local co-op audit with one command (close Sonic 3 A.I.R. first):
 Options:
 
 - `-Build`: compile the engine first (a few minutes), then package and check.
-- `-Package`: rebuild the release package (`Sonic3AIR_Online.zip`) from the current build and scripts, then check.
+- `-Package`: rebuild the release package (`Sonic3Airnet.zip`) from the current build and scripts, then check.
 - `-Quick`: only the static checks (A, B) and the engine self test (C). No game windows.
 - `-Only D`, `-Only E F` and so on: only some of the game stages.
 - `-Only Z`: run the AIZ zip-line P2-view regression with a framebuffer capture.

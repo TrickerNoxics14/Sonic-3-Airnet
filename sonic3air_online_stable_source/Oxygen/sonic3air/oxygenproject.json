@@ -1,8 +1,8 @@
 {
 	// Metadata
 	"Identifier": "Sonic3AIR",
-	"ShortName":  "Sonic 3 A.I.R.",
-	"FullName":   "Sonic 3 - Angel Island Revisited",
+	"ShortName":  "Sonic 3 AirNet",
+	"FullName":   "Sonic 3 AirNet",
 
 	// ROM
 	"Rom":        "___internal/Sonic_Knuckles_wSonic3.bin",

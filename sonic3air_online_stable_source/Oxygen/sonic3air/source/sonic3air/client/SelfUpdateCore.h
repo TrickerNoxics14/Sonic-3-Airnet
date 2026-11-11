@@ -488,8 +488,8 @@ namespace selfupdate
 	// ------------------------------------------------------------------------------------------------------------------------
 	// Release information (GitHub REST API, GET /repos/{owner}/{repo}/releases/latest) and the manifest asset
 	// ------------------------------------------------------------------------------------------------------------------------
-	static const char* const PACKAGE_ASSET_NAME = "Sonic3AIR_Online.zip";
-	static const char* const MANIFEST_ASSET_NAME = "Sonic3AIR_Online.manifest.json";
+	static const char* const PACKAGE_ASSET_NAME = "Sonic3Airnet.zip";
+	static const char* const MANIFEST_ASSET_NAME = "Sonic3Airnet.manifest.json";
 	static const uint64_t MAX_PACKAGE_SIZE = 700ull * 1024 * 1024;
 	static const uint64_t MAX_MANIFEST_SIZE = 64 * 1024;
 
@@ -713,12 +713,12 @@ namespace selfupdate
 		return true;
 	}
 
-	// The update package must lie in a single top folder "Sonic3AIR_Online/" or directly at the root. Returns the path without that folder, or empty if the entry is outside it.
+	// The update package must lie in a single top folder "Sonic3Airnet/" or directly at the root. Returns the path without that folder, or empty if the entry is outside it.
 	inline std::string stripPackageFolder(const std::string& normalizedPath, bool hasTopFolder)
 	{
 		if (!hasTopFolder)
 			return normalizedPath;
-		static const std::string PREFIX = "Sonic3AIR_Online/";
+		static const std::string PREFIX = "Sonic3Airnet/";
 		if (normalizedPath.size() > PREFIX.size() && normalizedPath.compare(0, PREFIX.size(), PREFIX) == 0)
 			return normalizedPath.substr(PREFIX.size());
 		return std::string();

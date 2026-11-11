@@ -1,4 +1,4 @@
-Sonic 3 A.I.R. online play: the optional relay server
+Sonic 3 AirNet online play: the optional relay server
 ======================================================
 
 WHAT IT IS FOR

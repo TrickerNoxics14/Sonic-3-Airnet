@@ -239,7 +239,7 @@ public:
 	std::string mOnlineRelayServer;
 
 	// Online fork: the GitHub repository (owner/name) the in-game updater asks for releases (public REST API, releases/latest).
-	std::string mOnlineUpdateRepo = "TrickerNoxics14/sonic3-coop-mod";
+	std::string mOnlineUpdateRepo = "TrickerNoxics14/Sonic-3-Airnet";
 
 	// Internal
 	bool mForceCompileScripts = false;

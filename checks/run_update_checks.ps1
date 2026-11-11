@@ -18,7 +18,7 @@ param(
 $ErrorActionPreference = "Stop"
 $checksDir = $PSScriptRoot
 $root = Split-Path -Parent $checksDir
-$packageDir = Join-Path $root "Sonic3AIR_Online"
+$packageDir = Join-Path $root "Sonic3Airnet"
 $helperSource = Join-Path $checksDir "package_files\update_helper.ps1"
 $serverScript = Join-Path $checksDir "update_test_server.ps1"
 $appdata = Join-Path $env:APPDATA "Sonic3AIR"
@@ -198,7 +198,7 @@ function Get-NewExeBytes
 # A good update package (the layout Compress-Archive makes: one top folder). $extra: more entries, $without: names (after the folder) to leave out
 function New-GoodPackageEntries([string]$version, $extra = @(), [string[]]$without = @())
 {
-	$prefix = "Sonic3AIR_Online/"
+	$prefix = "Sonic3Airnet/"
 	$configText = "// config of the new package`n" + [IO.File]::ReadAllText((Join-Path $packageDir "config.json"))
 	$entries = @(
 		@{ Name = $prefix + "Sonic3AIR.exe"; Bytes = (Get-NewExeBytes) },
@@ -255,7 +255,7 @@ function Publish-Release([string]$tag, $zipEntries, [string]$zipFile = "", [stri
 {
 	$files = Join-Path $script:serverRoot "files"
 	Get-ChildItem -LiteralPath $files -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse
-	$zipPath = Join-Path $files "Sonic3AIR_Online.zip"
+	$zipPath = Join-Path $files "Sonic3Airnet.zip"
 	if ($zipFile -ne "") { Copy-Item -LiteralPath $zipFile -Destination $zipPath } else { New-ZipFile $zipPath $zipEntries }
 	$realHash = Get-Sha256 $zipPath
 	$size = (Get-Item -LiteralPath $zipPath).Length
@@ -263,13 +263,13 @@ function Publish-Release([string]$tag, $zipEntries, [string]$zipFile = "", [stri
 	$manifestSha = if ($manifestHash -ne "") { $manifestHash } else { $digestHash }
 	$version = $tag.TrimStart('v')
 	$base = "http://127.0.0.1:" + $script:serverPort + "/dl/"
-	$assets = @(@{ name = "Sonic3AIR_Online.zip"; size = $size; browser_download_url = ($base + "Sonic3AIR_Online.zip") })
+	$assets = @(@{ name = "Sonic3Airnet.zip"; size = $size; browser_download_url = ($base + "Sonic3Airnet.zip") })
 	if ($withDigest) { $assets[0]["digest"] = "sha256:" + $digestHash }
 	if ($withManifest)
 	{
-		$manifestText = (@{ version = $version; asset = "Sonic3AIR_Online.zip"; size = $size; sha256 = $manifestSha } | ConvertTo-Json)
-		Set-Content -LiteralPath (Join-Path $files "Sonic3AIR_Online.manifest.json") -Value $manifestText -Encoding ascii
-		$assets += @{ name = "Sonic3AIR_Online.manifest.json"; size = $manifestText.Length; browser_download_url = ($base + "Sonic3AIR_Online.manifest.json") }
+		$manifestText = (@{ version = $version; asset = "Sonic3Airnet.zip"; size = $size; sha256 = $manifestSha } | ConvertTo-Json)
+		Set-Content -LiteralPath (Join-Path $files "Sonic3Airnet.manifest.json") -Value $manifestText -Encoding ascii
+		$assets += @{ name = "Sonic3Airnet.manifest.json"; size = $manifestText.Length; browser_download_url = ($base + "Sonic3Airnet.manifest.json") }
 	}
 	$api = @{ tag_name = $tag; name = $tag; draft = $false; prerelease = $false; body = $notes; assets = $assets }
 	Set-Content -LiteralPath (Join-Path $script:serverRoot "api_latest.json") -Value ($api | ConvertTo-Json -Depth 6) -Encoding ascii
@@ -584,20 +584,20 @@ function Invoke-GameChecks
 	Publish-Release "v1.1.0" $good -manifestHash (Get-BytesSha256 (Text-Bytes "manifest lies")) | Out-Null
 	Clear-ServerLog
 	$log = Invoke-Game $install "apply" $apiBase "FAILED:" 120
-	Add-Result "T2b" "A manifest and a GitHub digest that disagree stop the update before the big download starts" (($log -match "disagree") -and -not ((Get-ServerRequests) -match "/cdn/Sonic3AIR_Online.zip")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
+	Add-Result "T2b" "A manifest and a GitHub digest that disagree stop the update before the big download starts" (($log -match "disagree") -and -not ((Get-ServerRequests) -match "/cdn/Sonic3Airnet.zip")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
 	Publish-Release "v1.1.0" $good -withManifest $false -withDigest $false | Out-Null
 	Clear-ServerLog
 	$log = Invoke-Game $install "apply" $apiBase "FAILED:" 120
-	Add-Result "T2c" "A release without manifest and without digest cannot be verified and is not installed" (($log -match "cannot be verified") -and -not ((Get-ServerRequests) -match "/cdn/Sonic3AIR_Online.zip")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
+	Add-Result "T2c" "A release without manifest and without digest cannot be verified and is not installed" (($log -match "cannot be verified") -and -not ((Get-ServerRequests) -match "/cdn/Sonic3Airnet.zip")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
 
 	# T3: zip-slip and other content the update must refuse (every zip has the right hash, so only the content rules stop it)
 	$evilCases = @(
-		@("T3a", "path with .. climbing out of the folder", "evil_dotdot.txt", @(@{ Name = "Sonic3AIR_Online/../../evil_dotdot.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
+		@("T3a", "path with .. climbing out of the folder", "evil_dotdot.txt", @(@{ Name = "Sonic3Airnet/../../evil_dotdot.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
 		@("T3b", "absolute path", "evil_abs.txt", @(@{ Name = "/evil_abs.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
 		@("T3c", "drive letter", "evil_drive.txt", @(@{ Name = "C:/evil_drive.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
-		@("T3d", "backslash traversal", "evil_backslash.txt", @(@{ Name = "Sonic3AIR_Online\data\..\..\..\evil_backslash.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
-		@("T3e", "a save game and settings", "evil.sav", @(@{ Name = "Sonic3AIR_Online/saves/evil.sav"; Bytes = (Text-Bytes "evil") }), "refused: it contains"),
-		@("T3f", "a user settings file", "settings_evil.json", @(@{ Name = "Sonic3AIR_Online/settings_evil.json"; Bytes = (Text-Bytes "{}") }), "refused: it contains")
+		@("T3d", "backslash traversal", "evil_backslash.txt", @(@{ Name = "Sonic3Airnet\data\..\..\..\evil_backslash.txt"; Bytes = (Text-Bytes "evil") }), "unsafe file name"),
+		@("T3e", "a save game and settings", "evil.sav", @(@{ Name = "Sonic3Airnet/saves/evil.sav"; Bytes = (Text-Bytes "evil") }), "refused: it contains"),
+		@("T3f", "a user settings file", "settings_evil.json", @(@{ Name = "Sonic3Airnet/settings_evil.json"; Bytes = (Text-Bytes "{}") }), "refused: it contains")
 	)
 	foreach ($case in $evilCases)
 	{
@@ -659,7 +659,7 @@ function Invoke-GameChecks
 	{
 		$definite = "FAILED: (No release was found|GitHub says too many requests|The latest release has no)|update available|up to date"
 		$log = Invoke-Game $install "check" "" $definite 120 -repo "Eukaryot/sonic3air"
-		Add-Result "T14a" "The real api.github.com over HTTPS answers the updater (the stock game's public repository: JSON read, no Sonic3AIR_Online.zip there, so no update)" (($log -match "FAILED: The latest release has no") -or ($log -match "too many requests")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
+		Add-Result "T14a" "The real api.github.com over HTTPS answers the updater (the stock game's public repository: JSON read, no Sonic3Airnet.zip there, so no update)" (($log -match "FAILED: The latest release has no") -or ($log -match "too many requests")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
 		$log = Invoke-Game $install "check" "" $definite 120 -repo ""
 		Add-Result "T14b" "The default repository of the fork asked the real way (private today: GitHub answers 404 and the game explains it; once public with a release it finds it)" ($log -match $definite) (($log -split "`n" | Select-Object -Last 2) -join " | ")
 	}
@@ -680,11 +680,11 @@ function Invoke-GameChecks
 	$logAfter = Read-SharedText $script:updateLog
 	Stop-TestGames
 	$requests = Get-ServerRequests
-	Add-Result "T1a" "Happy path: update found, downloaded through the redirect, SHA-256 matched, unpacked, helper started, game closed" (($log -match "update available: 1\.1\.0") -and ($log -match "download verified") -and ($log -match "ready to install") -and ($log -match "install helper started") -and ($requests -match "GET /dl/Sonic3AIR_Online.zip 302") -and ($requests -match "GET /cdn/Sonic3AIR_Online.zip 200")) (($log -split "`n" | Select-Object -Last 3) -join " | ")
+	Add-Result "T1a" "Happy path: update found, downloaded through the redirect, SHA-256 matched, unpacked, helper started, game closed" (($log -match "update available: 1\.1\.0") -and ($log -match "download verified") -and ($log -match "ready to install") -and ($log -match "install helper started") -and ($requests -match "GET /dl/Sonic3Airnet.zip 302") -and ($requests -match "GET /cdn/Sonic3Airnet.zip 200")) (($log -split "`n" | Select-Object -Last 3) -join " | ")
 	Add-Result "T1b" "Happy path: the helper installed the new version (program file, version.txt, new and changed files, stale file gone)" ($installedOk -and ((Get-Sha256 (Join-Path $install "Sonic3AIR.exe")) -ne $oldExeHash) -and ((Get-Text (Join-Path $install "version.txt")) -eq "1.1.0") -and ((Get-Text (Join-Path $install "data\update_test_new.txt")) -like "a new file*") -and ((Get-Text (Join-Path $install "data\update_test_changed.txt")) -like "new content*") -and -not (Test-Path -LiteralPath (Join-Path $install "data\update_test_removed.txt"))) ("result: " + (Get-Text (Join-Path $updateDir "last_result.txt")))
 	Add-Result "T1c" "Happy path: the player's save, config.json, mod and own file in the game folder were not touched; the ROM and the saves of the data folder neither" (((Get-Sha256 (Join-Path $install "saves\precious.sav")) -eq $preciousBefore) -and ((Get-Sha256 (Join-Path $install "config.json")) -eq $configBefore) -and ((Get-Sha256 (Join-Path $install "data\my_user_file.txt")) -eq $userFilesBefore.Player) -and ((Get-Sha256 (Join-Path $install "mods\MyUserMod\mod.json")) -eq $userFilesBefore.Mod) -and ($romBefore -eq "" -or (Get-Sha256 $rom) -eq $romBefore) -and ($appdataSavesBefore -eq $(if (Test-Path -LiteralPath (Join-Path $appdata "saves")) { (Get-ChildItem -LiteralPath (Join-Path $appdata "saves") -Recurse -File | ForEach-Object { $_.FullName.Substring($appdata.Length) } | Sort-Object) -join "|" } else { "" }))) ""
 	Add-Result "T1d" "Happy path: a backup of the old program was kept, and the new game started by itself and reports it is up to date" ((Test-Path -LiteralPath (Join-Path $updateDir "backup\from_1.0.0_to_1.1.0\game\Sonic3AIR.exe")) -and ((Get-Sha256 (Join-Path $updateDir "backup\from_1.0.0_to_1.1.0\game\Sonic3AIR.exe")) -eq $oldExeHash) -and $restartedOk -and $running.Count -ge 1) ("restarted: " + $restartedOk + ", processes: " + $running.Count)
-	Add-Result "T1e" "Happy path: asking again right after the update says up to date, and nothing is downloaded a second time" ($restartedOk -and (([regex]::Matches($requests, "GET /cdn/Sonic3AIR_Online.zip 200")).Count -eq 1)) ""
+	Add-Result "T1e" "Happy path: asking again right after the update says up to date, and nothing is downloaded a second time" ($restartedOk -and (([regex]::Matches($requests, "GET /cdn/Sonic3Airnet.zip 200")).Count -eq 1)) ""
 	if (-not $KeepWork) { Reset-UpdateState }
 }
 
@@ -713,15 +713,15 @@ function Invoke-ReleaseChecks
 	$dry = Run-Release @("-Version", "99.0.0", "-Notes", "Dry run notes", "-DryRun", "-AllowDirty")
 	$releaseFolder = Join-Path $root "release\v99.0.0"
 	$tagsAfter = @(& git -C $root tag --list).Count
-	$zipPath = Join-Path $releaseFolder "Sonic3AIR_Online.zip"
-	$manifestPath = Join-Path $releaseFolder "Sonic3AIR_Online.manifest.json"
-	$shaPath = Join-Path $releaseFolder "Sonic3AIR_Online.zip.sha256"
+	$zipPath = Join-Path $releaseFolder "Sonic3Airnet.zip"
+	$manifestPath = Join-Path $releaseFolder "Sonic3Airnet.manifest.json"
+	$shaPath = Join-Path $releaseFolder "Sonic3Airnet.zip.sha256"
 	Add-Result "R1d" "release.ps1 -DryRun builds the package and ends with RELEASE DRY RUN OK, without creating a tag" (($dry.Code -eq 0) -and ($dry.Text -match "RELEASE DRY RUN OK") -and ($tagsBefore -eq $tagsAfter)) ("exit " + $dry.Code)
 	$manifestOk = $false
 	if ((Test-Path -LiteralPath $manifestPath) -and (Test-Path -LiteralPath $zipPath))
 	{
 		$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-		$manifestOk = ($manifest.version -eq "99.0.0") -and ($manifest.asset -eq "Sonic3AIR_Online.zip") -and ($manifest.size -eq (Get-Item -LiteralPath $zipPath).Length) -and ($manifest.sha256 -eq (Get-Sha256 $zipPath)) -and ((Get-Content -LiteralPath $shaPath -Raw).Trim() -eq ($manifest.sha256 + "  Sonic3AIR_Online.zip"))
+		$manifestOk = ($manifest.version -eq "99.0.0") -and ($manifest.asset -eq "Sonic3Airnet.zip") -and ($manifest.size -eq (Get-Item -LiteralPath $zipPath).Length) -and ($manifest.sha256 -eq (Get-Sha256 $zipPath)) -and ((Get-Content -LiteralPath $shaPath -Raw).Trim() -eq ($manifest.sha256 + "  Sonic3Airnet.zip"))
 	}
 	Add-Result "R1e" "The manifest (version, asset, size, sha256) and the .sha256 file match the zip" $manifestOk ""
 	$versionInZip = ""
@@ -778,7 +778,7 @@ function Invoke-ReleaseChecks
 	{
 		foreach ($entry in $archive.Entries)
 		{
-			$relative = ($entry.FullName.Replace('\', '/') -replace '^Sonic3AIR_Online/?', '')
+			$relative = ($entry.FullName.Replace('\', '/') -replace '^Sonic3Airnet/?', '')
 			if ($relative -eq '' -or $relative.EndsWith('/') -or $relative -ieq 'config.json') { continue }
 			$target = Join-Path $install ($relative.Replace('/', '\'))
 			if (-not (Test-Path -LiteralPath $target)) { $equal = $false; break }

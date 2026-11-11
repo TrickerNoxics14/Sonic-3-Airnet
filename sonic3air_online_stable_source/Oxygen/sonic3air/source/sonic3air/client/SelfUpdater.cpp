@@ -40,7 +40,7 @@ using namespace selfupdate;
 
 namespace
 {
-	const char* DEFAULT_REPO = "TrickerNoxics14/sonic3-coop-mod";
+	const char* DEFAULT_REPO = "TrickerNoxics14/Sonic-3-Airnet";
 	const char* const HELPER_SCRIPT_NAME = "update_helper.ps1";
 	const uint64_t MAX_TOTAL_UNPACKED = 1600ull * 1024 * 1024;
 	const size_t MAX_ENTRIES = 20000;
@@ -921,11 +921,11 @@ bool SelfUpdater::stagePackage(const fs::path& zipPath, const fs::path& stagingD
 		}
 	}
 
-	// A single top folder "Sonic3AIR_Online/" (how Compress-Archive packs it) is stripped
+	// A single top folder "Sonic3Airnet/" (how Compress-Archive packs it) is stripped
 	bool hasTopFolder = !entries.empty();
 	for (const ZipEntryInfo& entry : entries)
 	{
-		if (entry.mPath.compare(0, 17, "Sonic3AIR_Online/") != 0 && entry.mPath != "Sonic3AIR_Online")
+		if (entry.mPath.compare(0, 13, "Sonic3Airnet/") != 0 && entry.mPath != "Sonic3Airnet")
 			hasTopFolder = false;
 	}
 	std::vector<ZipEntryInfo> files;

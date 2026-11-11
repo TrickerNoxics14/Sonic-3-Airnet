@@ -1144,7 +1144,7 @@ namespace
 		bool isDirectory = false;
 		report("update path: a plain relative path is accepted", normalizeEntryPath("data/sprites/a.png", path, isDirectory) && path == "data/sprites/a.png" && !isDirectory);
 		report("update path: backslashes become slashes", normalizeEntryPath("data\\scripts\\a.lemon", path, isDirectory) && path == "data/scripts/a.lemon");
-		report("update path: a trailing slash marks a directory", normalizeEntryPath("Sonic3AIR_Online/data/", path, isDirectory) && isDirectory && path == "Sonic3AIR_Online/data");
+		report("update path: a trailing slash marks a directory", normalizeEntryPath("Sonic3Airnet/data/", path, isDirectory) && isDirectory && path == "Sonic3Airnet/data");
 		bool allUnsafeRefused = true;
 		std::string firstAccepted;
 		const std::vector<std::string> unsafeNames = { "../evil.txt", "a/../../b", "..\\..\\evil", "a/..\\b", "..", "/abs/path", "\\abs\\path", "C:\\Windows\\x", "C:/x", "c:x", "D:", "a/b:stream", "a//b", "./a", "a/./b", "con", "data/NUL.txt", "COM1", "lpt9.bin", "a/b.", "a/b ", "a/ ", "", "/", std::string("a\x01") + "b", "x*y", "x?y", "x<y", "a|b", "//server/share/x", "....//x", "a/../b" };
@@ -1169,7 +1169,7 @@ namespace
 		report("update forbidden: ROM-like files", isForbiddenPackagePath("Sonic_Knuckles_wSonic3.bin", 10) && isForbiddenPackagePath("rom.gen", 1) && isForbiddenPackagePath("rom.SMD", 1) && isForbiddenPackagePath("a.md", 1) && isForbiddenPackagePath("data/big.bin", 600 * 1024));
 		report("update allowed: the game's own files", !isForbiddenPackagePath("Sonic3AIR.exe", 100000000) && !isForbiddenPackagePath("data/audio.bin", 1000) && !isForbiddenPackagePath("bundled_mods/DropInCoop/mod.json", 100) && !isForbiddenPackagePath("scripts/main_gameapp.lemon", 100) && !isForbiddenPackagePath("README_ONLINE.txt", 10) && !isForbiddenPackagePath("config.json", 10) && !isForbiddenPackagePath("version.txt", 5));
 		report("update: config.json is kept if it exists, nothing else is", isKeepIfExistsPath("config.json") && isKeepIfExistsPath("Config.JSON") && !isKeepIfExistsPath("data/config.json") && !isKeepIfExistsPath("Sonic3AIR.exe"));
-		report("update: the single top folder of a package is stripped", stripPackageFolder("Sonic3AIR_Online/data/a.txt", true) == "data/a.txt" && stripPackageFolder("other/a.txt", true).empty() && stripPackageFolder("data/a.txt", false) == "data/a.txt");
+		report("update: the single top folder of a package is stripped", stripPackageFolder("Sonic3Airnet/data/a.txt", true) == "data/a.txt" && stripPackageFolder("other/a.txt", true).empty() && stripPackageFolder("data/a.txt", false) == "data/a.txt");
 
 		// --- Addresses ---
 		Endpoints production;
@@ -1183,7 +1183,7 @@ namespace
 		report("update address: the public GitHub API is accepted", isAcceptedApiBase(production));
 		report("update address: a loopback test server is accepted only in test mode", isAcceptedApiBase(test) && !isAcceptedApiBase(testWithoutFlag) && !isAcceptedApiBase(evil));
 		const std::string repo = "owner/repo";
-		report("update address: the release download of the repository is accepted", isAcceptedAssetUrl("https://github.com/owner/repo/releases/download/v1.2.3/Sonic3AIR_Online.zip", repo, production));
+		report("update address: the release download of the repository is accepted", isAcceptedAssetUrl("https://github.com/owner/repo/releases/download/v1.2.3/Sonic3Airnet.zip", repo, production));
 		bool badUrlsRefused = true;
 		const std::vector<std::string> badUrls = { "http://github.com/owner/repo/releases/download/v1/x.zip", "https://github.com/other/repo/releases/download/v1/x.zip", "https://github.com.evil.com/owner/repo/releases/download/v1/x.zip", "https://github.com@evil.com/owner/repo/releases/download/v1/x.zip", "https://evil.com/owner/repo/releases/download/v1/x.zip", "https://github.com/owner/repo/releases/download/../../x.zip", "https://github.com/owner/repo/archive/main.zip", "https://github.com:8443/owner/repo/releases/download/v1/x.zip", "https://objects.githubusercontent.com/x.zip", "ftp://github.com/owner/repo/releases/download/v1/x.zip", "https://github.com/owner/repo/releases/download/v1/x y.zip", "https://github.com\\@evil.com/owner/repo/releases/download/x", "file:///c:/x" };
 		for (const std::string& bad : badUrls)
@@ -1193,7 +1193,7 @@ namespace
 		}
 		report("update address: other hosts, http, user info, other repositories and path tricks are refused", badUrlsRefused);
 		report("update address: a loopback asset is accepted only in test mode and only on the same port", isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, test) && !isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, production) && !isAcceptedAssetUrl("http://127.0.0.1:34568/dl/a.zip", repo, test) && !isAcceptedAssetUrl("http://127.0.0.1:34567/dl/a.zip", repo, testWithoutFlag));
-		report("update address: repository names", isValidRepoName("TrickerNoxics14/sonic3-coop-mod") && !isValidRepoName("") && !isValidRepoName("owner") && !isValidRepoName("a/b/c") && !isValidRepoName("a/../b") && !isValidRepoName("a b/c") && !isValidRepoName("/b") && !isValidRepoName("a/"));
+		report("update address: repository names", isValidRepoName("TrickerNoxics14/Sonic-3-Airnet") && !isValidRepoName("") && !isValidRepoName("owner") && !isValidRepoName("a/b/c") && !isValidRepoName("a/../b") && !isValidRepoName("a b/c") && !isValidRepoName("/b") && !isValidRepoName("a/"));
 
 		// --- Release information ---
 		const std::string goodUrl = "https://github.com/owner/repo/releases/download/v1.2.0/";
@@ -1202,8 +1202,8 @@ namespace
 		{
 			return parseJson("{\"tag_name\":\"" + tag + "\",\"body\":\"Notes here\"" + extra + ",\"assets\":" + assets + "}");
 		};
-		const std::string goodAssets = "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":1000,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.zip\",\"digest\":\"sha256:" + hash64 + "\"},"
-			"{\"name\":\"Sonic3AIR_Online.manifest.json\",\"size\":200,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.manifest.json\"}]";
+		const std::string goodAssets = "[{\"name\":\"Sonic3Airnet.zip\",\"size\":1000,\"browser_download_url\":\"" + goodUrl + "Sonic3Airnet.zip\",\"digest\":\"sha256:" + hash64 + "\"},"
+			"{\"name\":\"Sonic3Airnet.manifest.json\",\"size\":200,\"browser_download_url\":\"" + goodUrl + "Sonic3Airnet.manifest.json\"}]";
 		ReleaseInfo release;
 		std::string error;
 		report("update release: a good release is read (version, package, digest, manifest)",
@@ -1212,9 +1212,9 @@ namespace
 		report("update release: a pre-release is refused", !parseRelease(releaseJson("v1.2.0", goodAssets, ",\"prerelease\":true"), repo, production, release, error));
 		report("update release: a release without the package is refused", !parseRelease(releaseJson("v1.2.0", "[]"), repo, production, release, error));
 		report("update release: a package from another host is refused",
-			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":1,\"browser_download_url\":\"https://evil.example/Sonic3AIR_Online.zip\"}]"), repo, production, release, error));
+			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3Airnet.zip\",\"size\":1,\"browser_download_url\":\"https://evil.example/Sonic3Airnet.zip\"}]"), repo, production, release, error));
 		report("update release: a package that is too large is refused",
-			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3AIR_Online.zip\",\"size\":999999999999,\"browser_download_url\":\"" + goodUrl + "Sonic3AIR_Online.zip\"}]"), repo, production, release, error));
+			!parseRelease(releaseJson("v1.2.0", "[{\"name\":\"Sonic3Airnet.zip\",\"size\":999999999999,\"browser_download_url\":\"" + goodUrl + "Sonic3Airnet.zip\"}]"), repo, production, release, error));
 		report("update release: garbage instead of an object is refused", !parseRelease(parseJson("[1,2,3]"), repo, production, release, error) && !parseRelease(parseJson("not json"), repo, production, release, error));
 		report("update release: notes are plain ASCII without markup noise", sanitizeNotes("## Title\r\n**bold** `code` caf\xc3\xa9\n\n\n\n\nend") == " Title\nbold code caf??\n\nend");
 		report("update release: very long notes are shortened", sanitizeNotes(std::string(5000, 'x')).size() < 800);
@@ -1222,7 +1222,7 @@ namespace
 		// --- Which hash must the package have ---
 		Manifest manifest;
 		ExpectedPackage expected;
-		const std::string manifestOk = "{\"version\":\"1.2.0\",\"asset\":\"Sonic3AIR_Online.zip\",\"size\":1000,\"sha256\":\"" + hash64 + "\"}";
+		const std::string manifestOk = "{\"version\":\"1.2.0\",\"asset\":\"Sonic3Airnet.zip\",\"size\":1000,\"sha256\":\"" + hash64 + "\"}";
 		report("update manifest: a good manifest is read", parseManifest(parseJson(manifestOk), manifest, error) && manifest.mSize == 1000 && manifest.mSha256 == hash64);
 		report("update manifest: a hash that is not 64 hex digits is refused", !parseManifest(parseJson("{\"version\":\"1.2.0\",\"asset\":\"x\",\"size\":1,\"sha256\":\"abc\"}"), manifest, error) && !parseManifest(parseJson("{\"version\":\"1.2.0\"}"), manifest, error));
 		parseRelease(releaseJson("v1.2.0", goodAssets), repo, production, release, error);

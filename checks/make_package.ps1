@@ -1,6 +1,6 @@
 # Builds the release package from the current engine build and the current Drop-In Co-op scripts:
-#   Sonic3AIR_Online\   (folder)
-#   Sonic3AIR_Online.zip
+#   Sonic3Airnet\   (folder)
+#   Sonic3Airnet.zip
 # Excluded on purpose: saves, compiled script caches, save states, developer test mods and the ROM.
 
 param([string]$Version = "")		# x.y.z: written into the package as version.txt (release.ps1 passes it); without it the package is an unversioned development build, and its updater stays off
@@ -9,8 +9,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $game = Join-Path $root "sonic3air_online_stable_source\Oxygen\sonic3air"
 $bin = Join-Path $game "bin\Release_x64"
-$out = Join-Path $root "Sonic3AIR_Online"
-$zipPath = Join-Path $root "Sonic3AIR_Online.zip"
+$out = Join-Path $root "Sonic3Airnet"
+$zipPath = Join-Path $root "Sonic3Airnet.zip"
 
 if (-not (Test-Path (Join-Path $bin "Sonic3AIR.exe")))
 {
@@ -18,9 +18,9 @@ if (-not (Test-Path (Join-Path $bin "Sonic3AIR.exe")))
 }
 
 $resolvedOut = [IO.Path]::GetFullPath($out)
-$expectedOut = [IO.Path]::GetFullPath((Join-Path $root 'Sonic3AIR_Online'))
+$expectedOut = [IO.Path]::GetFullPath((Join-Path $root 'Sonic3Airnet'))
 if ($resolvedOut -ne $expectedOut -or (Split-Path -Parent $resolvedOut) -ne [IO.Path]::GetFullPath($root)) {
-	throw 'Package output must be the Sonic3AIR_Online directory inside the workspace.'
+	throw 'Package output must be the Sonic3Airnet directory inside the workspace.'
 }
 if (Test-Path -LiteralPath $resolvedOut) { Remove-Item -LiteralPath $resolvedOut -Recurse -Force }
 New-Item -ItemType Directory -Path $out | Out-Null

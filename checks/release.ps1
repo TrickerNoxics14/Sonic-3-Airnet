@@ -8,7 +8,7 @@
 #   2. builds the game (always for a real release; with -Build for a dry run, which otherwise only warns when Sonic3AIR.exe is older than the source), then runs make_package.ps1 -Version (which writes version.txt into the package and refuses saves, ROMs, test fixtures)
 #   3. refuses to go on if the build embeds a personal Windows path (the warning of make_package.ps1)
 #   4. inspects the zip once more with the rules the in-game updater applies (it would refuse a package with unsafe names or user data)
-#   5. writes release\vX.Y.Z\  Sonic3AIR_Online.zip, Sonic3AIR_Online.zip.sha256, Sonic3AIR_Online.manifest.json (version, asset, size, sha256)
+#   5. writes release\vX.Y.Z\  Sonic3Airnet.zip, Sonic3Airnet.zip.sha256, Sonic3Airnet.manifest.json (version, asset, size, sha256)
 #   6. unless -DryRun: git tag vX.Y.Z, git push the tag, gh release create with the three files
 # The in-game updater (Options > Check for updates) reads releases/latest of the repository in settings.json (Online / UpdateRepo) and verifies the zip against
 # the manifest. Private repositories: nobody without a login can download release files from them, so friends see "No release was found" until the releases are public.
@@ -23,8 +23,8 @@ param(
 $ErrorActionPreference = "Stop"
 $checksDir = $PSScriptRoot
 $root = Split-Path -Parent $checksDir
-$assetName = "Sonic3AIR_Online.zip"
-$manifestName = "Sonic3AIR_Online.manifest.json"
+$assetName = "Sonic3Airnet.zip"
+$manifestName = "Sonic3Airnet.manifest.json"
 $problems = New-Object System.Collections.ArrayList
 
 function Fail([string]$message)
@@ -127,14 +127,14 @@ $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
 try
 {
 	$names = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-	$hasTop = ($names.Count -gt 0) -and (@($names | Where-Object { $_ -notmatch '^Sonic3AIR_Online(/|$)' }).Count -eq 0)
+	$hasTop = ($names.Count -gt 0) -and (@($names | Where-Object { $_ -notmatch '^Sonic3Airnet(/|$)' }).Count -eq 0)
 	$unsafe = New-Object System.Collections.ArrayList
 	$forbidden = New-Object System.Collections.ArrayList
 	$versionEntry = $null
 	foreach ($entry in $archive.Entries)
 	{
 		$name = $entry.FullName.Replace('\', '/')
-		$relative = if ($hasTop) { $name -replace '^Sonic3AIR_Online/?', '' } else { $name }
+		$relative = if ($hasTop) { $name -replace '^Sonic3Airnet/?', '' } else { $name }
 		if ($relative -eq '') { continue }
 		if ($name.EndsWith('/')) { continue }
 		# Unsafe names (the updater refuses the whole package for one of them)
@@ -174,7 +174,7 @@ Write-Host ""
 Write-Host ("Release " + $tag + " prepared in " + $releaseDir) -ForegroundColor Green
 Write-Host ("  " + $assetName + "  " + [math]::Round($size / 1MB, 1) + " MB")
 Write-Host ("  SHA-256 " + $hash)
-if ($Notes -eq "") { $Notes = "Sonic 3 A.I.R. online fork $Version" }
+if ($Notes -eq "") { $Notes = "Sonic 3 AirNet $Version" }
 
 $files = @($releaseZip, (Join-Path $releaseDir ($assetName + ".sha256")), (Join-Path $releaseDir $manifestName))
 if ($DryRun)

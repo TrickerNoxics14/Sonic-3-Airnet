@@ -1,4 +1,4 @@
-SONIC 3 A.I.R. - ONLINE CO-OP (STABLE FORK)
+SONIC 3 AIRNET - ONLINE CO-OP (STABLE FORK)
 ==========================================
 
 Up to four players can join from separate computers. Each gets their own
@@ -127,7 +127,7 @@ Everybody who plays together needs the same version. The game can update itself 
   Limits worth knowing:
   - The checksum comes from the same GitHub page as the package. It protects against a broken or tampered download, not against
     somebody who controls the GitHub repository (the updates are not signed).
-  - The repository is read from settings.json (section Online, UpdateRepo; default TrickerNoxics14/sonic3-coop-mod). GitHub only
+  - The repository is read from settings.json (section Online, UpdateRepo; default TrickerNoxics14/Sonic-3-Airnet). GitHub only
     lets friends download release files if the releases are PUBLIC. While the repository is private, the check says that no release
     was found and nobody except the owner can update this way. A separate public repository for the releases only is the usual fix.
   - If the game lies in a folder you cannot write to (for example Program Files) the update says so and does not start. A copy of the

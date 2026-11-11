@@ -45,7 +45,7 @@ $onlineLog = Join-Path $appdata "online_log.txt"
 $onlineHostLog = Join-Path $appdata 'online_log_host.txt'
 $onlineFriendLog = Join-Path $appdata 'online_log_friend.txt'
 $selfTestFile = Join-Path $appdata "selftest_results.txt"
-$zipPath = Join-Path $root "Sonic3AIR_Online.zip"
+$zipPath = Join-Path $root "Sonic3Airnet.zip"
 $sourceScripts = Join-Path $game "scripts"
 # The release zip is built from the stable online fork, not from the older test tree used for the local game stages (F/G/Q...).
 # The A-stage package comparisons must look at the tree the package was actually built from.
@@ -447,7 +447,7 @@ try
 
 	if (-not (Test-Path $zipPath))
 	{
-		Add-Result "A2" "Release package exists" $false "Sonic3AIR_Online.zip is missing (run with -Package)"
+		Add-Result "A2" "Release package exists" $false "Sonic3Airnet.zip is missing (run with -Package)"
 	}
 	else
 	{
@@ -456,7 +456,7 @@ try
 		{
 			$entries = @{}
 			foreach ($entry in $zip.Entries) { $entries[$entry.FullName.Replace('\', '/')] = $entry }
-			$prefix = "Sonic3AIR_Online/"
+			$prefix = "Sonic3Airnet/"
 			Add-Result "A2" "Release package exists and can be opened" $true ("" + $entries.Count + " files")
 
 			$packagedExe = $entries[$prefix + "Sonic3AIR.exe"]
@@ -973,7 +973,7 @@ try
 			$unzipDir = Join-Path ([IO.Path]::GetTempPath()) ("s3air_pkgcheck_" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
 			try
 			{
-				if (-not (Test-Path -LiteralPath $zipPath)) { throw "Sonic3AIR_Online.zip is missing (run with -Package)" }
+				if (-not (Test-Path -LiteralPath $zipPath)) { throw "Sonic3Airnet.zip is missing (run with -Package)" }
 				Add-Type -AssemblyName System.IO.Compression.FileSystem
 				[IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $unzipDir)
 				$packageExe = Get-ChildItem -LiteralPath $unzipDir -Filter "Sonic3AIR.exe" -Recurse -File | Select-Object -First 1
