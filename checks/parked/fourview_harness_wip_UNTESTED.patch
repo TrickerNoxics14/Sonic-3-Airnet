@@ -1,0 +1,169 @@
+diff --git a/checks/harness/ActHarness/scripts/main.lemon b/checks/harness/ActHarness/scripts/main.lemon
+index da221bb..5a7f25d 100644
+--- a/checks/harness/ActHarness/scripts/main.lemon
++++ b/checks/harness/ActHarness/scripts/main.lemon
+@@ -15,6 +15,12 @@ global u8 checks.spinFrame
+ global bool checks.captured
+ global bool checks.quadSeen
+ global u16 checks.quadValidFrames
++global u8 checks.refPhase		// four-view reference pictures: 0 = not started, 1 = frozen for the four-view picture, 2 = one reference picture per view, 3 = done
++global u16 checks.refTick
++global u8 checks.refView
++global bool checks.refForce
++global u16 checks.refForceX
++global u16 checks.refForceY
+ global u8 checks.originalBoss
+ global u8 checks.contractTick
+ global bool checks.contractDone
+@@ -113,6 +119,73 @@ function void SetupCharacterAtStartPosition()
+ 	}
+ }
+ 
++// Four-view reference pictures (stage QG): the four-view picture is taken with the world and the cameras frozen, then the game is switched to one
++// shared view and drawn four more times with each of the four cameras forced on the single full screen view. Each view of the four-view picture
++// has to be the same as the top left corner of the reference picture of its camera (the runner compares them, see "Get-QuadReferenceStats").
++function void QuadRef.step()
++{
++	++checks.refTick
++	if (checks.refPhase == 1)
++	{
++		if (checks.refTick == 4)
++		{
++			for (u8 view = 0; view < 4; ++view)
++			{
++				u16[0x8ffe00 + view * 4] = DropIn.partyViewCameraX(view)
++				u16[0x8ffe02 + view * 4] = DropIn.partyViewCameraY(view)
++			}
++		}
++		if (checks.refTick == 8)
++		{
++			Checks.report("frozen capture", Checks.capture("frozen"), "Engine framebuffer with the world and the cameras frozen")
++			Checks.report("quad cameras", 1, stringformat("P1 %04x,%04x P2 %04x,%04x P3 %04x,%04x", u16[0x8ffe00], u16[0x8ffe02], u16[0x8ffe04], u16[0x8ffe06], u16[0x8ffe08], u16[0x8ffe0a]))
++			Checks.report("quad cameras 2", 1, stringformat("P4 %04x,%04x screen %dx%d", u16[0x8ffe0c], u16[0x8ffe0e], getScreenWidth(), getScreenHeight()))
++			option.dropin.four_view_split = 0
++			checks.refPhase = 2
++			checks.refTick = 0
++			checks.refView = 0
++		}
++	}
++	else if (checks.refPhase == 2)
++	{
++		checks.refForce = true
++		checks.refForceX = u16[0x8ffe00 + checks.refView * 4]
++		checks.refForceY = u16[0x8ffe02 + checks.refView * 4]
++		if (checks.refTick == 8)
++			Checks.report("reference capture", Checks.capture(stringformat("ref%d", checks.refView)), stringformat("Game's own full screen picture of camera %d", checks.refView))
++		if (checks.refTick >= 9)
++		{
++			++checks.refView
++			checks.refTick = 0
++			if (checks.refView >= 4)
++			{
++				checks.refPhase = 3
++				checks.refForce = false
++				option.dropin.four_view_split = 1
++			}
++		}
++	}
++}
++
++function void UpdateCamera()
++{
++	if (QUAD_ACT_TEST && checks.refPhase == 1)
++		return			// The four cameras stand still while the four-view picture is taken
++	base.UpdateCamera()
++	if (QUAD_ACT_TEST && checks.refForce)
++	{
++		camera.position.x.u16 = checks.refForceX
++		camera.position.y.u16 = checks.refForceY
++	}
++}
++
++function void UpdateLevelDisplay()
++{
++	base.UpdateLevelDisplay()
++	if (QUAD_ACT_TEST && checks.refForce)
++		DropIn.restoreSingleViewPlanes()		// The camera jumped: build the whole single view from the game's level data, as the split screen does when it ends
++}
++
+ function void scriptMainEntryPoint()
+ {
+ 	global.zone_act = __ZONE_ACT__
+@@ -155,7 +228,7 @@ function void UpdateGameObjects()
+ 			option.dropin.players = QUAD_ACT_TEST ? 4 : 2
+ 			option.dropin.four_view_split = QUAD_ACT_TEST ? 1 : 0
+ 			option.dropin.split_mode = 0
+-			option.dropin.view_size = 1
++			option.dropin.view_size = __VIEW_SIZE__
+ 			option.dropin.p2_hurt = 1
+ 			option.dropin.require_join = 1
+ 			option.dropin.idle_seconds = 0
+@@ -230,7 +303,16 @@ function void UpdateGameObjects()
+ 			Checks.report("render capture", Checks.capture("roaming"), "Engine framebuffer, previous completed render")
+ 		}
+ 
+-		if (__EXPECT_SPLIT__ == 1 && !checks.contractDone && checks.splitFrames >= 60 && dropin.split_active && !DropIn.splitPaused())
++		if (QUAD_ACT_TEST && checks.captured && checks.refPhase == 0 && checks.contractTick == 0)
++		{
++			// Freeze the world and the four cameras, so that the four-view picture and the reference pictures show exactly the same state
++			checks.refPhase = 1
++			checks.refTick = 0
++		}
++		if (QUAD_ACT_TEST && checks.refPhase != 0)
++			QuadRef.step()
++
++		if (!QUAD_ACT_TEST && __EXPECT_SPLIT__ == 1 && !checks.contractDone && checks.splitFrames >= 60 && dropin.split_active && !DropIn.splitPaused())
+ 			checks.contractTick = 1
+ 
+ 		// Diagnostics every half second (in the log only, not part of the verdict)
+@@ -275,7 +357,8 @@ function void UpdateGameObjects()
+ 			Checks.report("run complete", 1, "")
+ 		}
+ 	}
+-	base.UpdateGameObjects()
++	if (!(QUAD_ACT_TEST && (checks.refPhase == 1 || checks.refPhase == 2)))
++		base.UpdateGameObjects()
+ 	if (ZIPLINE_TEST && checks.ziplineSpawnTraced)
+ 	{
+ 		Checks.report("zipline spawn bounds", 1, stringformat("record y%04x bounds %04x-%04x force%d wrap%d", checks.ziplineSpawnY, checks.ziplineSpawnD3, checks.ziplineSpawnD4, checks.ziplineSpawnForceY, checks.ziplineSpawnWrap))
+diff --git a/checks/harness/PartyHarness/scripts/main.lemon b/checks/harness/PartyHarness/scripts/main.lemon
+index 71f2fd6..13481de 100644
+--- a/checks/harness/PartyHarness/scripts/main.lemon
++++ b/checks/harness/PartyHarness/scripts/main.lemon
+@@ -82,14 +82,14 @@ function u16 PartyCheck.input(u8 index, u32 frame)
+ 	return 0
+ }
+ 
++// Number of tiles in a view's band of the four-view plane that are not empty (the bands are below each other, 16 tiles wide, 32 patterns per row)
+ function u16 PartyCheck.countPlaneCells(u16 vramBase, u8 band)
+ {
+ 	u16 count = 0
+-	u8 firstRow = (band >> 1) * 8
+-	u8 firstColumn = (band & 1) * 0x10
+-	for (u8 row = 0; row < 8; ++row)
++	u16 rows = DropIn.bandRows()
++	for (u16 row = 0; row < rows; ++row)
+ 		for (u8 column = 0; column < 0x10; ++column)
+-			if (getVRAM(vramBase + (firstRow + row) * 0x100 + (firstColumn + column) * 8) != 0)
++			if (getVRAM(vramBase + (band * rows + row) * 0x80 + column * 4) != 0)
+ 				++count
+ 	return count
+ }
+@@ -116,6 +116,7 @@ function void UpdateGameObjects()
+ 		option.dropin.p2_hurt = 1
+ 		option.dropin.idle_seconds = 0
+ 		option.dropin.four_view_split = PARTY_QUAD_TEST ? 1 : 0
++		option.dropin.view_size = __VIEW_SIZE__
+ 	}
+ 	if (!dropin.joined && partycheck.frame >= 120 && partycheck.frame % 30 == 0)
+ 		control.pad2.pressed |= CONTROL_START
+@@ -170,6 +171,9 @@ function void UpdateGameObjects()
+ 				Checks.report("party players spaced", spaced, stringformat("P1 %04x P2 %04x P3 %04x P4 %04x", u16[DropIn.P1 + 0x10], u16[DropIn.P2 + 0x10], u16[p3 + 0x10], u16[p4 + 0x10]))
+ 				Checks.report("quad camera diagnostic", 1, stringformat("C1 %04x,%04x C2 %04x,%04x P1 %04x,%04x", camera.position.x.u16, camera.position.y.u16, camera.position.x.u16.player2, camera.position.y.u16.player2, u16[DropIn.P1 + 0x10], u16[DropIn.P1 + 0x14]))
+ 				Checks.report("quad plane diagnostic", 1, stringformat("planeA bands %d/%d/%d/%d", PartyCheck.countPlaneCells(0xc000, 0), PartyCheck.countPlaneCells(0xc000, 1), PartyCheck.countPlaneCells(0xc000, 2), PartyCheck.countPlaneCells(0xc000, 3)))
++				// The Split Screen View Size setting applies to four views as well: the screen is twice as high as one view, and the planes are in the four-view layout
++				bool sizeOk = getScreenHeight() == DropIn.chosenViewHeight() * 2 && getScreenHeight() == DropIn.localViewHeight() * 2 && dropin.quad_layout && DropIn.planeBaseB() == 0xc000 + DropIn.bandRows() * 0x200
++				Checks.report("quad view size", sizeOk, stringformat("setting %d screen %dx%d view height %d band rows %d plane B %04x layout %d", option.dropin.view_size, getScreenWidth(), getScreenHeight(), DropIn.localViewHeight(), DropIn.bandRows(), DropIn.planeBaseB(), dropin.quad_layout))
+ 				u16 scrollDiff12 = 0
+ 				u16 scrollDiff23 = 0
+ 				u16 scrollDiff34 = 0

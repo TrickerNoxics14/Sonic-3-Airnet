@@ -1,0 +1,918 @@
+diff --git a/checks/make_local_package.ps1 b/checks/make_local_package.ps1
+index 581f062..c5ef555 100644
+--- a/checks/make_local_package.ps1
++++ b/checks/make_local_package.ps1
+@@ -34,6 +34,13 @@ if ($metadata.Metadata.GameVersion -ne '26.03.28.0') {
+ 	throw 'The local mod package minimum game version was not set correctly.'
+ }
+ 
++# The four-view split screen is part of the mod (it switches itself on only where the engine announces it, see Engine.markFourViewSplitSupported)
++$stageSplit = Join-Path $stageMod 'scripts\split.lemon'
++$stageCommon = Join-Path $stageMod 'scripts\common.lemon'
++if (-not ((Test-Path -LiteralPath $stageSplit) -and ((Get-Content -LiteralPath $stageSplit -Raw) -match 'function\s+void\s+DropIn\.setupFourViewPlanes\(\)') -and ((Get-Content -LiteralPath $stageCommon -Raw) -match 'Engine\.markFourViewSplitSupported'))) {
++	throw 'The local mod package is missing the four-view split screen code.'
++}
++
+ $files = @(Get-ChildItem -LiteralPath $stageRoot -File -Recurse)
+ $badFiles = @($files | Where-Object {
+ 	$_.Extension -match '^\.(exe|dll|md|gen|smd)$' -or ($_.Extension -eq '.bin' -and $_.Length -gt 512KB)
+@@ -57,6 +64,11 @@ try {
+ 	if ($packedMetadata.Metadata.GameVersion -ne '26.03.28.0' -or -not $packedMetadata.UsesFeatures.FourPlayers) {
+ 		throw 'The zipped mod does not advertise the stock four-player capability and minimum version.'
+ 	}
++	$archiveSplit = $archive.Entries | Where-Object { ($_.FullName -replace '\\', '/') -eq 'DropInCoop/scripts/split.lemon' } | Select-Object -First 1
++	if ($null -eq $archiveSplit) { throw 'The ZIP is missing DropInCoop/scripts/split.lemon (four-view split screen).' }
++	$splitReader = [IO.StreamReader]::new($archiveSplit.Open())
++	try { $packedSplitText = $splitReader.ReadToEnd() } finally { $splitReader.Dispose() }
++	if ($packedSplitText -notmatch 'function\s+void\s+DropIn\.setupFourViewPlanes\(\)') { throw 'The zipped mod does not contain the four-view split screen code.' }
+ 	$unexpectedEngine = @($archive.Entries | Where-Object { $_.FullName -match '\.(exe|dll|md|gen|smd)$' })
+ 	if ($unexpectedEngine.Count -gt 0) { throw "The local mod ZIP contains an engine or ROM: $($unexpectedEngine[0].FullName)" }
+ 	Write-Host "Created local-only mod: $outputZip"
+diff --git a/checks/make_package.ps1 b/checks/make_package.ps1
+index 4848dfa..07e1a8b 100644
+--- a/checks/make_package.ps1
++++ b/checks/make_package.ps1
+@@ -73,6 +73,17 @@ $bundled = Join-Path $out "bundled_mods"
+ New-Item -ItemType Directory -Path $bundled | Out-Null
+ Copy-Item (Join-Path $root "DropInCoop") (Join-Path $bundled "DropInCoop") -Recurse
+ 
++# Four-view split screen needs two things in this package: the engine marker in the game scripts (the stable fork's renderer has eight scroll offset sets,
++# stock builds do not and the mod then keeps three/four players on one shared screen) and the four-view code of the co-op mod. Refuse to ship one without the other.
++$gameAppScript = Join-Path $out "scripts\main_gameapp.lemon"
++$modSplitScript = Join-Path $bundled "DropInCoop\scripts\split.lemon"
++if (-not ((Test-Path -LiteralPath $gameAppScript) -and ((Get-Content -LiteralPath $gameAppScript -Raw) -match 'function\s+void\s+Engine\.markFourViewSplitSupported\(\)'))) {
++	throw "Refusing to package: scripts\main_gameapp.lemon does not define Engine.markFourViewSplitSupported (the four-view split screen would stay off)"
++}
++if (-not ((Test-Path -LiteralPath $modSplitScript) -and ((Get-Content -LiteralPath $modSplitScript -Raw) -match 'function\s+void\s+DropIn\.setupFourViewPlanes\(\)'))) {
++	throw "Refusing to package: the co-op mod has no four-view code (scripts\split.lemon)"
++}
++
+ # The developer test hooks (environment variables) are honoured only if this marker file lies next to the executable. It must never be shipped.
+ $markerFiles = @(Get-ChildItem -LiteralPath $out -File -Recurse -Filter "testhooks.enabled" -ErrorAction SilentlyContinue)
+ if ($markerFiles.Count -gt 0) { throw "Refusing to package the developer test-hooks marker: $($markerFiles[0].FullName)" }
+diff --git a/checks/run_checks.ps1 b/checks/run_checks.ps1
+index 322b3ab..782a738 100644
+--- a/checks/run_checks.ps1
++++ b/checks/run_checks.ps1
+@@ -16,6 +16,7 @@ param(
+ 	[switch]$Quick,
+ 	[switch]$RuntimeOnly,
+ 	[string]$EngineRoot = '',
++	[int]$ViewSize = 1,			# Split Screen View Size used by the scene stages G, QG, Z and the party stages: 0 = Small, 1 = Medium (default), 2 = Large
+ 	[string[]]$Only = @()	# Only some of the game stages D, E, F, for example: -Only D,F
+ )
+ 
+@@ -67,6 +68,7 @@ $startedProcesses = New-Object System.Collections.ArrayList
+ 
+ function Add-Result([string]$id, [string]$title, [bool]$passed, [string]$detail)
+ {
++	if ($ViewSize -ne 1) { $title += " [view size " + $ViewSize + "]" }
+ 	[void]$results.Add([pscustomobject]@{ Id = $id; Title = $title; Passed = $passed; Detail = $detail })
+ 	$mark = if ($passed) { "PASS" } else { "FAIL" }
+ 	$color = if ($passed) { "Green" } else { "Red" }
+@@ -312,6 +314,70 @@ function Save-GameScreenshot([System.Diagnostics.Process]$process, [string]$path
+ 	return $true
+ }
+ 
++# Compares the four views of a four-view picture with pictures of the same cameras rendered by the game as one ordinary full screen view
++# (the harness saves them as <prefix>-ref0.bmp ... ref3.bmp, with the world and the cameras frozen). Where the picture of a view and its
++# reference are the same, the four-view renderer drew the same level at the same place. Returns, for each view, the share of compared
++# pixels that are equal (colour channels within a small tolerance), or $null if a picture is missing.
++# The compared part of a view leaves out its top (the game's HUD, the view's label) and its bottom (labels and hints written over the views).
++Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
++using System;
++using System.Drawing;
++using System.Drawing.Imaging;
++public static class QuadReferenceCompare
++{
++	static byte[] Load(string path, out int width, out int height)
++	{
++		using (Bitmap source = new Bitmap(path))
++		using (Bitmap bitmap = new Bitmap(source.Width, source.Height, PixelFormat.Format32bppArgb))
++		{
++			using (Graphics g = Graphics.FromImage(bitmap)) { g.DrawImage(source, 0, 0, source.Width, source.Height); }
++			width = bitmap.Width; height = bitmap.Height;
++			BitmapData data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
++			byte[] bytes = new byte[data.Stride * height];
++			System.Runtime.InteropServices.Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
++			bitmap.UnlockBits(data);
++			return bytes;
++		}
++	}
++	public static double Compare(string quadPath, string refPath, int view, int topSkip, int bottomSkip, int tolerance)
++	{
++		int qw, qh, rw, rh;
++		byte[] quad = Load(quadPath, out qw, out qh);
++		byte[] reference = Load(refPath, out rw, out rh);
++		int viewW = qw / 2, viewH = qh / 2;
++		int x0 = (view & 1) * viewW, y0 = (view >> 1) * viewH;
++		if (rw < viewW || rh < viewH) return -1;
++		long equal = 0, total = 0;
++		for (int row = topSkip; row < viewH - bottomSkip; ++row)
++		{
++			for (int col = 0; col < viewW; ++col)
++			{
++				int a = ((y0 + row) * qw + x0 + col) * 4;
++				int b = (row * rw + col) * 4;
++				bool same = Math.Abs(quad[a] - reference[b]) <= tolerance && Math.Abs(quad[a + 1] - reference[b + 1]) <= tolerance && Math.Abs(quad[a + 2] - reference[b + 2]) <= tolerance;
++				if (same) ++equal;
++				++total;
++			}
++		}
++		return total == 0 ? -1 : (double)equal / total;
++	}
++}
++"@
++
++function Get-QuadReferenceStats([string]$prefix)
++{
++	$quadPath = $prefix + '-frozen.bmp'
++	if (-not (Test-Path -LiteralPath $quadPath)) { return $null }
++	$shares = @()
++	for ($view = 0; $view -lt 4; ++$view)
++	{
++		$referencePath = $prefix + '-ref' + $view + '.bmp'
++		if (-not (Test-Path -LiteralPath $referencePath)) { return $null }
++		$shares += [QuadReferenceCompare]::Compare($quadPath, $referencePath, $view, 52, 30, 8)
++	}
++	return $shares
++}
++
+ function Get-QuadCaptureStats([string]$path)
+ {
+ 	if (-not (Test-Path $path)) { return $null }
+@@ -497,9 +563,45 @@ try
+ 				$markerEntries = @($entries.Keys | Where-Object { $_ -match '(?i)testhooks\.enabled' })
+ 				Add-Result "A12" "The package does not contain the developer test-hooks marker file" ($markerEntries.Count -eq 0) ($markerEntries -join ", ")
+ 
+-				$labelCommonEntry = $entries[$prefix + "bundled_mods/DropInCoop/scripts/common.lemon"]
+-				$labelCommonText = if ($labelCommonEntry) { Get-EntryText $labelCommonEntry } else { "" }
+-				Add-Result "A15" "Package: DropIn.drawPlayerLabel takes signed positions (a label partly off the left edge keeps its negative x in the stock-engine fallback instead of becoming 65xxx)" ($labelCommonText -match 'function\s+void\s+DropIn\.drawPlayerLabel\(u8 slot, s16 x, s16 y,') "bundled_mods/DropInCoop/scripts/common.lemon"
++				# Four-view split screen: the engine part (a build with eight scroll offset sets, checked by the unzipped run U6) announces itself through a marker
++				# function in the game scripts, and the mod part is the four-view code of the co-op mod. Without the marker the mod keeps 3/4 players on one shared screen.
++				$gameAppEntry = $entries[$prefix + "scripts/main_gameapp.lemon"]
++				$gameAppText = if ($gameAppEntry) { Get-EntryText $gameAppEntry } else { "" }
++				$packagedSplit = $entries[$prefix + "bundled_mods/DropInCoop/scripts/split.lemon"]
++				$packagedSplitText = if ($packagedSplit) { Get-EntryText $packagedSplit } else { "" }
++				$packagedCommon = $entries[$prefix + "bundled_mods/DropInCoop/scripts/common.lemon"]
++				$packagedCommonText = if ($packagedCommon) { Get-EntryText $packagedCommon } else { "" }
++				$fourViewPackaged = ($gameAppText -match 'function\s+void\s+Engine\.markFourViewSplitSupported\(\)') -and ($packagedSplitText -match 'function\s+void\s+DropIn\.setupFourViewPlanes\(\)') -and ($packagedCommonText -match 'Engine\.markFourViewSplitSupported')
++				Add-Result "A13" "Package has the four-view split screen: engine marker in the game scripts and the four-view code of the co-op mod" $fourViewPackaged "scripts/main_gameapp.lemon marker, bundled_mods/DropInCoop split.lemon + common.lemon"
++				Add-Result "A15" "Package: DropIn.drawPlayerLabel takes signed positions (a label partly off the left edge keeps its negative x in the stock-engine fallback instead of becoming 65xxx)" ($packagedCommonText -match 'function\s+void\s+DropIn\.drawPlayerLabel\(u8 slot, s16 x, s16 y,') "bundled_mods/DropInCoop/scripts/common.lemon"
++
++				$localZipPath = Join-Path $root "DropInCoop_Local.zip"
++				if (-not (Test-Path -LiteralPath $localZipPath))
++				{
++					Add-Result "A14" "Local mod package has the four-view code and no engine" $false "DropInCoop_Local.zip is missing (run checks\make_local_package.ps1)"
++				}
++				else
++				{
++					$localZip = [IO.Compression.ZipFile]::OpenRead($localZipPath)
++					try
++					{
++						$localEntries = @{}
++						foreach ($localEntry in $localZip.Entries) { $localEntries[$localEntry.FullName.Replace('\', '/')] = $localEntry }
++						$localSplit = $localEntries["DropInCoop/scripts/split.lemon"]
++						$localSplitText = if ($localSplit) { Get-EntryText $localSplit } else { "" }
++						$localEngine = @($localEntries.Keys | Where-Object { $_ -match '\.(exe|dll|md|gen|smd)$' })
++						$localSame = $true
++						foreach ($file in $modFiles)
++						{
++							$relative = $file.FullName.Substring($sourceMod.Length + 1).Replace('\', '/')
++							if ($relative -eq 'mod.json') { continue }		# the local package sets the minimum game version in mod.json
++							$localEntry = $localEntries["DropInCoop/" + $relative]
++							if ($null -eq $localEntry -or (Get-EntryHashHex $localEntry) -ne (Get-FileHashHex $file.FullName)) { $localSame = $false }
++						}
++						Add-Result "A14" "Local mod package has the current four-view code and no engine" (($localSplitText -match 'function\s+void\s+DropIn\.setupFourViewPlanes\(\)') -and $localSame -and $localEngine.Count -eq 0) ("scripts equal to DropInCoop: " + $localSame + ", engine files: " + $localEngine.Count + " (rebuild with checks\make_local_package.ps1 after a mod change)")
++					}
++					finally { $localZip.Dispose() }
++				}
+ 		}
+ 		finally
+ 		{
+@@ -550,11 +652,16 @@ try
+ 		throw "No engine build found. Run checks\run_checks.bat -Build first."
+ 	}
+ 
+-	# Make sure the game uses the current co-op mod: the game installs the copy from its own folder at each start
++	# Make sure the game uses the current co-op mod. (Since the bundled-mod installation was added to the engine, a game with a bundled_mods folder next to it does this itself, see U8;
++	# the build folder is a development build, so the installed copy is also made equal to the source here, and the bundled copy next to the exe too.)
+ 	$binMod = Join-Path $bin "bundled_mods\DropInCoop"
+ 	if (Test-Path $binMod) { Remove-Item $binMod -Recurse -Force }
+ 	New-Item -ItemType Directory -Path (Split-Path $binMod) -Force | Out-Null
+ 	Copy-Item $sourceMod $binMod -Recurse
++	$installedMod = Join-Path $appdata "mods\DropInCoop"
++	if (Test-Path -LiteralPath $installedMod) { Remove-Item -LiteralPath $installedMod -Recurse -Force }
++	New-Item -ItemType Directory -Path (Split-Path $installedMod) -Force | Out-Null
++	Copy-Item $sourceMod $installedMod -Recurse
+ 
+ 	# Save the player's own setup, the checks change it and put it back afterwards
+ 	$savedMods = Join-Path $appdata "mods\active-mods.json"
+@@ -1070,6 +1177,75 @@ try
+ 					}
+ 					Stop-StartedProcesses
+ 					if (Test-Path -LiteralPath $probeMarker) { Remove-Item -LiteralPath $probeMarker -Force }
++
++					# U6: the compiled script cache (saves\scripts.bin) is only as good as the scripts it was made from. Its version check cannot see a changed
++					# game script (same game version), so the engine ignores it when a script file is newer. The first starts of this package made the cache.
++					$packageCache = Join-Path $packageDir 'saves\scripts.bin'
++					$cacheMessage = 'Compiled script cache is older than the script sources'
++					$cacheExisted = Test-Path -LiteralPath $packageCache
++					$cacheRuns = @()
++					foreach ($changeScript in @($false, $true))
++					{
++						Stop-StartedProcesses
++						if ($changeScript)
++						{
++							$packagedScript = Join-Path $packageDir 'scripts\main_gameapp.lemon'
++							Add-Content -LiteralPath $packagedScript -Value ("`r`n// changed by the package check")
++						}
++						Remove-Item -LiteralPath $gameLog -Force -ErrorAction SilentlyContinue
++						$cacheProcess = Start-Process -FilePath $packageExe.FullName -WorkingDirectory $packageDir -PassThru
++						[void]$startedProcesses.Add($cacheProcess)
++						$null = Wait-Until { ((Read-SharedText $gameLog) -match 'Ready to go') -or $cacheProcess.HasExited } 60
++						$cacheText = Read-SharedText $gameLog
++						$cacheRuns += [pscustomobject]@{ Ready = ($cacheText -match 'Ready to go'); Ignored = ($cacheText -match [regex]::Escape($cacheMessage)) }
++					}
++					Stop-StartedProcesses
++					Add-Result 'U6a' 'Control: unchanged scripts, the packaged game uses its compiled script cache' ($cacheExisted -and $cacheRuns[0].Ready -and -not $cacheRuns[0].Ignored) ("cache file existed: " + $cacheExisted + ", started: " + $cacheRuns[0].Ready + ", cache ignored: " + $cacheRuns[0].Ignored)
++					Add-Result 'U6' 'A game script newer than the compiled script cache makes the packaged game compile the scripts again' ($cacheRuns[1].Ready -and $cacheRuns[1].Ignored) ("started: " + $cacheRuns[1].Ready + ", cache ignored: " + $cacheRuns[1].Ignored)
++
++					# U7: four-view split screen from the package itself: the unzipped game with its own scripts and its own copy of the co-op mod
++					# (the stable engine does not install bundled mods, so the mod is copied to the mods folder as a player would), four local players,
++					# driven by the party harness. Only the harness and the test-hooks marker come from outside the package.
++					$packageMod = Join-Path $packageDir 'bundled_mods\DropInCoop'
++					$installedPackageMod = Join-Path $appdata 'mods\DropInCoop'
++					if ((Test-Path -LiteralPath $packageMod) -and ((Split-Path -Leaf $installedPackageMod) -eq 'DropInCoop'))
++					{
++						if (Test-Path -LiteralPath $installedPackageMod) { Remove-Item -LiteralPath $installedPackageMod -Recurse -Force }
++						Copy-Item -LiteralPath $packageMod -Destination $installedPackageMod -Recurse
++					}
++					$packageHarness = Join-Path $appdata 'mods\PartyHarness'
++					if (Test-Path -LiteralPath $packageHarness) { Remove-Item -LiteralPath $packageHarness -Recurse -Force }
++					Copy-Item (Join-Path $checksDir 'harness\PartyHarness') $packageHarness -Recurse
++					$packageHarnessMain = Join-Path $packageHarness 'scripts\main.lemon'
++					Set-Content -Path $packageHarnessMain -Value (Get-Content -Raw $packageHarnessMain).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace('__PLAYER_COUNT__', '4').Replace('constant bool PARTY_QUAD_TEST = false', 'constant bool PARTY_QUAD_TEST = true') -Encoding utf8 -NoNewline
++					Set-ActiveMods @('DropInCoop', 'PartyHarness')
++					$packageConfigPath = Join-Path $packageDir 'config.json'
++					$packageConfigText = Get-Content -LiteralPath $packageConfigPath -Raw
++					Set-Content -LiteralPath $packageConfigPath -Value $packageConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"') -Encoding utf8
++					Set-Content -LiteralPath $probeMarker -Value 'test hooks' -Encoding ascii
++					Remove-Item -LiteralPath $gameLog -Force -ErrorAction SilentlyContinue
++					Remove-Item -LiteralPath (Join-Path $checksDir 'last_logs\U7-party-quad.bmp') -Force -ErrorAction SilentlyContinue
++					$packageQuadVariables = @{ 'S3AIR_CHECKS' = '1'; 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = 'U7' }
++					foreach ($key in $packageQuadVariables.Keys) { [Environment]::SetEnvironmentVariable($key, [string]$packageQuadVariables[$key], 'Process') }
++					try { $packageQuadProcess = Start-Process -FilePath $packageExe.FullName -WorkingDirectory $packageDir -PassThru }
++					finally { foreach ($key in $packageQuadVariables.Keys) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') } }
++					[void]$startedProcesses.Add($packageQuadProcess)
++					[void](Wait-Until { (Read-SharedText $gameLog) -match 'CHECK\|run complete\||Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier' -or $packageQuadProcess.HasExited } 120)
++					$packageQuadLog = Read-SharedText $gameLog
++					Stop-StartedProcesses
++					Set-Content -Path (Join-Path $checksDir 'last_logs\U7-logfile.txt') -Value $packageQuadLog -Encoding utf8
++					Remove-Item -LiteralPath $probeMarker -Force -ErrorAction SilentlyContinue
++					$packageQuadErrors = [regex]::Match($packageQuadLog, '(?im)^.*(compile error|Unable to resolve|Invalid memory access|Script assertion failed|Invalid VRAM access).*$')
++					Add-Result 'U7a' 'Packaged game: four players with the packaged co-op mod run without errors' (-not $packageQuadErrors.Success -and $packageQuadLog -match 'CHECK\|run complete\|') $(if ($packageQuadErrors.Success) { $packageQuadErrors.Value } else { '' })
++					foreach ($contract in @(@{ Name = 'party camera'; Id = 'U7b'; Title = 'Packaged game: the screen is split into four views' }, @{ Name = 'four independent cameras'; Id = 'U7c'; Title = 'Packaged game: four independent cameras' }, @{ Name = 'quad view size'; Id = 'U7d'; Title = 'Packaged game: the view size setting applies to the four views' }, @{ Name = 'quad per-view scroll data'; Id = 'U7e'; Title = 'Packaged game: each view has its own line scroll data' }))
++					{
++						$entry = [regex]::Match($packageQuadLog, ('CHECK\|' + [regex]::Escape($contract.Name) + '\|(PASS|FAIL)\|(.*)'))
++						Add-Result $contract.Id $contract.Title ($entry.Success -and $entry.Groups[1].Value -eq 'PASS') $(if ($entry.Success) { $entry.Groups[2].Value } else { 'not reported' })
++					}
++					$packageQuadStats = Get-QuadCaptureStats (Join-Path $checksDir 'last_logs\U7-party-quad.bmp')
++					Add-Result 'U7f' 'Packaged game: the framebuffer shows level pixels in all four views' ($null -ne $packageQuadStats -and @($packageQuadStats.Quadrants | Where-Object { $_ -lt 200 }).Count -eq 0) $(if ($null -ne $packageQuadStats) { 'sampled pixels: ' + ($packageQuadStats.Quadrants -join '/') } else { 'engine framebuffer capture is missing' })
++					# The mods folder is shared with every other stage: put the source copy of the co-op mod back
++					if ((Split-Path -Leaf $installedPackageMod) -eq 'DropInCoop') { Remove-Item -LiteralPath $installedPackageMod -Recurse -Force; Copy-Item -LiteralPath $sourceMod -Destination $installedPackageMod -Recurse }
+ 			}
+ 			catch
+ 			{
+@@ -1598,8 +1774,8 @@ public class RelayFlood
+ 					if (Test-Path $partyTarget) { Remove-Item -LiteralPath $partyTarget -Recurse -Force }
+ 					Copy-Item (Join-Path $checksDir 'harness\PartyHarness') $partyTarget -Recurse
+ 					$partyMain = Join-Path $partyTarget 'scripts\main.lemon'
+-					Set-Content -Path $partyMain -Value (Get-Content -Raw $partyMain).Replace('__PLAYER_COUNT__', [string]$count) -Encoding utf8 -NoNewline
+-					Set-ActiveMods @('PartyHarness', 'DropInCoop')
++					Set-Content -Path $partyMain -Value (Get-Content -Raw $partyMain).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace('__PLAYER_COUNT__', [string]$count) -Encoding utf8 -NoNewline
++					Set-ActiveMods @('DropInCoop', 'PartyHarness')
+ 					$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 					$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+ 					Set-Content -Path $configPath -Value $configText -Encoding utf8
+@@ -1627,9 +1803,9 @@ public class RelayFlood
+ 				if (Test-Path $quadTarget) { Remove-Item -LiteralPath $quadTarget -Recurse -Force }
+ 				Copy-Item (Join-Path $checksDir 'harness\PartyHarness') $quadTarget -Recurse
+ 				$quadMain = Join-Path $quadTarget 'scripts\main.lemon'
+-				$quadText = (Get-Content -Raw $quadMain).Replace('__PLAYER_COUNT__', '4').Replace('constant bool PARTY_QUAD_TEST = false', 'constant bool PARTY_QUAD_TEST = true')
++				$quadText = (Get-Content -Raw $quadMain).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace('__PLAYER_COUNT__', '4').Replace('constant bool PARTY_QUAD_TEST = false', 'constant bool PARTY_QUAD_TEST = true')
+ 				Set-Content -Path $quadMain -Value $quadText -Encoding utf8 -NoNewline
+-				Set-ActiveMods @('PartyHarness', 'DropInCoop')
++				Set-ActiveMods @('DropInCoop', 'PartyHarness')
+ 				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+ 				Set-Content -Path $configPath -Value $configText -Encoding utf8
+@@ -1641,7 +1817,7 @@ public class RelayFlood
+ 				Set-Content -Path (Join-Path $checksDir 'last_logs\Q4-logfile.txt') -Value $quadLog -Encoding utf8
+ 				$errors = [regex]::Match($quadLog, '(?im)^.*(compile error|Unable to resolve|Invalid memory access|Script assertion failed|Invalid VRAM access).*$')
+ 				Add-Result 'Q1' 'Four-view scripts load and complete without engine errors' (-not $errors.Success -and $quadLog -match 'CHECK\|run complete\|') $(if ($errors.Success) { $errors.Value } else { '' })
+-				$quadChecks = @(@{ Name='party actors'; Id='Q2'; Title='All four actors are active' }, @{ Name='party camera'; Id='Q3'; Title='Four-way split is active' }, @{ Name='four independent cameras'; Id='Q4'; Title='Players three and four have independent cameras' }, @{ Name='party players spaced'; Id='Q5'; Title='Four-player visual capture has readable character spacing' }, @{ Name='party picture'; Id='Q6'; Title='Engine framebuffer captured' }, @{ Name='party alive'; Id='Q7'; Title='All four players remain alive' }, @{ Name='quad per-view scroll data'; Id='Q9'; Title='Each viewport retains its own line-scroll data' })
++				$quadChecks = @(@{ Name='party actors'; Id='Q2'; Title='All four actors are active' }, @{ Name='party camera'; Id='Q3'; Title='Four-way split is active' }, @{ Name='four independent cameras'; Id='Q4'; Title='Players three and four have independent cameras' }, @{ Name='party players spaced'; Id='Q5'; Title='Four-player visual capture has readable character spacing' }, @{ Name='party picture'; Id='Q6'; Title='Engine framebuffer captured' }, @{ Name='party alive'; Id='Q7'; Title='All four players remain alive' }, @{ Name='quad per-view scroll data'; Id='Q9'; Title='Each viewport retains its own line-scroll data' }, @{ Name='quad view size'; Id='Q10'; Title='The Split Screen View Size setting applies to the four views (screen height, four-view plane layout)' })
+ 				foreach ($contract in $quadChecks) {
+ 					$entry = [regex]::Match($quadLog, ('CHECK\|' + [regex]::Escape($contract.Name) + '\|(PASS|FAIL)\|(.*)'))
+ 					Add-Result $contract.Id $contract.Title ($entry.Success -and $entry.Groups[1].Value -eq 'PASS') $(if ($entry.Success) { $entry.Groups[2].Value } else { 'not reported' })
+@@ -1690,7 +1866,7 @@ public class RelayFlood
+ 				$probeText = (Get-Content -Raw $probeMain).Replace('constant bool Checks.THREE_PLAYER_PROBE = false', 'constant bool Checks.THREE_PLAYER_PROBE = true')
+ 				Set-Content -Path $probeMain -Value $probeText -Encoding utf8 -NoNewline
+ 			}
+-			Set-ActiveMods @("ChecksHarness", "DropInCoop")
++			Set-ActiveMods @('DropInCoop', 'ChecksHarness')
+ 			# The checks start Angel Island 1 themselves, so no developer save state may be loaded instead
+ 			$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 			$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+@@ -1763,7 +1939,7 @@ public class RelayFlood
+ 			if (Test-Path $vanillaTarget) { Remove-Item $vanillaTarget -Recurse -Force }
+ 			Copy-Item (Join-Path $checksDir "harness\TeleportHarness") $vanillaTarget -Recurse
+ 			$vanillaMain = Join-Path $vanillaTarget "scripts\main.lemon"
+-			Set-Content -Path $vanillaMain -Value (Get-Content -Raw $vanillaMain).Replace("__ZONE_ACT__", "0x0500") -Encoding utf8 -NoNewline
++			Set-Content -Path $vanillaMain -Value (Get-Content -Raw $vanillaMain).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace("__ZONE_ACT__", "0x0500") -Encoding utf8 -NoNewline
+ 			Set-ActiveMods @("TeleportHarness")
+ 			$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 			$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+@@ -1829,8 +2005,8 @@ public class RelayFlood
+ 					Add-Result $act.Id ("Boss at the end of " + $act.Name) $false 'No source-derived approach fixture; boss coverage remains incomplete.'
+ 					continue
+ 				}
+-				Set-Content -Path $bossMainPath -Value (Get-Content -Raw $bossMainPath).Replace("__ZONE_ACT__", $act.Code).Replace("__END_FRAME__", "900").Replace('__BOSS_START_X__', $bossFixture.x).Replace('__BOSS_START_Y__', $bossFixture.y).Replace('__BOSS_ADDRESS__', $bossFixture.address).Replace('__BOSS_TARGET_X__', $bossFixture.targetX).Replace('__BOSS_TARGET_Y__', $bossFixture.targetY) -Encoding utf8 -NoNewline
+-				Set-ActiveMods @("BossHarness", "DropInCoop")
++				Set-Content -Path $bossMainPath -Value (Get-Content -Raw $bossMainPath).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace("__ZONE_ACT__", $act.Code).Replace("__END_FRAME__", "900").Replace('__BOSS_START_X__', $bossFixture.x).Replace('__BOSS_START_Y__', $bossFixture.y).Replace('__BOSS_ADDRESS__', $bossFixture.address).Replace('__BOSS_TARGET_X__', $bossFixture.targetX).Replace('__BOSS_TARGET_Y__', $bossFixture.targetY) -Encoding utf8 -NoNewline
++				Set-ActiveMods @('DropInCoop', 'BossHarness')
+ 				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+ 				Set-Content -Path $configPath -Value $configText -Encoding utf8
+@@ -1849,7 +2025,7 @@ public class RelayFlood
+ 					{
+ 						$roamShot = Save-GameScreenshot $bossGame (Join-Path $bossLogFolder ($act.Id + "-roaming.png"))
+ 					}
+-					if ($bossText -match 'Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier')
++					if ($bossText -match 'Invalid VRAM|Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier')
+ 					{
+ 						# The error window is shown on top of the game: keep its picture, the game cannot continue
+ 						Start-Sleep -Milliseconds 800
+@@ -1868,7 +2044,7 @@ public class RelayFlood
+ 				Set-Content -Path (Join-Path $bossLogFolder ($act.Id + "-logfile.txt")) -Value $bossLog -Encoding utf8
+ 
+ 				$bossMatch = [regex]::Match($bossLog, 'CHECK\|boss test\|(PASS|FAIL)\|(.*)')
+-				$bossErrors = @([regex]::Matches($bossLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
++				$bossErrors = @([regex]::Matches($bossLog, '(?im)^.*(Invalid VRAM access|Invalid memory access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
+ 				if ($bossMatch.Success)
+ 				{
+ 					$bossPassed = ($bossMatch.Groups[1].Value -eq "PASS") -and ($bossErrors.Count -eq 0)
+@@ -1928,8 +2104,8 @@ public class RelayFlood
+ 				if (Test-Path $actHarnessTarget) { Remove-Item $actHarnessTarget -Recurse -Force }
+ 				Copy-Item $actHarnessSource $actHarnessTarget -Recurse
+ 				$actMainPath = Join-Path $actHarnessTarget "scripts\main.lemon"
+-				Set-Content -Path $actMainPath -Value (Get-Content -Raw $actMainPath).Replace("__ZONE_ACT__", $act.Code).Replace("__EXPECT_SPLIT__", $(if ($act.Boss) { "0" } else { "1" })).Replace("__END_FRAME__", $(if ($act.End) { [string]$act.End } else { "560" })).Replace("__TELEPORT_ON__", $(if ($act.TeleportX) { "1" } else { "0" })).Replace("__TELEPORT_X__", $(if ($act.TeleportX) { $act.TeleportX } else { "0" })).Replace("__TELEPORT_Y__", $(if ($act.TeleportY) { $act.TeleportY } else { "0" })) -Encoding utf8 -NoNewline
+-				Set-ActiveMods @("ActHarness", "DropInCoop")
++				Set-Content -Path $actMainPath -Value (Get-Content -Raw $actMainPath).Replace('__VIEW_SIZE__', [string]$ViewSize).Replace("__ZONE_ACT__", $act.Code).Replace("__EXPECT_SPLIT__", $(if ($act.Boss) { "0" } else { "1" })).Replace("__END_FRAME__", $(if ($act.End) { [string]$act.End } else { "560" })).Replace("__TELEPORT_ON__", $(if ($act.TeleportX) { "1" } else { "0" })).Replace("__TELEPORT_X__", $(if ($act.TeleportX) { $act.TeleportX } else { "0" })).Replace("__TELEPORT_Y__", $(if ($act.TeleportY) { $act.TeleportY } else { "0" })) -Encoding utf8 -NoNewline
++				Set-ActiveMods @('DropInCoop', 'ActHarness')
+ 				# Same start as the F stage: no developer save state, the level is started directly
+ 				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+@@ -1941,12 +2117,19 @@ public class RelayFlood
+ 				# Waits for the end of the check; takes a screenshot of the roaming part (split screen expected) and of any error window
+ 				$actFinished = $false
+ 				$actShot = $false
++				$actStartedAt = Get-Date
+ 				$actDeadline = (Get-Date).AddSeconds(150)
+ 				while ((Get-Date) -lt $actDeadline -and -not $actGame.HasExited)
+ 				{
+ 					$actText = Read-SharedText $logFile
++					if (((Get-Date) - $actStartedAt).TotalSeconds -gt 60 -and -not ($actText -match 'Ready to go'))
++					{
++						# A script compile error opens a window and writes nothing to the log
++						Save-ScreenPicture (Join-Path $checksDir ('last_logs\' + $act.Id + '-error.png'))
++						break
++					}
+ 					if ($actText -match 'CHECK\|run complete\|') { $actFinished = $true; break }
+-					if ($actText -match 'Invalid VRAM')
++					if ($actText -match 'Invalid VRAM|Invalid memory access')
+ 					{
+ 						Start-Sleep -Milliseconds 800
+ 						Save-ScreenPicture (Join-Path $checksDir ("last_logs\" + $act.Id + "-error.png"))
+@@ -1962,7 +2145,7 @@ public class RelayFlood
+ 				Stop-StartedProcesses
+ 
+ 				$actMatch = [regex]::Match($actLog, 'CHECK\|split screen\|(PASS|FAIL)\|(.*)')
+-				$actErrors = @([regex]::Matches($actLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
++				$actErrors = @([regex]::Matches($actLog, '(?im)^.*(Invalid VRAM access|Invalid memory access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
+ 				if ($actMatch.Success)
+ 				{
+ 					$actPassed = ($actMatch.Groups[1].Value -eq "PASS") -and ($actErrors.Count -eq 0)
+@@ -2007,6 +2190,7 @@ public class RelayFlood
+ 					@{ Id='QG23'; Code='0x0b01'; Name='Death Egg 2' }, @{ Id='QG24'; Code='0x1601'; Name='Hidden Palace' }
+ 				)
+ 				$quadActFilter = @($Only | Where-Object { $_ -match '^QG\d\d$' })
++				$quadReferenceMinimum = 0.85		# Share of equal pixels a view needs against the game's own picture (sprites, animated tiles and overlays make up the rest)
+ 				foreach ($act in $quadTargets)
+ 				{
+ 					if ($quadActFilter.Count -gt 0 -and -not ($quadActFilter -contains $act.Id)) { continue }
+@@ -2014,21 +2198,26 @@ public class RelayFlood
+ 					if (Test-Path $quadActTarget) { Remove-Item -LiteralPath $quadActTarget -Recurse -Force }
+ 					Copy-Item (Join-Path $checksDir 'harness\ActHarness') $quadActTarget -Recurse
+ 					$quadActMain = Join-Path $quadActTarget 'scripts\main.lemon'
+-					$quadActText = (Get-Content -Raw $quadActMain).Replace('constant bool QUAD_ACT_TEST = false', 'constant bool QUAD_ACT_TEST = true').Replace('__ZONE_ACT__', $act.Code).Replace('__EXPECT_SPLIT__', $(if ($act.Boss) { '0' } else { '1' })).Replace('__END_FRAME__', $(if ($act.End) { [string]$act.End } else { '560' })).Replace('__TELEPORT_ON__', $(if ($act.TeleportX) { '1' } else { '0' })).Replace('__TELEPORT_X__', $(if ($act.TeleportX) { $act.TeleportX } else { '0' })).Replace('__TELEPORT_Y__', $(if ($act.TeleportY) { $act.TeleportY } else { '0' }))
++					$quadActText = (Get-Content -Raw $quadActMain).Replace('constant bool QUAD_ACT_TEST = false', 'constant bool QUAD_ACT_TEST = true').Replace('__VIEW_SIZE__', [string]$ViewSize).Replace('__ZONE_ACT__', $act.Code).Replace('__EXPECT_SPLIT__', $(if ($act.Boss) { '0' } else { '1' })).Replace('__END_FRAME__', $(if ($act.End) { [string]$act.End } else { '560' })).Replace('__TELEPORT_ON__', $(if ($act.TeleportX) { '1' } else { '0' })).Replace('__TELEPORT_X__', $(if ($act.TeleportX) { $act.TeleportX } else { '0' })).Replace('__TELEPORT_Y__', $(if ($act.TeleportY) { $act.TeleportY } else { '0' }))
+ 					Set-Content -Path $quadActMain -Value $quadActText -Encoding utf8 -NoNewline
+-					Set-ActiveMods @('ActHarness', 'DropInCoop')
++					Set-ActiveMods @('DropInCoop', 'ActHarness')
+ 					$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 					$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+ 					Set-Content -Path $configPath -Value $configText -Encoding utf8
+ 					Remove-Item $logFile -ErrorAction SilentlyContinue
+ 					Stop-StartedProcesses
++					# Pictures of an earlier run must not be able to pass for this one
++					foreach ($oldPicture in @(Get-ChildItem -LiteralPath (Join-Path $checksDir 'last_logs') -Filter ($act.Id + '-*.bmp') -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ('^' + $act.Id + '-(roaming|frozen|ref\d)\.bmp$') })) { Remove-Item -LiteralPath $oldPicture.FullName -Force }
+ 					$quadActGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = $act.Id }
+-					$quadActFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier' -or $quadActGame.HasExited } 180
++					# A script compile error opens a window and writes nothing to the log: without "Ready to go" after a minute the game did not start
++					$quadActStarted = Wait-Until { ((Read-SharedText $logFile) -match 'Ready to go') -or $quadActGame.HasExited } 60
++					if ($quadActStarted) { $quadActFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier' -or $quadActGame.HasExited } 180 }
++					else { $quadActFinished = $false; Save-ScreenPicture (Join-Path $checksDir ('last_logs\' + $act.Id + '-error.png')) }
+ 					$quadActLog = Read-SharedText $logFile
+ 					Stop-StartedProcesses
+ 					Set-Content -Path (Join-Path $checksDir ('last_logs\' + $act.Id + '-logfile.txt')) -Value $quadActLog -Encoding utf8
+ 					$quadActMatch = [regex]::Match($quadActLog, 'CHECK\|split screen\|(PASS|FAIL)\|(.*)')
+-					$quadActErrors = [regex]::Match($quadActLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
++					$quadActErrors = [regex]::Match($quadActLog, '(?im)^.*(Invalid VRAM access|Invalid memory access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
+ 					$quadActPassed = $quadActMatch.Success -and $quadActMatch.Groups[1].Value -eq 'PASS' -and -not $quadActErrors.Success
+ 					$quadActDetail = if ($quadActErrors.Success) { $quadActErrors.Value } elseif ($quadActMatch.Success) { $quadActMatch.Groups[2].Value } elseif (-not $quadActFinished) { 'four-player scene run did not finish' } else { 'four-player scene result missing' }
+ 					Add-Result $act.Id ('Four-player scene: ' + $act.Name) $quadActPassed $quadActDetail
+@@ -2038,6 +2227,10 @@ public class RelayFlood
+ 						$quadPixels = Get-QuadCaptureStats $quadImage
+ 						$quadPicturePassed = $null -ne $quadPixels -and @($quadPixels.Quadrants | Where-Object { $_ -lt 200 }).Count -eq 0
+ 						Add-Result ($act.Id + 'V') ($act.Name + ': four rendered quadrants') $quadPicturePassed $(if ($null -ne $quadPixels) { $quadPixels.Quadrants -join '/' } else { 'missing framebuffer capture' })
++						# The four views must show what the game itself draws for the same four cameras (see Get-QuadReferenceStats)
++						$quadRefShares = Get-QuadReferenceStats (Join-Path $checksDir ('last_logs\' + $act.Id))
++						$quadRefPassed = ($null -ne $quadRefShares) -and (@($quadRefShares | Where-Object { $_ -lt $quadReferenceMinimum }).Count -eq 0)
++						Add-Result ($act.Id + 'R') ($act.Name + ': each view is the same picture as the game draws for that camera') $quadRefPassed $(if ($null -ne $quadRefShares) { (($quadRefShares | ForEach-Object { '{0:P0}' -f $_ }) -join '/') + ' equal (needs ' + ('{0:P0}' -f $quadReferenceMinimum) + ')' } else { 'reference pictures missing' })
+ 					}
+ 				}
+ 			}
+@@ -2049,20 +2242,22 @@ public class RelayFlood
+ 				if (Test-Path -LiteralPath $ziplineTarget) { Remove-Item -LiteralPath $ziplineTarget -Recurse -Force }
+ 				Copy-Item (Join-Path $checksDir 'harness\ActHarness') $ziplineTarget -Recurse
+ 				$ziplineMain = Join-Path $ziplineTarget 'scripts\main.lemon'
+-				$ziplineText = (Get-Content -Raw $ziplineMain).Replace('constant bool ZIPLINE_TEST = false', 'constant bool ZIPLINE_TEST = true').Replace('__ZONE_ACT__', '0x0000').Replace('__EXPECT_SPLIT__', '1').Replace('__END_FRAME__', '4500').Replace('__TELEPORT_ON__', '0').Replace('__TELEPORT_X__', '0').Replace('__TELEPORT_Y__', '0')
++				$ziplineText = (Get-Content -Raw $ziplineMain).Replace('constant bool ZIPLINE_TEST = false', 'constant bool ZIPLINE_TEST = true').Replace('__VIEW_SIZE__', [string]$ViewSize).Replace('__ZONE_ACT__', '0x0000').Replace('__EXPECT_SPLIT__', '1').Replace('__END_FRAME__', '4500').Replace('__TELEPORT_ON__', '0').Replace('__TELEPORT_X__', '0').Replace('__TELEPORT_Y__', '0')
+ 				Set-Content -Path $ziplineMain -Value $ziplineText -Encoding utf8 -NoNewline
+-				Set-ActiveMods @('ActHarness', 'DropInCoop')
++				Set-ActiveMods @('DropInCoop', 'ActHarness')
+ 				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+ 				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+ 				Set-Content -Path $configPath -Value $configText -Encoding utf8
+ 				Remove-Item $logFile -ErrorAction SilentlyContinue
+ 				Stop-StartedProcesses
+ 				$ziplineGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = 'Z1' }
+-				$ziplineFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier' -or $ziplineGame.HasExited } 180
++				$ziplineStarted = Wait-Until { ((Read-SharedText $logFile) -match 'Ready to go') -or $ziplineGame.HasExited } 60
++				if ($ziplineStarted) { $ziplineFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier' -or $ziplineGame.HasExited } 180 }
++				else { $ziplineFinished = $false; Save-ScreenPicture (Join-Path $checksDir 'last_logs\Z1-error.png') }
+ 				$ziplineLog = Read-SharedText $logFile
+ 				Stop-StartedProcesses
+ 				Set-Content -Path (Join-Path $checksDir 'last_logs\Z1-logfile.txt') -Value $ziplineLog -Encoding utf8
+-				$ziplineErrors = [regex]::Match($ziplineLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
++				$ziplineErrors = [regex]::Match($ziplineLog, '(?im)^.*(Invalid VRAM access|Invalid memory access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
+ 				$ziplineMatch = [regex]::Match($ziplineLog, 'CHECK\|zipline p2-only view\|(PASS|FAIL)\|(.*)')
+ 				$ziplinePassed = $ziplineMatch.Success -and $ziplineMatch.Groups[1].Value -eq 'PASS' -and -not $ziplineErrors.Success
+ 				$ziplineDetail = if ($ziplineErrors.Success) { $ziplineErrors.Value } elseif ($ziplineMatch.Success) { $ziplineMatch.Groups[2].Value } elseif (-not $ziplineFinished) { 'zip-line scene did not finish' } else { 'zip-line result missing' }
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/data/shader/render_plane.shader b/sonic3air_online_stable_source/Oxygen/oxygenengine/data/shader/render_plane.shader
+index 7f8a79f..ce7cf79 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/data/shader/render_plane.shader
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/data/shader/render_plane.shader
+@@ -97,7 +97,7 @@ void main()
+ 	#ifdef USE_BUFFER_TEXTURES
+ 		int scrollOffsetLookupX = texelFetch(HScrollOffsetsTexture, iy).x;
+ 	#else
+-		vec2 texelScrollX = texture(HScrollOffsetsTexture, vec2((float(iy) + 0.5) / 256.0, 0.5)).ra;
++		vec2 texelScrollX = texture(HScrollOffsetsTexture, vec2((float(iy) + 0.5) / 512.0, 0.5)).ra;
+ 		int scrollOffsetLookupXH = int(mod(texelScrollX.y * 256.0, 16.0));
+ 		int scrollOffsetLookupXL = int(texelScrollX.x * 256.0);
+ 		int scrollOffsetLookupX = scrollOffsetLookupXL + scrollOffsetLookupXH * 256;
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.cpp b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.cpp
+index c3672ed..0505c8c 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.cpp
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.cpp
+@@ -70,13 +70,13 @@ void OpenGLRenderResources::initialize()
+ 			mPlanePatternsTexture[index].create(BufferTexture::PixelFormat::UINT_16, 0x1000, 1, planeManager.getPlanePatternsBuffer((uint8)index));
+ 		}
+ 
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < 8; ++index)
+ 		{
+-			mHScrollOffsetsTexture[index].create(BufferTexture::PixelFormat::INT_16, 0x100, 1, nullptr);
++			mHScrollOffsetsTexture[index].create(BufferTexture::PixelFormat::INT_16, SCROLL_OFFSET_LINE_COUNT, 1, nullptr);
+ 			mVScrollOffsetsTexture[index].create(BufferTexture::PixelFormat::INT_16, 0x20, 1, nullptr);
+ 		}
+ 
+-		mEmptyScrollOffsetsTexture.create(BufferTexture::PixelFormat::UINT_16, 0x100, 1, mRenderParts.getScrollOffsetsManager().getScrollOffsetsH(0xff));
++		mEmptyScrollOffsetsTexture.create(BufferTexture::PixelFormat::UINT_16, SCROLL_OFFSET_LINE_COUNT, 1, mRenderParts.getScrollOffsetsManager().getScrollOffsetsH(0xff));
+ 	}
+ }
+ 
+@@ -196,15 +196,15 @@ void OpenGLRenderResources::refresh()
+ 		const ScrollOffsetsManager& scrollOffsetsManager = mRenderParts.getScrollOffsetsManager();
+ 
+ 		// Horizontal scroll offsets
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < 8; ++index)
+ 		{
+-			mHScrollOffsetsTexture[index].bufferData(scrollOffsetsManager.getScrollOffsetsH(index), 0x100, 1);
++			mHScrollOffsetsTexture[index].bufferData(scrollOffsetsManager.getScrollOffsetsH(index), SCROLL_OFFSET_LINE_COUNT, 1);
+ 		}
+ 
+ 		// Vertical scroll offsets
+ 		if (scrollOffsetsManager.getVerticalScrolling())
+ 		{
+-			for (int index = 0; index < 4; ++index)
++			for (int index = 0; index < 8; ++index)
+ 			{
+ 				mVScrollOffsetsTexture[index].bufferData(scrollOffsetsManager.getScrollOffsetsV(index), 0x20, 1);
+ 			}
+@@ -248,7 +248,7 @@ const BufferTexture& OpenGLRenderResources::getHScrollOffsetsTexture(int scrollO
+ 	if (scrollOffsetsIndex == 0xff)
+ 		return mEmptyScrollOffsetsTexture;
+ 
+-	RMX_ASSERT(scrollOffsetsIndex >= 0 && scrollOffsetsIndex < 4, "Invalid scroll offsets index " << scrollOffsetsIndex);
++	RMX_ASSERT(scrollOffsetsIndex >= 0 && scrollOffsetsIndex < 8, "Invalid scroll offsets index " << scrollOffsetsIndex);
+ 	return mHScrollOffsetsTexture[scrollOffsetsIndex];
+ }
+ 
+@@ -257,7 +257,7 @@ const BufferTexture& OpenGLRenderResources::getVScrollOffsetsTexture(int scrollO
+ 	if (scrollOffsetsIndex == 0xff)
+ 		return mEmptyScrollOffsetsTexture;
+ 
+-	RMX_ASSERT(scrollOffsetsIndex >= 0 && scrollOffsetsIndex < 4, "Invalid scroll offsets index " << scrollOffsetsIndex);
++	RMX_ASSERT(scrollOffsetsIndex >= 0 && scrollOffsetsIndex < 8, "Invalid scroll offsets index " << scrollOffsetsIndex);
+ 	return mVScrollOffsetsTexture[scrollOffsetsIndex];
+ }
+ 
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.h b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.h
+index 781dce8..cb2b356 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.h
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/opengl/OpenGLRenderResources.h
+@@ -56,8 +56,8 @@ private:
+ 	uint16 mPlanePatternsData[4][0x1000] = { 0 };	// Cache of last uploaded data, to be able to make comparisons
+ 
+ 	// Scrolling
+-	BufferTexture mHScrollOffsetsTexture[4];	// First two are for the planes, the others are used for certain effects that require an additional set of scroll offsets
+-	BufferTexture mVScrollOffsetsTexture[4];
++	BufferTexture mHScrollOffsetsTexture[8];	// First two are for the planes, the others are used for certain effects that require an additional set of scroll offsets
++	BufferTexture mVScrollOffsetsTexture[8];
+ 	BufferTexture mEmptyScrollOffsetsTexture;
+ };
+ 
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.cpp b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.cpp
+index 13ea4e5..b1778af 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.cpp
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.cpp
+@@ -29,7 +29,7 @@ void ScrollOffsetsManager::reset()
+ 	mHorizontalScrollMask = 0xff;
+ 	mVerticalScrollOffsetBias = 0;
+ 
+-	for (int index = 0; index < 4; ++index)
++	for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 	{
+ 		mSets[index] = { 0 };
+ 		mInterpolatedSets[index] = { 0 };
+@@ -41,14 +41,14 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 	if (refreshParameters.mHasNewSimulationFrame)
+ 	{
+ 		// Horizontal scrolling
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 		{
+ 			uint16* buffer = mSets[index].mScrollOffsetsH;
+ 			bool* overwriteFlags = mSets[index].mExplicitOverwriteH;
+ 			if (index < 2)
+ 			{
+ 				const uint16* src = (uint16*)&EmulatorInterface::instance().getVRam()[mHorizontalScrollTableBase + (1 - index) * 2];
+-				for (int k = 0; k < 0x100; ++k)
++				for (int k = 0; k < SCROLL_OFFSET_LINE_COUNT; ++k)
+ 				{
+ 					if (!overwriteFlags[k])
+ 					{
+@@ -59,7 +59,7 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 			}
+ 			else
+ 			{
+-				for (int k = 0; k < 0x100; ++k)
++				for (int k = 0; k < SCROLL_OFFSET_LINE_COUNT; ++k)
+ 				{
+ 					if (!overwriteFlags[k])
+ 					{
+@@ -71,7 +71,7 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 		}
+ 
+ 		// Vertical scrolling
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 		{
+ 			uint16* buffer = mSets[index].mScrollOffsetsV;
+ 			bool* overwriteFlags = mSets[index].mExplicitOverwriteV;
+@@ -108,10 +108,10 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 			const uint16 positionMaskV = (uint16)(mPlaneManager.getPlayfieldSizeInPixels().y - 1);
+ 			const uint16 halfPositionV = (uint16)(mPlaneManager.getPlayfieldSizeInPixels().y / 2);
+ 
+-			for (int index = 0; index < 4; ++index)
++			for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 			{
+ 				const int verticalDifference = mSets[index].mScrollOffsetsV[0] - mInterpolatedSets[index].mLastScrollOffsetsV[0];
+-				for (int k = 0; k < 0x100; ++k)
++				for (int k = 0; k < SCROLL_OFFSET_LINE_COUNT; ++k)
+ 				{
+ 					const int oldK = clamp(k + verticalDifference, 0, 223);
+ 					int16 diff = mSets[index].mScrollOffsetsH[k] - mInterpolatedSets[index].mLastScrollOffsetsH[oldK];
+@@ -131,7 +131,7 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 			}
+ 		}
+ 
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 		{
+ 			mInterpolatedSets[index].mValid = (refreshParameters.mUsingFrameInterpolation && mInterpolatedSets[index].mHasLastScrollOffsets);
+ 		}
+@@ -143,10 +143,10 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ 		const uint16 positionMaskH = (uint16)(mPlaneManager.getPlayfieldSizeInPixels().x - 1);
+ 		const uint16 positionMaskV = (uint16)(mPlaneManager.getPlayfieldSizeInPixels().y - 1);
+ 
+-		for (int index = 0; index < 4; ++index)
++		for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 		{
+ 			const int verticalDifference = -roundToInt((float)mInterpolatedSets[index].mDifferenceScrollOffsetsV[0] * interpolationFactor);
+-			for (int k = 0; k < 0x100; ++k)
++			for (int k = 0; k < SCROLL_OFFSET_LINE_COUNT; ++k)
+ 			{
+ 				const int oldK = clamp(k + verticalDifference, 0, 223);
+ 				mInterpolatedSets[index].mInterpolatedScrollOffsetsH[k] = (mSets[index].mScrollOffsetsH[oldK] - roundToInt((float)mInterpolatedSets[index].mDifferenceScrollOffsetsH[oldK] * interpolationFactor));
+@@ -162,11 +162,11 @@ void ScrollOffsetsManager::refresh(const RefreshParameters& refreshParameters)
+ void ScrollOffsetsManager::preFrameUpdate()
+ {
+ 	// Reset this again on each frame
+-	for (int index = 0; index < 4; ++index)
++	for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 		mSets[index].mHorizontalScrollNoRepeat = false;
+ 
+ 	// Backup scroll offsets before frame update
+-	for (int index = 0; index < 4; ++index)
++	for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 	{
+ 		InterpolatedScrollOffsetSet& interpolatedSet = mInterpolatedSets[index];
+ 		memcpy(interpolatedSet.mLastScrollOffsetsH, mSets[index].mScrollOffsetsH, sizeof(interpolatedSet.mLastScrollOffsetsH));
+@@ -182,11 +182,11 @@ void ScrollOffsetsManager::postFrameUpdate()
+ 
+ void ScrollOffsetsManager::resetOverwriteFlags()
+ {
+-	for (int index = 0; index < 4; ++index)
++	for (int index = 0; index < SCROLL_OFFSET_SET_COUNT; ++index)
+ 	{
+ 		// Horizontal scrolling
+ 		bool* overwriteFlags = mSets[index].mExplicitOverwriteH;
+-		for (int k = 0; k < 0x100; ++k)
++		for (int k = 0; k < SCROLL_OFFSET_LINE_COUNT; ++k)
+ 		{
+ 			overwriteFlags[k] = false;
+ 		}
+@@ -202,7 +202,7 @@ void ScrollOffsetsManager::resetOverwriteFlags()
+ 
+ bool ScrollOffsetsManager::getHorizontalScrollNoRepeat(int setIndex) const
+ {
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
+ 
+ 	const ScrollOffsetSet& set = mSets[setIndex];
+ 	return set.mHorizontalScrollNoRepeat;
+@@ -210,7 +210,7 @@ bool ScrollOffsetsManager::getHorizontalScrollNoRepeat(int setIndex) const
+ 
+ void ScrollOffsetsManager::setHorizontalScrollNoRepeat(int setIndex, bool enable)
+ {
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
+ 
+ 	ScrollOffsetSet& set = mSets[setIndex];
+ 	set.mHorizontalScrollNoRepeat = enable;
+@@ -218,8 +218,8 @@ void ScrollOffsetsManager::setHorizontalScrollNoRepeat(int setIndex, bool enable
+ 
+ void ScrollOffsetsManager::overwriteScrollOffsetH(int setIndex, int index, uint16 value)
+ {
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
+-	RMX_ASSERT(index >= 0 && index < 0x100, "Invalid index " << index);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(index >= 0 && index < SCROLL_OFFSET_LINE_COUNT, "Invalid index " << index);
+ 
+ 	ScrollOffsetSet& set = mSets[setIndex];
+ 	set.mScrollOffsetsH[index] = value & SCROLL_OFFSET_VALUE_BITMASK;
+@@ -228,7 +228,7 @@ void ScrollOffsetsManager::overwriteScrollOffsetH(int setIndex, int index, uint1
+ 
+ void ScrollOffsetsManager::overwriteScrollOffsetV(int setIndex, int index, uint16 value)
+ {
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
+ 	RMX_ASSERT(index >= 0 && index < 0x20, "Invalid index " << index);
+ 
+ 	ScrollOffsetSet& set = mSets[setIndex];
+@@ -240,11 +240,11 @@ const uint16* ScrollOffsetsManager::getScrollOffsetsH(int setIndex) const
+ {
+ 	if (setIndex == 0xff)
+ 	{
+-		static uint16 emptyScrollOffsetsH[0x100] = { 0 };
++		static uint16 emptyScrollOffsetsH[SCROLL_OFFSET_LINE_COUNT] = { 0 };
+ 		return emptyScrollOffsetsH;
+ 	}
+ 
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
+ 	if (mInterpolatedSets[setIndex].mValid)
+ 		return mInterpolatedSets[setIndex].mInterpolatedScrollOffsetsH;
+ 	return mSets[setIndex].mScrollOffsetsH;
+@@ -258,7 +258,7 @@ const uint16* ScrollOffsetsManager::getScrollOffsetsV(int setIndex) const
+ 		return emptyScrollOffsetsV;
+ 	}
+ 
+-	RMX_ASSERT(setIndex >= 0 && setIndex < 4, "Invalid scroll offset set index " << setIndex);
++	RMX_ASSERT(setIndex >= 0 && setIndex < SCROLL_OFFSET_SET_COUNT, "Invalid scroll offset set index " << setIndex);
+ 	if (mInterpolatedSets[setIndex].mValid)
+ 		return mInterpolatedSets[setIndex].mInterpolatedScrollOffsetsV;
+ 	return mSets[setIndex].mScrollOffsetsV;
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.h b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.h
+index 9997b7b..1913ea6 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.h
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/parts/ScrollOffsetsManager.h
+@@ -13,6 +13,13 @@
+ 
+ class PlaneManager;
+ 
++// Number of independent scroll offset sets: sets 0 and 1 follow the VDP tables, the others are free for scripts (a set that was not overwritten falls back to the set two lower)
++static const constexpr int SCROLL_OFFSET_SET_COUNT = 8;
++
++// Number of lines a horizontal scroll offset set holds (one offset per screen line): more than the 224 lines of the original screen,
++// because the split screen of Drop-In Co-op can make the screen up to 352 lines high
++static const constexpr int SCROLL_OFFSET_LINE_COUNT = 0x200;
++
+ class ScrollOffsetsManager
+ {
+ public:
+@@ -60,13 +67,13 @@ private:
+ 
+ 	struct ScrollOffsetSet
+ 	{
+-		uint16 mScrollOffsetsH[0x100]   = { 0 };	// One scroll offset per single pixel line
+-		bool mExplicitOverwriteH[0x100] = { 0 };	// One flag per horizontal scroll offset; set if it was explicitly overwritten
++		uint16 mScrollOffsetsH[SCROLL_OFFSET_LINE_COUNT]   = { 0 };	// One scroll offset per single pixel line
++		bool mExplicitOverwriteH[SCROLL_OFFSET_LINE_COUNT] = { 0 };	// One flag per horizontal scroll offset; set if it was explicitly overwritten
+ 		uint16 mScrollOffsetsV[0x20]    = { 0 };	// One scroll offset per row of 0x10 pixels
+ 		bool mExplicitOverwriteV[0x20]  = { 0 };	// One flag per vertical scroll offset; set if it was explicitly overwritten
+ 		bool mHorizontalScrollNoRepeat  = false;
+ 	};
+-	ScrollOffsetSet mSets[4];		// First two are for the planes, the others are used for certain effects that require an additional set of scroll offsets
++	ScrollOffsetSet mSets[SCROLL_OFFSET_SET_COUNT];	// First two are for the planes, the others are used for certain effects that require an additional set of scroll offsets, and for the four-view split screen of Drop-In Co-op (four independent A/B plane pairs)
+ 	Vec2i mScrollOffsetW;
+ 	int16 mVerticalScrollOffsetBias = 0;
+ 
+@@ -75,12 +82,12 @@ private:
+ 	{
+ 		bool mValid = false;
+ 		bool mHasLastScrollOffsets = false;
+-		uint16 mInterpolatedScrollOffsetsH[0x100] = { 0 };
++		uint16 mInterpolatedScrollOffsetsH[SCROLL_OFFSET_LINE_COUNT] = { 0 };
+ 		uint16 mInterpolatedScrollOffsetsV[0x20] = { 0 };
+-		uint16 mLastScrollOffsetsH[0x100] = { 0 };
++		uint16 mLastScrollOffsetsH[SCROLL_OFFSET_LINE_COUNT] = { 0 };
+ 		uint16 mLastScrollOffsetsV[0x20] = { 0 };
+-		int16 mDifferenceScrollOffsetsH[0x100] = { 0 };
++		int16 mDifferenceScrollOffsetsH[SCROLL_OFFSET_LINE_COUNT] = { 0 };
+ 		int16 mDifferenceScrollOffsetsV[0x20] = { 0 };
+ 	};
+-	InterpolatedScrollOffsetSet mInterpolatedSets[4];
++	InterpolatedScrollOffsetSet mInterpolatedSets[SCROLL_OFFSET_SET_COUNT];
+ };
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/software/SoftwareRenderer.cpp b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/software/SoftwareRenderer.cpp
+index 42a9242..7b752fe 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/software/SoftwareRenderer.cpp
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/rendering/software/SoftwareRenderer.cpp
+@@ -377,7 +377,7 @@ void SoftwareRenderer::renderPlane(const PlaneGeometry& geometry)
+ 		const uint16 numPatternsPerLine = (geometry.mPlaneIndex <= PlaneManager::PLANE_A) ? planeManager.getPlayfieldSizeInPatterns().x : 64;
+ 		const uint16* scrollOffsetsH = nullptr;
+ 		const uint16* scrollOffsetsV = nullptr;
+-		uint16 scrollMaskH = 0xff;
++		uint16 scrollMaskH = SCROLL_OFFSET_LINE_COUNT - 1;
+ 		uint16 scrollMaskV = 0;
+ 		bool scrollNoRepeat = false;
+ 
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.cpp b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.cpp
+index 1ccaf62..70dd34e 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.cpp
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.cpp
+@@ -7,6 +7,7 @@
+ */
+ 
+ #include "oxygen/pch.h"
++#include <filesystem>
+ #include "oxygen/simulation/LemonScriptProgram.h"
+ #include "oxygen/simulation/EmulatorInterface.h"
+ #include "oxygen/simulation/LogDisplay.h"
+@@ -320,7 +321,7 @@ LemonScriptProgram::LoadingResult LemonScriptProgram::loadAllScriptModules(const
+ 			// If that failed, load from scripts.bin
+ 			if (!scriptsLoaded)
+ 			{
+-				scriptsLoaded = loadBaseScriptFromBinary(globalsLookup, L"data/scripts.bin", coreModuleDependencyHash, loadOptions);
++				scriptsLoaded = loadBaseScriptFromBinary(globalsLookup, L"data/scripts.bin", baseScriptFilename, coreModuleDependencyHash, loadOptions);
+ 			}
+ 		}
+ 		else
+@@ -328,7 +329,7 @@ LemonScriptProgram::LoadingResult LemonScriptProgram::loadAllScriptModules(const
+ 			// Without dev mode, prefer loading from scripts.bin
+ 			if (!scriptsLoaded)
+ 			{
+-				scriptsLoaded = loadBaseScriptFromBinary(globalsLookup, L"data/scripts.bin", coreModuleDependencyHash, loadOptions);
++				scriptsLoaded = loadBaseScriptFromBinary(globalsLookup, L"data/scripts.bin", baseScriptFilename, coreModuleDependencyHash, loadOptions);
+ 			}
+ 
+ 			// If that failed, try to load from sources as a fallback
+@@ -435,7 +436,37 @@ bool LemonScriptProgram::loadBaseScriptFromSource(lemon::GlobalsLookup& globalsL
+ 	return true;
+ }
+ 
+-bool LemonScriptProgram::loadBaseScriptFromBinary(lemon::GlobalsLookup& globalsLookup, std::wstring_view filename, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions)
++// True if any script source file next to the main script is newer than the compiled script cache (or if that cannot be told)
++static bool isCompiledScriptCacheStale(std::wstring_view cachePath, std::wstring_view sourceScriptFilename)
++{
++	if (sourceScriptFilename.empty())
++		return false;
++
++	std::error_code ec;
++	const std::filesystem::path cacheFile(std::wstring(cachePath).c_str());
++	const std::filesystem::file_time_type cacheTime = std::filesystem::last_write_time(cacheFile, ec);
++	if (ec)
++		return false;	// No cache file, nothing to judge
++
++	const std::filesystem::path scriptsFolder = std::filesystem::path(std::wstring(sourceScriptFilename).c_str()).parent_path();
++	if (!std::filesystem::is_directory(scriptsFolder, ec))
++		return false;	// No script sources in this installation, the cache is all there is
++
++	std::filesystem::recursive_directory_iterator iterator(scriptsFolder, std::filesystem::directory_options::skip_permission_denied, ec);
++	for (; !ec && iterator != std::filesystem::recursive_directory_iterator(); iterator.increment(ec))
++	{
++		if (!iterator->is_regular_file(ec))
++			continue;
++		if (iterator->path().extension() != L".lemon")
++			continue;
++		const std::filesystem::file_time_type fileTime = iterator->last_write_time(ec);
++		if (!ec && fileTime > cacheTime)
++			return true;
++	}
++	return false;
++}
++
++bool LemonScriptProgram::loadBaseScriptFromBinary(lemon::GlobalsLookup& globalsLookup, std::wstring_view filename, std::wstring_view sourceScriptFilename, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions)
+ {
+ 	// Deserialize from compiled scripts
+ 	std::vector<uint8> buffer;
+@@ -444,6 +475,13 @@ bool LemonScriptProgram::loadBaseScriptFromBinary(lemon::GlobalsLookup& globalsL
+ 	Configuration& config = Configuration::instance();
+ 	if (!loaded && !config.mCompiledScriptSavePath.empty())
+ 	{
++		// The cache in the saves folder is only valid for the scripts it was compiled from. Its version check cannot see a changed script
++		// (a new game build or a mod update with the same version number), so a script file that is newer than the cache makes it stale.
++		if (isCompiledScriptCacheStale(config.mCompiledScriptSavePath, sourceScriptFilename))
++		{
++			RMX_LOG_INFO("Compiled script cache is older than the script sources, loading the scripts from source instead");
++			return false;
++		}
+ 		loaded = FTX::FileSystem->readFile(config.mCompiledScriptSavePath, buffer);
+ 	}
+ 
+diff --git a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.h b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.h
+index 8239f01..891fb4f 100644
+--- a/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.h
++++ b/sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.h
+@@ -119,7 +119,7 @@ private:
+ 	LoadingResult loadAllScriptModules(const LoadOptions& loadOptions, std::wstring_view baseScriptFilename, const std::vector<const Mod*>& modsToLoad);
+ 
+ 	bool loadBaseScriptFromSource(lemon::GlobalsLookup& globalsLookup, std::wstring_view filename, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions, LoadingResult& outLoadingResult);
+-	bool loadBaseScriptFromBinary(lemon::GlobalsLookup& globalsLookup, std::wstring_view filename, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions);
++	bool loadBaseScriptFromBinary(lemon::GlobalsLookup& globalsLookup, std::wstring_view filename, std::wstring_view sourceScriptFilename, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions);
+ 	bool loadBaseScriptFromCache(lemon::GlobalsLookup& globalsLookup, uint32 coreModuleDependencyHash, const LoadOptions& loadOptions);
+ 
+ 	LoadingResult loadScriptModule(lemon::Module& module, lemon::GlobalsLookup& globalsLookup, std::wstring_view filename);
+diff --git a/sonic3air_online_stable_source/Oxygen/sonic3air/scripts/main_gameapp.lemon b/sonic3air_online_stable_source/Oxygen/sonic3air/scripts/main_gameapp.lemon
+index 9c3bb93..5ad32f4 100644
+--- a/sonic3air_online_stable_source/Oxygen/sonic3air/scripts/main_gameapp.lemon
++++ b/sonic3air_online_stable_source/Oxygen/sonic3air/scripts/main_gameapp.lemon
+@@ -25,3 +25,11 @@ function bool Game.isEnduserBuild()
+ 	// There's no differentiation between end-user and development builds any more
+ 	return true
+ }
++
++
++// Capability marker for Drop-In Co-op's four-view local split screen. It needs 8 scroll offset sets in the renderer
++// (the stock game has only 4), so the mod asks for this function by name and stays on one shared camera if it does not exist.
++function void Engine.markFourViewSplitSupported()
++{
++	u8[0x8fff02] = 1
++}

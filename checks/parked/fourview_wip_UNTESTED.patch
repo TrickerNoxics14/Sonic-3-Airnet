@@ -1,0 +1,315 @@
+diff --git a/DropInCoop/README.txt b/DropInCoop/README.txt
+index 3308445..64e293f 100644
+--- a/DropInCoop/README.txt
++++ b/DropInCoop/README.txt
+@@ -1,7 +1,7 @@
+ Drop-In Co-op (v0.2.0, experimental party mode)
+ 
+ Local co-op for Sonic 3 A.I.R. This is a script mod; it does not include or require the online fork.
+-Two-player mode works with the stock game. Three/four-player party mode targets the latest stable stock Sonic 3 A.I.R. v26.03.28.0. Four-view split screen needs an extended engine build that is NOT part of any current download, so 3/4 players share one screen for now.
++Two-player mode works with the stock game. Three/four-player party mode targets the latest stable stock Sonic 3 A.I.R. v26.03.28.0. Four-view split screen (a quarter of the screen for each of three/four players) needs the modified engine of the Sonic 3 A.I.R. Online build of this project; the official stock game cannot show it, so with the stock game 3/4 players share one screen.
+ Online play requires the separate modified engine build; this mod-only package is for local play.
+ 
+ INSTALL
+@@ -111,10 +111,12 @@ THREE / FOUR PLAYER PARTY MODE (experimental, v0.2.0)
+   join during ordinary active gameplay; scripted controls keep them waiting.
+   P3/P4 hold Down + Mode for two seconds to leave. Down + Y requests rescue.
+   On the official stock game, three/four-player mode uses one shared camera.
+-  An extended engine build (not currently distributed) would add optional four-view split screen. Enable
+-  Visuals > Four-Player Quadrant Split Screen when using that engine. The game falls back to a
+-  shared view during bosses, water scenes, unsupported scrolling and camera
+-  locks. Boss fights use one shared screen for the whole party.
++  The Sonic 3 A.I.R. Online build of this project (its engine has the eight scroll offset sets that four
++  independent views need) shows four views: the top two are players 1 and 2, the bottom two are players 3 and 4,
++  each with its own camera and name label. "Split Screen View Size" applies to the four views as well (Small:
++  four views of 200 x 112 pixels, Medium 200 x 144, Large 200 x 176). Switch it off at Visuals >
++  Four-Player Quadrant Split Screen. The game falls back to a shared view during bosses, water scenes,
++  unsupported scrolling and camera locks. Boss fights use one shared screen for the whole party.
+   Players who fall behind regroup at a grounded Sonic; extra-player deaths
+   respawn near him. Extra players keep their join request across act changes.
+   Each player has their own rings and score. Turning Maximum Players back to 2
+@@ -122,8 +124,10 @@ THREE / FOUR PLAYER PARTY MODE (experimental, v0.2.0)
+   For online play, every friend uses this updated build and presses Host/Join
+   as usual. Friends are assigned separate slots 2, 3 and 4. The host must set
+   Maximum Players to 4 before starting a four-player game.
+-  Four-view mode requires an extended engine build that is not currently distributed, and does not work with the
+-  official stock executable. It remains experimental: full routes, bosses,
++  Four-view mode requires the engine of the Online build and does not work with the official stock executable
++  (this mod then keeps everybody on one shared screen). Medium and Large view sizes make the screen taller than 256
++  lines, which the stock engine cannot scroll line by line, so the mod keeps the stock game at the original size.
++  It remains experimental: full routes, bosses,
+   scripted transports and super/shield combinations are not fully audited.
+   The new network packet format requires every participant to update the engine.
+ 
+diff --git a/DropInCoop/scripts/common.lemon b/DropInCoop/scripts/common.lemon
+index c29cec4..6524d97 100644
+--- a/DropInCoop/scripts/common.lemon
++++ b/DropInCoop/scripts/common.lemon
+@@ -25,6 +25,7 @@ global u8  option.dropin.view_size		// 0 = 112 lines per view (original), 1 = 14
+ global u16 dropin.base_w					// Screen size before the split screen enlarged it
+ global u16 dropin.base_h
+ global u16 dropin.big_h					// Height of the enlarged screen while it is enlarged, otherwise 0
++global bool dropin.quad_layout			// The planes are in the four-view layout (32 patterns wide, one band per view below each other)
+ 
+ // The view height the player chose in the options
+ function u16 DropIn.chosenViewHeight()
+@@ -50,10 +51,11 @@ function u16 DropIn.bandRows()
+ 
+ // Where plane B's name table lives while the split screen is on.
+ // Normally 0xe000. The game copies its line scroll table to 0xf000 every frame, so with taller views (which need more rows per plane)
+-// plane B moves down to start right after plane A's two bands, below 0xf000.
++// plane B moves down to start right after plane A's bands, below 0xf000. Two views: two bands of one 64 patterns wide plane;
++// four views: four bands of one 32 patterns wide plane. Either way the plane takes bandRows * 0x200 bytes.
+ function u16 DropIn.planeBaseB()
+ {
+-	if (dropin.big_h == 0)
++	if (dropin.big_h == 0 && !dropin.quad_layout)
+ 		return 0xe000
+ 	return 0xc000 + DropIn.bandRows() * 2 * 0x100
+ }
+diff --git a/DropInCoop/scripts/planes2.lemon b/DropInCoop/scripts/planes2.lemon
+index aafb591..d2453b5 100644
+--- a/DropInCoop/scripts/planes2.lemon
++++ b/DropInCoop/scripts/planes2.lemon
+@@ -334,8 +334,8 @@ function void DropIn.fillPlaneView(u16 vramBase, u32 layoutBase, u16 worldTop, u
+ 		}
+ 		s32 firstTile = DropIn.floorDiv16(minX)
+ 		s32 lastTile = DropIn.floorDiv16(maxX + width - 1)
+-		if (lastTile - firstTile > 31)
+-			lastTile = firstTile + 31		// The plane is only 32 tiles wide
++		if (lastTile - firstTile > (fourViews ? 15 : 31))
++			lastTile = firstTile + (fourViews ? 15 : 31)		// The plane is only 32 tiles wide (16 with four views)
+ 
+ 		// Level data of this tile row
+ 		u16 worldY = (worldTop & 0xfff0) + u16(ty * 16)
+@@ -343,8 +343,10 @@ function void DropIn.fillPlaneView(u16 vramBase, u32 layoutBase, u16 worldTop, u
+ 		u16 chunkLine = u16[layoutBase + chunkLineOffset]
+ 		u32 tileRowInChunk = worldY & 0x70
+ 
+-		u32 planeRow = (band == 0xff) ? ((u32(worldY) >> 4) & 0x0f) : (fourViews ? ((u32(band) >> 1) * 8 + u32(ty)) : (u32(band) * DropIn.bandRows() + u32(ty)))
+-		u16 lineBase = vramBase + u16(planeRow * 2 * 0x80)
++		// Rows of the plane: one band for each view below each other (two or four of them)
++		u32 planeRow = (band == 0xff) ? ((u32(worldY) >> 4) & 0x0f) : (u32(band) * DropIn.bandRows() + u32(ty))
++		u16 patternRowSize = fourViews ? 0x40 : 0x80		// One row of patterns: 32 (four views) or 64 patterns of 2 bytes
++		u16 lineBase = vramBase + u16(planeRow * 2 * patternRowSize)
+ 
+ 		// Each plane column shows the tile from the 32 tiles wide window starting at the reference position
+ 		//  -> The Sky Sanctuary background gets streamed in like the foreground (no fixed position)
+@@ -365,9 +367,9 @@ function void DropIn.fillPlaneView(u16 vramBase, u32 layoutBase, u16 worldTop, u
+ 			u32 my = (tile & 0x0800) ? 4 : 0
+ 			u16 xorMask = (tile & 0x0c00) << 1
+ 
+-			u32 column = fourViews ? ((u32(band & 1) * 0x10) + (u32(tx) & 0x0f)) : (u32(tx) & 0x1f)
++			u32 column = fourViews ? (u32(tx) & 0x0f) : (u32(tx) & 0x1f)
+ 			u16 lineBase0 = lineBase + u16(column * 4)
+-			u16 lineBase1 = lineBase0 + 0x80
++			u16 lineBase1 = lineBase0 + patternRowSize
+ 			setVRAM(lineBase0 + 0, u16[patternBase     + mx + my] ^ xorMask)
+ 			setVRAM(lineBase0 + 2, u16[patternBase + 2 - mx + my] ^ xorMask)
+ 			setVRAM(lineBase1 + 0, u16[patternBase + 4 + mx - my] ^ xorMask)
+@@ -690,6 +692,8 @@ function void DropIn.preparePartyExtraView(u8 viewIndex)
+ 	u8 oldPrepareIndex = dropin.prepare_view_index
+ 	bool oldView2Valid = dropin.view2.state_valid
+ 	bool oldView2Indoors = dropin.view2.indoors
++	u16 oldView2FgY = dropin.view2.fg_y		// "DropIn.prepareView2" leaves the y-positions of the view it prepared here; player 2's view must keep its own
++	u16 oldView2BgY = dropin.view2.bg_y
+ 
+ 	if (viewIndex == 2)
+ 	{
+@@ -722,6 +726,8 @@ function void DropIn.preparePartyExtraView(u8 viewIndex)
+ 	dropin.prepare_view_index = oldPrepareIndex
+ 	dropin.view2.state_valid = oldView2Valid
+ 	dropin.view2.indoors = oldView2Indoors
++	dropin.view2.fg_y = oldView2FgY
++	dropin.view2.bg_y = oldView2BgY
+ 	u16[DropIn.P2 + 0x10] = oldP2X
+ 	u16[DropIn.P2 + 0x14] = oldP2Y
+ 	camera.position.x.player2 = oldCameraX
+diff --git a/DropInCoop/scripts/screensize.lemon b/DropInCoop/scripts/screensize.lemon
+index 7c83434..1082df1 100644
+--- a/DropInCoop/scripts/screensize.lemon
++++ b/DropInCoop/scripts/screensize.lemon
+@@ -124,3 +124,17 @@ function void fn239e74()
+ 		return
+ 	base.fn239e74()
+ }
++
++
++// Most zones fill the line scroll table (0xffffe000) with this function. It goes through a table of bands in the ROM that describes exactly 224 lines;
++// with a taller screen it asks for more lines than that and reads past the end of the table ("Invalid memory access at 0x400000" in IceCap 1 and
++// Mushroom Hill 1, where that table is the last data of the ROM; in other zones it silently reads other data). The views only show the first
++// lines of the table (at most 176), so asking for 224 lines is enough. Callers set "D1 = getScreenHeight() - 1" before: AIZ, HCZ, MGZ, CNZ, ICZ, LBZ,
++// MHZ, LRZ and more through "fn04f0ce", and some zones directly.
++//# address-hook(0x04f0de)
++function void fn04f0de()
++{
++	if (dropin.big_h != 0 && D1.u16 > 223)
++		D1.u16 = 223
++	base.fn04f0de()
++}
+diff --git a/DropInCoop/scripts/split.lemon b/DropInCoop/scripts/split.lemon
+index 7ff1df3..733d63f 100644
+--- a/DropInCoop/scripts/split.lemon
++++ b/DropInCoop/scripts/split.lemon
+@@ -51,8 +51,6 @@ global bool dropin.camera3.valid
+ global bool dropin.camera4.valid
+ global u8 dropin.party_render_view
+ 
+-constant u16 DropIn.PARTY_VIEW_WIDTH = 160
+-constant u16 DropIn.PARTY_VIEW_HEIGHT = 112
+ constant u32 DropIn.PARTY_SCROLL1 = 0x8f1c00
+ constant u32 DropIn.PARTY_SCROLL2 = 0x8f2000
+ constant u32 DropIn.PARTY_SCROLL3 = 0x8f1400
+@@ -82,6 +80,12 @@ function bool DropIn.fourViewRequested()
+ 	return option.dropin.four_view_split != 0 && DropIn.partyCount() > 2 && !DropIn.net() && DropIn.fourViewEngineAvailable()
+ }
+ 
++// Is the screen split into four views right now?
++function bool DropIn.fourViewActive()
++{
++	return dropin.split_active && DropIn.partyCount() > 2 && DropIn.fourViewRequested()
++}
++
+ function bool DropIn.fourViewSceneSupported()
+ {
+ 	return DropIn.isZoneSupported() && DropIn.isScrollingSupported() && !DropIn.bossViewActive() && level.water_present == 0
+@@ -144,11 +148,15 @@ function void DropIn.updatePartyCamera(u8 view)
+ 	if (player == 0 || u8[player + 5] >= base_state.DIED)
+ 		return
+ 	s16 left = s16(move_area.left)
+-	s16 right = max(left, s16(move_area.right) - s16(getScreenWidth() - DropIn.PARTY_VIEW_WIDTH))
++	// A view is half as wide and half as high as the screen. The game's camera limits are for a 320 pixels wide screen:
++	// the camera of a view that is viewW wide may go up to "right + 320 - viewW" (the same as "right - (screen width - 320)" for the whole screen, see "UpdateCameraPositionX").
++	s16 viewW = s16(getScreenWidth() / 2)
++	s16 viewH = s16(getScreenHeight() / 2)
++	s16 right = max(left, s16(move_area.right) + 320 - viewW)
+ 	s16 top = s16(level.vertical_wrap)
+-	s16 bottom = max(top, s16(move_area.bottom.current) + s16(getScreenHeight() - DropIn.PARTY_VIEW_HEIGHT))
+-	s16 targetX = clamp(s16(u16[player + 0x10]) - 72, left, right)
+-	s16 targetY = clamp(s16(u16[player + 0x14]) - 44, top, bottom)
++	s16 bottom = max(top, s16(move_area.bottom.current) + s16(DropIn.baseScreenH() - viewH))
++	s16 targetX = clamp(s16(u16[player + 0x10]) - (viewW / 2 - 8), left, right)
++	s16 targetY = clamp(s16(u16[player + 0x14]) - viewH * 44 / 112, top, bottom)
+ 	u16 x = DropIn.partyViewCameraX(view)
+ 	u16 y = DropIn.partyViewCameraY(view)
+ 	bool valid = view == 2 ? dropin.camera3.valid : view == 3 ? dropin.camera4.valid : true
+@@ -177,43 +185,51 @@ function void DropIn.updatePartyCameras()
+ 
+ function void DropIn.setupFourViewPlanes()
+ {
+-	u16 width = getScreenWidth() / 2
+-	u16 height = getScreenHeight() / 2
++	u16 viewW = getScreenWidth() / 2
++	u16 viewH = getScreenHeight() / 2
++
++	// Four-view plane memory: four bands (one per view) below each other in one plane that is 32 patterns (256 pixels) wide,
++	// and plane B behind plane A (the game may have set its own values in the meantime)
++	VDP.Config.setPlayfieldSizeInPatterns(32, 128)
++	VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
++
+ 	Renderer.resetCustomPlaneConfigurations()
+ 	Renderer.enableDefaultPlane(0, false)
+ 	Renderer.enableDefaultPlane(1, false)
+ 	Renderer.enableDefaultPlane(2, false)
+ 	Renderer.enableDefaultPlane(3, false)
++	u16 bandHeight = DropIn.bandRows() * 16
+ 	for (u8 view = 0; view < 4; ++view)
+ 	{
+-		u16 x = (view & 1) ? width : 0
+-		u16 y = (view & 2) ? height : 0
+-		u8 band = view
+-		u8 scroll = view * 2
+-		u16 cameraY = DropIn.partyViewCameraY(view)
++		u16 x = (view & 1) ? viewW : 0
++		u16 y = (view & 2) ? viewH : 0
++		u8 scroll = view * 2				// Scroll set of plane B (background); the next one is for plane A (foreground)
+ 		u16 bgY = view == 0 ? camera.background.y.u16 : view == 1 ? dropin.view2.bg_y : view == 2 ? dropin.view3.bg_y : dropin.view4.bg_y
+ 		u16 fgY = view == 0 ? camera.foreground.y.u16 : view == 1 ? dropin.view2.fg_y : view == 2 ? dropin.view3.fg_y : dropin.view4.fg_y
+ 		u32 scrollBase = view == 0 ? DropIn.PARTY_SCROLL1 : view == 1 ? DropIn.PARTY_SCROLL2 : view == 2 ? DropIn.PARTY_SCROLL3 : DropIn.PARTY_SCROLL4
+-		for (u16 line = 0; line < height; ++line)
++		for (u16 line = 0; line < viewH; ++line)
+ 		{
++			// The game's table has plane A (foreground) in the upper word and plane B (background) in the lower one, as the negative camera x.
++			// The plane coordinate of a screen column is its x plus the scroll offset: the view starts at screen column x and the plane
++			// wraps every 256 pixels (like the content in "DropIn.fillPlaneView"), so the offset is the camera x minus the view's origin.
+ 			u32 entry = u32[scrollBase + line * 4]
+-			// Plane coordinates use absolute screen x. Shift the right half by
+-			// 256px in the table, offset by its 160px viewport origin.
+-			u16 horizontalBand = (view & 1) ? 0x60 : 0
+-			Renderer.setScrollOffsetH(scroll, y + line, (horizontalBand - s16(entry >> 16)) & 0x0fff)
+-			Renderer.setScrollOffsetH(scroll + 1, y + line, (horizontalBand - s16(entry & 0xffff)) & 0x0fff)
++			s32 bgScroll = -s32(s16(entry & 0xffff)) - s32(x)
++			s32 fgScroll = -s32(s16(entry >> 16)) - s32(x)
++			Renderer.setScrollOffsetH(scroll, y + line, u16(bgScroll) & 0x0fff)
++			Renderer.setScrollOffsetH(scroll + 1, y + line, u16(fgScroll) & 0x0fff)
+ 		}
+ 		for (u8 column = 0; column < 0x20; ++column)
+ 		{
+-			u16 verticalBand = (view >> 1) * 0x80
++			// Each view's band starts bandHeight lines below the previous one; the view itself starts at screen line y
++			u16 verticalBand = view * bandHeight
+ 			Renderer.setScrollOffsetV(scroll, column, verticalBand - y + (bgY & 0x0f))
+ 			Renderer.setScrollOffsetV(scroll + 1, column, verticalBand - y + (fgY & 0x0f))
+ 		}
+ 		u16 planeQueue = 0x1000 + view * 0x400
+-		Renderer.setupPlane(x, y, width, height, 0x00, scroll, planeQueue)
+-		Renderer.setupPlane(x, y, width, height, 0x01, scroll + 1, planeQueue + 0x80)
+-		Renderer.setupPlane(x, y, width, height, 0x10, scroll, planeQueue + 0x100)
+-		Renderer.setupPlane(x, y, width, height, 0x11, scroll + 1, planeQueue + 0x180)
++		Renderer.setupPlane(x, y, viewW, viewH, 0x00, scroll, planeQueue)
++		Renderer.setupPlane(x, y, viewW, viewH, 0x01, scroll + 1, planeQueue + 0x80)
++		Renderer.setupPlane(x, y, viewW, viewH, 0x10, scroll, planeQueue + 0x100)
++		Renderer.setupPlane(x, y, viewW, viewH, 0x11, scroll + 1, planeQueue + 0x180)
+ 	}
+ }
+ 
+@@ -325,9 +341,12 @@ function void DropIn.resetView2()
+ function void DropIn.applyViewSize()
+ {
+ 	// The intro of Angel Island 1 stays at the original size: the game's own intro code depends on the screen height
+-	bool wantBig = dropin.split_active && !DropIn.net() && DropIn.partyCount() <= 2 && DropIn.chosenViewHeight() != 112 && DropIn.getScrollProfile() != DropIn.PROFILE_AIZ1_INTRO
++	//  -> With four views, the screen has the same height as with two (each of the four views is half as high), so the size setting applies to both
++	bool wantBig = dropin.split_active && !DropIn.net() && DropIn.chosenViewHeight() != 112 && DropIn.getScrollProfile() != DropIn.PROFILE_AIZ1_INTRO
++	bool wantQuad = DropIn.fourViewActive() && !DropIn.net()
+ 	u16 wanted = wantBig ? DropIn.chosenViewHeight() * 2 : 0
+-	if (wanted != dropin.big_h && dropin.split_active)
++	bool hadLayout = (dropin.big_h != 0 || dropin.quad_layout)
++	if ((wanted != dropin.big_h || wantQuad != dropin.quad_layout) && dropin.split_active)
+ 		DropIn.resetView2()			// The views change size: player 2's camera and the plane bands get set up again
+ 	if (wantBig)
+ 	{
+@@ -338,16 +357,31 @@ function void DropIn.applyViewSize()
+ 		}
+ 		if (getScreenHeight() != wanted)
+ 			Renderer.setScreenSize(dropin.base_w, wanted)
+-		VDP.Config.setPlayfieldSizeInPatterns(64, 64)
+ 		dropin.big_h = wanted
+-		VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
+ 	}
+ 	else if (dropin.big_h != 0)
+ 	{
+ 		Renderer.setScreenSize(dropin.base_w, dropin.base_h)
++		dropin.big_h = 0
++	}
++	dropin.quad_layout = wantQuad
++
++	// Plane memory: two views are two bands of one 64 x 64 patterns plane, four views are four bands of one 32 x 128 patterns plane
++	// (a view is up to 200 pixels wide, so the plane is only 256 pixels wide and wraps in the same way as for each single view)
++	if (wantQuad)
++	{
++		VDP.Config.setPlayfieldSizeInPatterns(32, 128)
++		VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
++	}
++	else if (wantBig)
++	{
++		VDP.Config.setPlayfieldSizeInPatterns(64, 64)
++		VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
++	}
++	else if (hadLayout)								// Back to the original plane memory, once
++	{
+ 		VDP.Config.setPlayfieldSizeInPixels(512, 256)
+ 		VDP.Config.setNameTableBasePlaneB(0xe000)
+-		dropin.big_h = 0
+ 	}
+ }
+ 

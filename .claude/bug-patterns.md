@@ -209,6 +209,39 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Guard: Y2b
 - Lesson: log the outcome where every route passes (same as test-pins-internal-path).
 
+## 2026-11-11 · mod-load-order-assumed · powershell
+- Seed: checks/run_checks.ps1 stages G, QG, Z, H, F, P, Q listed the harness mod BEFORE DropInCoop (`Set-ActiveMods @("ActHarness", "DropInCoop")`); on the stable fork the game stopped at start with "Script compile error: Unknown function name 'DropIn.partyPlayer' ... module 's3air-drop-in-act-harness'"
+- Root cause: a script module can only see the functions and globals of the modules compiled before it, and modules are compiled in the order of active-mods.json. The harness calls DropIn.* and reads dropin.* globals, so it has to come after DropInCoop (the N stage and run_stock_checks.ps1 already did that). The test engine (v26.08.15) accepted either order, so every earlier run hid it.
+- Search: `grep -n "Set-ActiveMods" checks/run_checks.ps1` (a harness must come after the mod it imports from)
+- Siblings: all seven harness stages fixed (dependency first); TeleportHarness imports nothing
+- Guard: G01 and QG05 run on the stable engine (stable runs are the ones that count)
+- Lesson: when a test mod imports another mod, list the other mod first; do not rely on an engine version that forgives the wrong order.
+
+## 2026-11-11 · cache-validated-by-version-only · cpp
+- Seed: LemonScriptProgram::loadBaseScriptFromBinary - `saves/scripts.bin` (written after every compile from source) was reused although a game script had changed, because its only checks are the engine's native binding hash and the game version number (unchanged: 26.03.28.0 in the official game and in this fork). The new Engine.markFourViewSplitSupported function in scripts/main_gameapp.lemon was invisible (four views "req 0").
+- Broken assumption: a compiled cache that loads without error is the compile of the scripts that lie next to it
+- Fix: the cache in the saves folder is ignored (with a log line) if any .lemon file of the script folder is newer than it; a shipped data/scripts.bin is not touched by this
+- Search: `grep -rn "mCompiledScriptSavePath" Oxygen`
+- Guard: U6 (unzipped package with a stale cache is rebuilt) and the four-view stages, which need the marker function
+- Lesson: a cache needs a key that changes whenever its input changes; a version number is not one if it is not bumped.
+
+## 2026-11-11 · fixed-width-view-constants · lemon
+- Seed: DropInCoop four-view code (split.lemon, planes2.lemon) was written for a 320 pixel screen and never looked at: horizontal band offset 0x60 (= 256 - 160), view width 160 (PARTY_VIEW_WIDTH), camera offset 72; the game window is 400 pixels wide, so each view is 200 wide
+- Seed 2: the plane bands were two columns of 16 tiles in a 512 pixel wide plane, but the plane wraps every 512 pixels: a view whose camera x passed a multiple of 256 showed the neighbour band (torn pictures in Marble Garden, Sandopolis ...). The pixel counts of QGxxV could not tell.
+- Seed 3: plane B was given the scroll set of plane A and the other way round (the game's line table has plane A in the upper word)
+- Fix: four bands below each other in one 32 patterns wide plane (so a view wraps like a normal screen), sizes derived from the screen, scroll sets matched to planes; QGxxR compares each view with the game's own picture of the same camera
+- Search: `grep -n "0x60\|PARTY_VIEW\|- 72\|- 44\|>> 1) \* 8" DropInCoop/scripts/*.lemon` and every `160`/`320`/`224` in the mod
+- Guard: QGxxR (the four-view picture against the game's own full screen picture of each of the four cameras)
+- Lesson: a visual feature needs a check that compares pictures, not one that counts coloured pixels.
+
+## 2026-11-11 · rom-band-table-overrun · lemon
+- Seed: fn04f0de (zone line scroll code) with a screen taller than 224 lines reads past the end of a band table in the ROM: "Invalid memory access at 0x400000 of 0x2 bytes" in IceCap 1 and Mushroom Hill 1 (the table is the last data of the ROM there; in other zones it read other data without any message)
+- Broken assumption: the number of lines (getScreenHeight() - 1 in D1) always fits the table; true only for the original 224 lines
+- Siblings: fn04f0ce, soz 608, ssz_knuckles 489, dez_boss 535, ddz 232, slotmachine 287 (all set D1 = getScreenHeight() - 1, all reach fn04f0de); AIZ water/scroll fixed earlier (screensize.lemon)
+- Fix: screensize.lemon overrides fn04f0de and asks for at most 224 lines while the screen is enlarged
+- Guard: QG11/QG15 (the two zones that crashed), G stage with view size Large
+- Lesson: the extreme case of a changed constant must be run through every zone, not through the zones that happened to be looked at.
+
 ## 2026-11-11 · detached-child-never-ran · cpp
 - Seed: SelfUpdater::installNow started powershell.exe with CREATE_NO_WINDOW | DETACHED_PROCESS; the game closed and nothing was installed, the helper did not even write its first log line (run_update_checks T1b: empty result)
 - Broken assumption: a console program that must outlive the game should be detached from every console
