@@ -682,6 +682,273 @@ try
 			}
 
 			# ---------------------------------------------------------------------------------------------------
+			if (($Only -contains 'L') -or ($Only -contains 'L2'))
+			{
+			Write-Step 'L2. Lobby features: names, ping, chat, input delay, reconnect to the slot, kick, ready check (host and two friends, one computer)'
+
+			Set-ActiveMods @('DropInCoop')
+			Stop-StartedProcesses
+			$lastLogs = Join-Path $checksDir 'last_logs'
+			New-Item -ItemType Directory -Path $lastLogs -Force | Out-Null
+			$l2Code = New-SessionCode
+			foreach ($suffix in @('_lhost', '_lf1', '_lf2')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+			Add-Type -AssemblyName System.Drawing
+			Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWin2 { [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hgt, bool repaint); [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; } }' -ErrorAction SilentlyContinue
+
+			function Save-WindowPicture([System.Diagnostics.Process]$process, [string]$path, [System.Diagnostics.Process[]]$others)
+			{
+				# The other game windows are minimized for a moment, so that the one that is photographed is really in front
+				foreach ($other in $others) { $other.Refresh(); [void][LobbyWin2]::ShowWindow($other.MainWindowHandle, 7) }
+				Start-Sleep -Milliseconds 700
+				$process.Refresh()
+				[void][LobbyWin2]::ShowWindow($process.MainWindowHandle, 9)
+				Start-Sleep -Milliseconds 700
+				[void](Save-GameScreenshot $process $path)
+				foreach ($other in $others) { [void][LobbyWin2]::ShowWindow($other.MainWindowHandle, 4) }
+			}
+
+			try
+			{
+				# The host: opens the lobby, sets a fixed input delay of 3 after a few seconds, kicks player 2 (slot index 1) after 45 seconds,
+				# presses START GAME after 55 seconds (all counted from the moment the first friend is in), with a short ready check of 10 seconds
+				$l2Host = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'hostlan'; 'S3AIR_LOBBY_CODE' = $l2Code; 'S3AIR_LOGNAME' = '_lhost'; 'S3AIR_PLAYER_NAME' = 'Hosty'; 'S3AIR_LOBBY_AUTODELAY' = '3@8'; 'S3AIR_LOBBY_AUTOKICK' = '1@45'; 'S3AIR_LOBBY_AUTOSTART' = '55'; 'S3AIR_LOBBY_READY_TIMEOUT' = '10' }
+				Start-Sleep -Seconds 14
+				# Friend one: a normal name, presses Ready, says a quick message, then tries to flood the chat
+				$l2F1 = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $l2Code; 'S3AIR_LOGNAME' = '_lf1'; 'S3AIR_PLAYER_NAME' = 'Friend One'; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOBBY_CHAT' = '5|'; 'S3AIR_LOBBY_CHAT_SPAM' = '1'; 'S3AIR_LOBBY_AUTORETRY' = '1' }
+				$f1In = Wait-Until { (Get-NetLog '_lhost') -match 'a friend proved the code and is player 2' } 90
+				Start-Sleep -Seconds 4
+				# Friend two: a name full of forbidden characters and too long, never presses Ready, writes a free text with markup, and loses its connection once
+				$l2F2 = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $l2Code; 'S3AIR_LOGNAME' = '_lf2'; 'S3AIR_PLAYER_NAME' = 'Bad<Name>|XY 12345678901234'; 'S3AIR_LOBBY_CHAT' = '0|Hi <b>there</b> :)'; 'S3AIR_NETPLAY_LOBBY_DROP_TEST' = '1'; 'S3AIR_LOBBY_AUTORETRY' = '1' }
+				$f2In = Wait-Until { (Get-NetLog '_lhost') -match 'a friend proved the code and is player 3' } 90
+				$backInSlot = Wait-Until { (Get-NetLog '_lf2') -match 'reconnected to the lobby, back in player slot 3' } 90
+				Start-Sleep -Seconds 4
+
+				# Pictures of the host's and the second friend's lobby (names, ping, chat, input delay)
+				Start-Sleep -Seconds 2
+				Save-WindowPicture $l2Host (Join-Path $lastLogs 'L2-lobby-host.png') @($l2F1, $l2F2)
+				Save-WindowPicture $l2F2 (Join-Path $lastLogs 'L2-lobby-friend2.png') @($l2Host, $l2F1)
+
+				# The kick, then the ready check that ends without the friend who never pressed Ready
+				$kicked = Wait-Until { (Get-NetLog '_lf1') -match 'Netplay failure: KICKED' } 120
+				Start-Sleep -Seconds 2
+				Save-WindowPicture $l2F1 (Join-Path $lastLogs 'L2-kicked-friend1.png') @($l2Host, $l2F2)
+				$readyDone = Wait-Until { (Get-NetLog '_lhost') -match 'ready check timed out, starting without' } 120
+				$leftOut = Wait-Until { (Get-NetLog '_lf2') -match 'Netplay failure: LEFT_OUT' } 30
+				Start-Sleep -Seconds 2
+				Save-WindowPicture $l2F2 (Join-Path $lastLogs 'L2-leftout-friend2.png') @($l2Host, $l2F1)
+				# The player who was left out presses Retry (a test switch does it eight seconds later): nothing blocks it, it gets a slot again
+				$cameBack = Wait-Until { ([regex]::Matches((Get-NetLog '_lhost'), 'a friend proved the code and is player 3')).Count -ge 3 } 60
+
+				$hostText = Get-NetLog '_lhost'
+				$f1Text = Get-NetLog '_lf1'
+				$f2Text = Get-NetLog '_lf2'
+				foreach ($pair in @(@('_lhost', 'L2-host'), @('_lf1', 'L2-friend1'), @('_lf2', 'L2-friend2'))) { Copy-Item (Join-Path $appdata ("logfile" + $pair[0] + ".txt")) (Join-Path $lastLogs ($pair[1] + '.txt')) -Force -ErrorAction SilentlyContinue }
+
+				Add-Result 'L6' 'Both friends join the lobby' ($f1In -and $f2In) ("friend 1 in: $f1In, friend 2 in: $f2In")
+				Add-Result 'L7' 'Player names: sent to the host, cleaned up (no markup, 12 letters at most), shown to everybody' (($hostText -match 'player 2 is called "Friend One"') -and ($hostText -match 'player 3 is called "BadNameXY 12"') -and ($f1Text -match 'names Hosty,Friend One,BadNameXY 12,') -and -not ($hostText -match 'is called "[^"]*[<>|]')) ('host knows: ' + (([regex]::Matches($hostText, 'player \d is called "[^"]*"') | ForEach-Object { $_.Value }) -join '; '))
+				$pingLines = @([regex]::Matches($hostText, 'ping of player 2 \(Friend One\) is (\d+) ms') | ForEach-Object { [int]$_.Groups[1].Value })
+				Add-Result 'L8' 'Ping: the host measures a round trip per friend, the friend gets its own number from the host' (($pingLines.Count -ge 1) -and (($pingLines | Measure-Object -Maximum).Maximum -lt 400) -and ($f1Text -match 'the host measured our ping: \d+ ms')) ('host samples (ms): ' + ($pingLines -join ','))
+				$spamDropped = ([regex]::Matches($hostText, 'chat of player 2 dropped, too fast')).Count
+				$p2Chats = ([regex]::Matches($hostText, 'chat, player 2 \(Friend One\): ')).Count
+				Add-Result 'L9' 'Chat: a quick message and a free text arrive cleaned up for everybody; a flood from one player is dropped by the host' (($hostText -match 'chat, player 2 \(Friend One\): Good luck!') -and ($f1Text -match 'chat, player 2 \(Friend One\): Good luck!') -and ($hostText -match 'chat, player 3 \(BadNameXY 12\): Hi bthereb :\)') -and ($f2Text -match 'chat, player 3 \(BadNameXY 12\): Hi bthereb :\)') -and ($spamDropped -ge 4) -and ($p2Chats -le 3)) ("flood lines dropped: $spamDropped, accepted from player 2: $p2Chats")
+				Add-Result 'L10' 'Input delay: the host sets 3 frames in the lobby, everybody sees it' (($hostText -match 'input delay setting is now 3 frames') -and ($f1Text -match 'input delay 3 frames') -and ($f2Text -match 'input delay 3 frames')) ''
+				Add-Result 'L11' 'Reconnect: a friend whose connection drops comes back to the same player slot with its name' ($backInSlot -and ($f2Text -match 'automated check dropping the lobby connection') -and ($f2Text -match 'lost the lobby connection, trying to come back to player slot 3') -and ($hostText -match 'friend came back.*player slot 3') -and ([regex]::Matches($hostText, 'player 3 is called "BadNameXY 12"').Count -ge 2)) ("back in slot 3: $backInSlot")
+				$retryRefused = (([regex]::Matches($f1Text, 'Netplay failure: KICKED')).Count -ge 2) -and ($hostText -match 'refused .* the host removed this player a moment ago')
+				Add-Result 'L12' 'Kick: the host removes a player, who is told so (no Retry button) and cannot come back right away' ($kicked -and ($hostText -match 'kicked player 2 \(Friend One\)') -and ($f1Text -match 'showing the problem to the player \(KICKED\) without a Retry button') -and $retryRefused) ("told: $kicked, a retry a few seconds later was refused: $retryRefused")
+				Add-Result 'L14' 'A player who was left out can press Retry and is in the lobby again (the ready check is not a kick)' ($cameBack -and (([regex]::Matches((Get-NetLog '_lf2'), 'Netplay failure: LEFT_OUT')).Count -eq 1)) ("back in the lobby: $cameBack")
+				Add-Result 'L13' 'Ready check: the host starts without waiting forever; the player who is not ready gets a prompt and is left out' ($readyDone -and ($hostText -match 'ready check started, 10 seconds') -and ($f2Text -match 'the host wants to start, ready check running') -and ($hostText -match 'player 3 \(BadNameXY 12\) was not ready and is left out') -and $leftOut) ("timed out: $readyDone, left out told: $leftOut")
+			}
+			catch
+			{
+				Add-Result 'L6' 'Lobby features run' $false $_.Exception.Message
+			}
+			finally
+			{
+				Stop-StartedProcesses
+			}
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			if (Wants 'W')
+			{
+			Write-Step 'W. Bad internet, simulated: a lag proxy between host and friend (200 ms round trip, 30 ms jitter, 3 percent loss), with and without input delay'
+
+			Set-ActiveMods @('DropInCoop')
+			$lastLogs = Join-Path $checksDir 'last_logs'
+			New-Item -ItemType Directory -Path $lastLogs -Force | Out-Null
+			$proxyScript = Join-Path $checksDir 'udp_lag_proxy.ps1'
+			$wRtt = 200; $wJitter = 30; $wLoss = 3
+
+			function Read-ProxyStats([string]$path)
+			{
+				$stats = @{}
+				foreach ($line in @((Read-SharedText $path) -split "`r?`n")) { if ($line -match '^(\w+)=(.*)$') { $stats[$Matches[1]] = $Matches[2] } }
+				return $stats
+			}
+
+			foreach ($run in @(@{ Id = 'W1'; Delay = '0'; Title = 'input delay off' }, @{ Id = 'W2'; Delay = 'auto'; Title = 'input delay Auto' }, @{ Id = 'W3'; Delay = '4'; Title = 'input delay fixed at 4 frames' }))
+			{
+				$tag = $run.Id
+				try
+				{
+					Stop-StartedProcesses
+					foreach ($suffix in @('_whost', '_wfriend')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")), (Join-Path $appdata ("online_log" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+					$statsPath = Join-Path $lastLogs ('W-proxy-' + $tag + '.txt')
+					Remove-Item -LiteralPath $statsPath -ErrorAction SilentlyContinue
+					$wSecret = New-Secret
+
+					# The friend connects to the proxy port 28841; the proxy passes everything on to the host at 28840 (delayed, jittered, with loss)
+					$proxyArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $proxyScript + '"'), '-ListenPort', '28841', '-TargetPort', '28840', '-RttMs', $wRtt, '-JitterMs', $wJitter, '-LossPercent', $wLoss, '-StatsFile', ('"' + $statsPath + '"'), '-Seed', '4242', '-Seconds', '400')
+					$proxyProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $proxyArgs -PassThru -WindowStyle Hidden
+					[void]$startedProcesses.Add($proxyProcess)
+					[void](Wait-Until { (Read-SharedText $statsPath) -match 'uptime_s' } 30)
+
+					$wHostP = Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$wSecret"; 'S3AIR_LOGNAME' = '_whost'; 'S3AIR_NETPLAY_DELAY' = $run.Delay; 'S3AIR_NETPLAY_DELAYLOG' = '1'; 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Hosty' } else { '' }) }
+					Start-Sleep -Seconds 12
+					$wFriendP = Start-GameProcess @{ 'S3AIR_NETPLAY' = ("joindirect:" + $wSecret + ":28841"); 'S3AIR_LOGNAME' = '_wfriend'; 'S3AIR_NETPLAY_TEST_INPUT' = '0x1'; 'S3AIR_NETPLAY_TEST_TOGGLE' = '1'; 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Laggy' } else { '' }) }
+					$wReached = Wait-Until { (@((Read-SharedText (Join-Path $appdata 'online_log_wfriend.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[friend\].* state=5 ' })).Count -gt 0 } 120
+					if ($wReached) { Start-Sleep -Seconds 40 }
+					if ($wReached -and $tag -eq 'W2')
+					{
+						# Pictures of the game screens: the labels under the screen show the players' names (the host is called Hosty, the friend keeps the default)
+						Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class GameWin4 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }' -ErrorAction SilentlyContinue
+						foreach ($shot in @(@($wHostP, 'W-game-host.png', $wFriendP), @($wFriendP, 'W-game-friend.png', $wHostP)))
+						{
+							$shot[2].Refresh(); [void][GameWin4]::ShowWindow($shot[2].MainWindowHandle, 7); Start-Sleep -Milliseconds 700
+							$shot[0].Refresh(); [void][GameWin4]::ShowWindow($shot[0].MainWindowHandle, 9); Start-Sleep -Milliseconds 700
+							[void](Save-GameScreenshot $shot[0] (Join-Path $lastLogs $shot[1]))
+							[void][GameWin4]::ShowWindow($shot[2].MainWindowHandle, 4)
+						}
+						Start-Sleep -Seconds 5
+					}
+					elseif ($wReached) { Start-Sleep -Seconds 5 }
+
+					$wHostLog = Get-NetLog '_whost'
+					$wFriendLog = Get-NetLog '_wfriend'
+					$wFriendLines = @((Read-SharedText (Join-Path $appdata 'online_log_wfriend.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[friend\]' })
+					$wHostLines = @((Read-SharedText (Join-Path $appdata 'online_log_whost.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[host\]' })
+					Copy-Item (Join-Path $appdata 'logfile_whost.txt') (Join-Path $lastLogs ('W-' + $tag + '-host.txt')) -Force -ErrorAction SilentlyContinue
+					Copy-Item (Join-Path $appdata 'logfile_wfriend.txt') (Join-Path $lastLogs ('W-' + $tag + '-friend.txt')) -Force -ErrorAction SilentlyContinue
+					Set-Content -Path (Join-Path $lastLogs ('W-' + $tag + '-online-lines.txt')) -Value ($wHostLines + $wFriendLines) -Encoding utf8
+					$stats = Read-ProxyStats $statsPath
+					Stop-StartedProcesses
+
+					# Friend: frames per second while in the game (the first samples are the join itself and skipped), repairs, sync progress
+					$inGame = @($wFriendLines | Where-Object { $_ -match ' state=5 ' })
+					$fpsValues = @()
+					for ($i = 2; $i -lt $inGame.Count; $i++) { $m = [regex]::Match($inGame[$i], 'fps=([\d.]+)'); if ($m.Success) { $fpsValues += [double]$m.Groups[1].Value } }
+					$fpsMin = if ($fpsValues.Count -gt 0) { ($fpsValues | Measure-Object -Minimum).Minimum } else { 0 }
+					$fpsAvg = if ($fpsValues.Count -gt 0) { ($fpsValues | Measure-Object -Average).Average } else { 0 }
+					$repairs = 0
+					foreach ($line in $wFriendLines) { $m = [regex]::Match($line, 'repairs=(\d+)'); if ($m.Success -and [int]$m.Groups[1].Value -gt $repairs) { $repairs = [int]$m.Groups[1].Value } }
+					$syncFrames = @($inGame | ForEach-Object { $m = [regex]::Match($_, 'last sync ok at frame (\d+)'); if ($m.Success) { [int]$m.Groups[1].Value } })
+					$syncProgress = if ($syncFrames.Count -ge 2) { ($syncFrames | Measure-Object -Maximum).Maximum - ($syncFrames | Measure-Object -Minimum).Minimum } else { 0 }
+					$aborted = $wFriendLog -match 'giving up|aborting' -or $wHostLog -match 'aborting'
+
+					# Host: measured ping and input delay in its own online log
+					$pings = @(); $delays = @()
+					foreach ($line in $wHostLines) { $m = [regex]::Match($line, 'inputdelay=(\d+), ping=(-?\d+)'); if ($m.Success) { $delays += [int]$m.Groups[1].Value; if ([int]$m.Groups[2].Value -ge 0) { $pings += [int]$m.Groups[2].Value } } }
+					$pingLast = if ($pings.Count -gt 0) { $pings[$pings.Count - 1] } else { -1 }
+					$delayLast = if ($delays.Count -gt 0) { $delays[$delays.Count - 1] } else { -1 }
+
+					$c2s = [int64]($stats['c2s_forwarded']); $s2c = [int64]($stats['s2c_forwarded']); $dropped = [int64]($stats['c2s_dropped']) + [int64]($stats['s2c_dropped'])
+					$delayAvg = [double]($stats['delay_avg_ms'])
+					$lossShare = if (($c2s + $s2c + $dropped) -gt 0) { 100.0 * $dropped / ($c2s + $s2c + $dropped) } else { 0 }
+
+					Add-Result ($tag + 'a') ("Through the lag proxy ($($run.Title)): the friend joins and plays, no abort") ($wReached -and -not $aborted) ("in game: $wReached, aborted: $aborted")
+					$userNameInLog = ($wFriendLog -match ('names [^\r\n]*' + [regex]::Escape($env:USERNAME)))
+					Add-Result ($tag + 'h') ("Names in the lobby message: default is just Player (not the Windows user name) when none is set, the set names otherwise ($($run.Title))") (($wFriendLog -match $(if ($tag -eq 'W2') { 'names Hosty,Laggy,' } else { 'names Player,Player,' })) -and -not $userNameInLog) ("friend log names line: " + [regex]::Match($wFriendLog, 'names [^\r\n]*').Value)
+					Add-Result ($tag + 'b') ("The traffic really went through the proxy with the set delay and loss ($($run.Title))") (($c2s -gt 500) -and ($s2c -gt 500) -and ($delayAvg -gt 85) -and ($delayAvg -lt 115) -and ($lossShare -gt 1.0) -and ($lossShare -lt 6.0)) ("friend to host $c2s datagrams, host to friend $s2c, dropped $dropped (" + [math]::Round($lossShare, 1) + " percent), average added one-way delay " + $delayAvg + " ms")
+					Add-Result ($tag + 'c') ("Game stays in sync with 200 ms, jitter and loss ($($run.Title)): no repairs, the sync check keeps passing") (($repairs -eq 0) -and ($syncProgress -ge 600)) ("repairs: $repairs, sync check progressed by $syncProgress frames")
+					Add-Result ($tag + 'd') ("Usable frame rate for the friend ($($run.Title)): lowest 30 fps or more, average 45 or more") (($fpsValues.Count -ge 4) -and ($fpsMin -ge 30) -and ($fpsAvg -ge 45)) ("samples: " + $fpsValues.Count + ", lowest " + [math]::Round($fpsMin, 1) + ", average " + [math]::Round($fpsAvg, 1))
+					Add-Result ($tag + 'e') ("The host measured the round trip (about 200 ms) and warns about the high ping ($($run.Title))") (($pingLast -ge 150) -and ($pingLast -le 330) -and ($wHostLog -match 'WARNING player 2 .* has a high ping')) ("last measured ping: $pingLast ms")
+					$delayOk = switch ($run.Delay) { '0' { ($delayLast -eq 0) -and (@($delays | Where-Object { $_ -ne 0 }).Count -eq 0) } 'auto' { ($delayLast -ge 4) -and ($delayLast -le 6) } default { ($delayLast -eq 4) } }
+					Add-Result ($tag + 'f') ("Input delay in use is what was chosen ($($run.Title))") $delayOk ("host input delay samples: " + ($delays -join ','))
+
+					# The delay is real: the friend's button changes every two seconds. The host logs when a change arrives and when it enters the game.
+					# Each change must enter the game exactly as many frames later as the delay that was in effect.
+					$rawChanges = @(); $usedChanges = @()
+					foreach ($m in [regex]::Matches($wHostLog, 'Input delay log: frame (\d+) player 2 (raw|used) (\d+) delay (\d+)'))
+					{
+						$entry = [pscustomobject]@{ Frame = [int]$m.Groups[1].Value; Value = [int]$m.Groups[3].Value; Delay = [int]$m.Groups[4].Value }
+						if ($m.Groups[2].Value -eq 'raw') { $rawChanges += $entry } else { $usedChanges += $entry }
+					}
+					$gaps = @()
+					for ($i = 2; $i -lt [math]::Min($rawChanges.Count, $usedChanges.Count); $i++)
+					{
+						if ($rawChanges[$i].Value -eq $usedChanges[$i].Value -and $rawChanges[$i].Delay -eq $usedChanges[$i].Delay) { $gaps += ($usedChanges[$i].Frame - $rawChanges[$i].Frame) }
+					}
+					$expectedGap = switch ($run.Delay) { '0' { 0 } 'auto' { $delayLast } default { 4 } }
+					$gapsOk = ($gaps.Count -ge 5) -and (@($gaps | Where-Object { $_ -ne $expectedGap }).Count -le 1)
+					Add-Result ($tag + 'g') ("Each change of the friend's input reaches the game exactly $expectedGap frames after it reached the host ($($run.Title))") $gapsOk ("measured frame gaps: " + ($gaps -join ','))
+				}
+				catch
+				{
+					Add-Result ($tag + 'a') ("Lag proxy run ($($run.Title))") $false $_.Exception.Message
+				}
+				finally
+				{
+					Stop-StartedProcesses
+				}
+			}
+
+			# The lobby screens through the proxy: the friend's ping is about 200 ms, the host sees it and is warned, everybody sees the input delay Auto picked
+			$wTag = 'W4'
+			try
+			{
+				Stop-StartedProcesses
+				Add-Type -AssemblyName System.Drawing
+				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWin3 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }' -ErrorAction SilentlyContinue
+				foreach ($suffix in @('_whost', '_wfriend')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")), (Join-Path $appdata ("online_log" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+				$statsPath = Join-Path $lastLogs 'W-proxy-W4.txt'
+				Remove-Item -LiteralPath $statsPath -ErrorAction SilentlyContinue
+				$wSecret = New-Secret
+				$proxyArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $proxyScript + '"'), '-ListenPort', '28841', '-TargetPort', '28840', '-RttMs', $wRtt, '-JitterMs', $wJitter, '-LossPercent', $wLoss, '-StatsFile', ('"' + $statsPath + '"'), '-Seed', '4243', '-Seconds', '400')
+				$proxyProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $proxyArgs -PassThru -WindowStyle Hidden
+				[void]$startedProcesses.Add($proxyProcess)
+				[void](Wait-Until { (Read-SharedText $statsPath) -match 'uptime_s' } 30)
+
+				$wHostProc = Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$wSecret"; 'S3AIR_LOBBY_OPEN' = 'show'; 'S3AIR_LOGNAME' = '_whost'; 'S3AIR_PLAYER_NAME' = 'Hosty'; 'S3AIR_NETPLAY_DELAY' = 'auto' }
+				Start-Sleep -Seconds 12
+				$wFriendProc = Start-GameProcess @{ 'S3AIR_NETPLAY' = ("joindirect:" + $wSecret + ":28841"); 'S3AIR_LOBBY_OPEN' = 'show'; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOGNAME' = '_wfriend'; 'S3AIR_PLAYER_NAME' = 'Laggy' }
+				$w4In = Wait-Until { (Get-NetLog '_whost') -match 'a friend proved the code and is player 2' } 120
+				$w4Warned = Wait-Until { (Get-NetLog '_whost') -match 'Lobby: showing the high ping warning for player 2' } 60
+				Start-Sleep -Seconds 4
+
+				$shots = @(@($wHostProc, 'W4-lobby-host.png', @($wFriendProc)), @($wFriendProc, 'W4-lobby-friend.png', @($wHostProc)))
+				foreach ($shot in $shots)
+				{
+					foreach ($other in $shot[2]) { $other.Refresh(); [void][LobbyWin3]::ShowWindow($other.MainWindowHandle, 7) }
+					Start-Sleep -Milliseconds 700
+					$shot[0].Refresh(); [void][LobbyWin3]::ShowWindow($shot[0].MainWindowHandle, 9)
+					Start-Sleep -Milliseconds 700
+					[void](Save-GameScreenshot $shot[0] (Join-Path $lastLogs $shot[1]))
+					foreach ($other in $shot[2]) { [void][LobbyWin3]::ShowWindow($other.MainWindowHandle, 4) }
+				}
+
+				$w4Host = Get-NetLog '_whost'
+				$w4Friend = Get-NetLog '_wfriend'
+				Copy-Item (Join-Path $appdata 'logfile_whost.txt') (Join-Path $lastLogs 'W4-host.txt') -Force -ErrorAction SilentlyContinue
+				Copy-Item (Join-Path $appdata 'logfile_wfriend.txt') (Join-Path $lastLogs 'W4-friend.txt') -Force -ErrorAction SilentlyContinue
+				$hostPing = [regex]::Match($w4Host, 'ping of player 2 \(Laggy\) is (\d+) ms')
+				$friendPing = [regex]::Match($w4Friend, 'the host measured our ping: (\d+) ms')
+				$friendDelay = [regex]::Match($w4Friend, 'input delay AUTO \((\d) frames\)')
+				$lastDelay = $null
+				foreach ($match in [regex]::Matches($w4Friend, 'input delay AUTO \((\d) frames\)')) { $lastDelay = [int]$match.Groups[1].Value }
+				Add-Result 'W4a' 'Lobby through the lag proxy: the friend joins with its name, the host sees the ping per player (about 200 ms) and is warned about the high ping' ($w4In -and $w4Warned -and ($w4Host -match 'player 2 is called "Laggy"') -and $hostPing.Success -and ([int]$hostPing.Groups[1].Value -ge 150) -and ([int]$hostPing.Groups[1].Value -le 330)) ("host measured: " + $hostPing.Groups[1].Value + " ms, warning shown: $w4Warned")
+				Add-Result 'W4b' 'Lobby through the lag proxy: the friend sees its own ping and the input delay that Auto chose from it (4 to 6 frames)' ($friendPing.Success -and ([int]$friendPing.Groups[1].Value -ge 100) -and ($null -ne $lastDelay) -and ($lastDelay -ge 4) -and ($lastDelay -le 6)) ("friend sees ping " + $friendPing.Groups[1].Value + " ms, input delay Auto = $lastDelay frames")
+			}
+			catch
+			{
+				Add-Result 'W4a' 'Lobby through the lag proxy' $false $_.Exception.Message
+			}
+			finally
+			{
+				Stop-StartedProcesses
+			}
+			}
+
+			# ---------------------------------------------------------------------------------------------------
 			if (Wants "U")
 			{
 			Write-Step "U. The release zip, unzipped to a fresh folder and started as a player would start it"
@@ -921,7 +1188,7 @@ try
 					[void](Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $closeCode; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOGNAME' = '_xfriend' })
 					$inLobby = Wait-Until { (Get-NetLog '_xfriend') -match 'lobby: you are slot 2' } 90
 					if (-not $case.Close -and $inLobby) { Start-Sleep -Seconds 3; Stop-Process -Id $closingHost.Id -Force -ErrorAction SilentlyContinue }
-					$closedTold = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: HOST_CLOSED' } 90
+					$closedTold = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: HOST_CLOSED' } 150
 					Start-Sleep -Seconds 2
 					$closedText = Get-NetLog '_xfriend'
 					Save-ScreenPicture (Join-Path $lastLogs ('X-' + $case.Id + '-screen.png'))

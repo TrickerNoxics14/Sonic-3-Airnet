@@ -356,6 +356,8 @@ declare function void debugLog(any value)
 declare function void debugLogColors(string name, u32 startAddress, u8 numColors)
 declare function void Checks.report(string name, u8 passed, string detail)
 declare function u8 Checks.capture(string label)
+declare function string Netplay.getPlayerLabel(u8 slot)
+declare function s32 Netplay.getPlayerPing(u8 slot)
 declare function void debugWatch(u32 address, u16 bytes)
 declare function void debugDumpToFile(string filename, u32 startAddress, u32 bytes)
 

@@ -2,6 +2,7 @@
 #include "oxygen/network/netplay/NetplayModFingerprint.h"
 #include "oxygen/network/netplay/NetplayAuth.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
+#include "oxygen/network/netplay/NetplayLobbyLogic.h"
 #include "oxygen/network/netplay/NetplayPackets.h"
 #include "oxygen_netcore/network/Sockets.h"
 #include "oxygen_netcore/network/ConnectionListener.h"
@@ -247,10 +248,10 @@ namespace
 			const Reason reason = (Reason)i;
 			const std::string message = getMessage(reason);
 			const std::string name = getName(reason);
-			allDescribed &= !message.empty() && name != "NONE" && isRetryable(reason) && (seen.find("|" + name + "|") == std::string::npos) && (seen.find("|" + message + "|") == std::string::npos);
+			allDescribed &= !message.empty() && name != "NONE" && (isRetryable(reason) == (reason != Reason::KICKED)) && (seen.find("|" + name + "|") == std::string::npos) && (seen.find("|" + message + "|") == std::string::npos);
 			seen += "|" + name + "|" + message + "|";
 		}
-		report("failure reasons: every reason has its own name and plain-language message, and offers a retry", allDescribed && std::string(getMessage(Reason::NONE)).empty() && !isRetryable(Reason::NONE));
+		report("failure reasons: every reason has its own name and plain-language message, and offers a retry (except being kicked: the host removed you)", allDescribed && std::string(getMessage(Reason::NONE)).empty() && !isRetryable(Reason::NONE));
 	}
 
 	void runPacketLimitTests()
@@ -288,6 +289,184 @@ namespace
 			report("packets: decompression with the right announced size still works", roundTrip);
 		}
 	}
+
+	void runLobbyLogicTests()
+	{
+		using namespace NetplayLobby;
+
+		// Names
+		report("lobby: an empty name becomes the default Player (not a user name)", sanitizeName("") == "Player" && sanitizeName("   ") == "Player" && sanitizeName("<>|&%$") == "Player");
+		report("lobby: a plain name stays as typed", sanitizeName("Tails fan 7") == "Tails fan 7");
+		report("lobby: names are cut to 12 characters", sanitizeName("ABCDEFGHIJKLMNOPQRST") == "ABCDEFGHIJKL" && sanitizeName("ABCDEFGHIJKLMNOPQRST").size() == MAX_NAME_LENGTH);
+		report("lobby: control characters, markup, newlines and non-ASCII are removed from names", sanitizeName("A\nB\tC\x01<b>D|E\xC3\xA9") == "ABCbDE");
+		report("lobby: spaces are tidied (no leading, trailing or repeated spaces)", sanitizeName("   a    b   ") == "a b");
+		report("lobby: a very long input with a huge tail does not blow up", sanitizeName(std::string(100000, 'x')).size() == MAX_NAME_LENGTH);
+
+		// Chat
+		report("lobby: a chat line is cut to 40 characters and cleaned", sanitizeChat(std::string(100, 'a')).size() == MAX_CHAT_LENGTH && sanitizeChat("hi\r\nthere\x07") == "hithere");
+		report("lobby: an empty chat line stays empty (it is not sent)", sanitizeChat("").empty() && sanitizeChat("<<<>>>").empty() && buildChatText(0, "").empty());
+		bool quickOk = true;
+		std::string seenQuick;
+		for (int id = 1; id <= NUM_QUICK_MESSAGES; ++id)
+		{
+			const char* text = getQuickMessage(id);
+			quickOk &= (text != nullptr) && sanitizeChat(text) == text && seenQuick.find(std::string("|") + text + "|") == std::string::npos;
+			seenQuick += std::string("|") + (text ? text : "") + "|";
+		}
+		report("lobby: the 12 quick messages exist, are different, and are clean text", quickOk && getQuickMessage(0) == nullptr && getQuickMessage(NUM_QUICK_MESSAGES + 1) == nullptr);
+		report("lobby: a quick message wins over any free text that comes with it", buildChatText(3, "something else") == getQuickMessage(3) && buildChatText(0, "free text") == "free text");
+		{
+			ChatRateLimiter limiter;
+			int accepted = 0;
+			for (int k = 0; k < 6; ++k)
+				accepted += limiter.allow(1000 + k * 100) ? 1 : 0;
+			const bool laterAccepted = limiter.allow(1000 + 5 * 100 + CHAT_MIN_INTERVAL_MS + 1);
+			report("lobby: chat is rate limited (6 lines in half a second: 1 passes, 5 are dropped), and works again later", accepted == 1 && limiter.mDropped == 5 && laterAccepted);
+		}
+
+		// Ping
+		{
+			PingTracker ping;
+			const bool unknownFirst = (ping.get() == -1);
+			ping.addSample(100);
+			const bool first = (ping.get() == 100);
+			for (int k = 0; k < 40; ++k)
+				ping.addSample(200);
+			const bool converges = (ping.get() >= 199 && ping.get() <= 200);
+			ping.addSample(20000);	// a wild value is capped
+			report("lobby: ping is unknown until measured, then smoothed and capped", unknownFirst && first && converges && ping.get() <= 10000);
+			report("lobby: only a ping above 150 ms is a warning", !isHighPing(150) && isHighPing(151) && !isHighPing(-1) && !isHighPing(0));
+		}
+
+		// Input delay
+		{
+			bool monotonic = true;
+			int last = 0;
+			for (int ping = 0; ping <= 600; ping += 5)
+			{
+				const int frames = autoInputDelay(ping);
+				monotonic &= (frames >= last) && (frames <= MAX_INPUT_DELAY);
+				last = frames;
+			}
+			report("lobby: Auto input delay grows with the ping, from 0 to at most 6 frames", monotonic && autoInputDelay(-1) == 0 && autoInputDelay(10) == 0 && autoInputDelay(22) == 0 && autoInputDelay(36) == 0 && autoInputDelay(40) == 1 && autoInputDelay(60) == 1 && autoInputDelay(100) == 2 && autoInputDelay(200) == 5 && autoInputDelay(250) == 6 && autoInputDelay(5000) == 6);
+			report("lobby: a fixed input delay ignores the ping, Auto follows it", effectiveInputDelay(2, 400) == 2 && effectiveInputDelay(0, 400) == 0 && effectiveInputDelay(-1, 100) == 2 && effectiveInputDelay(99, 0) == 6);
+			report("lobby: the input delay is described in words", describeInputDelay(-1, 3) == "AUTO (3 frames)" && describeInputDelay(-1, 0) == "AUTO (0 frames)" && describeInputDelay(-1, 1) == "AUTO (1 frame)" && describeInputDelay(2, 2) == "2 frames" && describeInputDelay(0, 0) == "OFF");
+			int setting = INPUT_DELAY_AUTO;
+			std::string visited;
+			for (int k = 0; k < MAX_INPUT_DELAY + 2; ++k)
+			{
+				visited += std::to_string(setting) + ",";
+				setting = nextDelaySetting(setting, 1);
+			}
+			report("lobby: cycling the input delay setting visits Auto and 0 to 6 once and comes back", visited == "-1,0,1,2,3,4,5,6," && setting == INPUT_DELAY_AUTO && nextDelaySetting(INPUT_DELAY_AUTO, -1) == MAX_INPUT_DELAY);
+		}
+		{
+			// The delay line: every player's input comes out exactly N frames later, all players alike
+			bool exact = true;
+			for (int delay = 0; delay <= MAX_INPUT_DELAY; ++delay)
+			{
+				InputDelayLine line;
+				line.setDelay(delay);
+				std::vector<InputDelayLine::Frame> inputs;
+				for (int n = 0; n < 40; ++n)
+				{
+					InputDelayLine::Frame in = { (uint16)(100 + n), (uint16)(200 + n), (uint16)(300 + n), (uint16)(400 + n) };
+					inputs.push_back(in);
+					const InputDelayLine::Frame out = line.process(in);
+					const InputDelayLine::Frame& expected = inputs[std::max(0, n - delay)];
+					exact &= (out == expected);
+				}
+			}
+			report("lobby: the input delay line delays all four players by exactly N frames (the first input is repeated at the start)", exact);
+
+			InputDelayLine line;
+			line.setDelay(3);
+			InputDelayLine::Frame out = {};
+			for (int n = 0; n < 10; ++n)
+			{
+				InputDelayLine::Frame in = { (uint16)n, 0, 0, 0 };
+				out = line.process(in);
+			}
+			line.setDelay(1);		// Lowering it skips frames, once
+			InputDelayLine::Frame in10 = { 10, 0, 0, 0 };
+			const InputDelayLine::Frame afterLower = line.process(in10);
+			line.setDelay(4);		// Raising it repeats frames, once
+			InputDelayLine::Frame in11 = { 11, 0, 0, 0 };
+			const InputDelayLine::Frame afterRaise = line.process(in11);
+			report("lobby: changing the delay while playing only skips or repeats a frame (nothing is invented)", out[0] == 6 && afterLower[0] == 9 && afterRaise[0] == 9);
+		}
+
+		// Reconnecting
+		{
+			SlotReservations reservations;
+			reservations.add(2, "10.0.0.5", "Knux");
+			const bool reserved = reservations.isReservedForOther(2, "10.0.0.9") && !reservations.isReservedForOther(2, "10.0.0.5") && !reservations.isReservedForOther(1, "10.0.0.9");
+			const bool found = reservations.findSlotFor("10.0.0.5", 0) == 2 && reservations.findSlotFor("10.0.0.9", 0) == 0;
+			reservations.add(3, "10.0.0.5", "Knux2");
+			const bool preferred = reservations.findSlotFor("10.0.0.5", 3) == 3 && reservations.findSlotFor("10.0.0.5", 2) == 2;
+			reservations.update(SLOT_RESERVATION_SECONDS - 1.0f);
+			const bool stillThere = reservations.isReservedForOther(2, "10.0.0.9");
+			reservations.update(2.0f);
+			const bool expired = !reservations.isReservedForOther(2, "10.0.0.9") && reservations.getItems().empty();
+			reservations.add(1, "a", "x");
+			reservations.remove(1);
+			report("lobby: a dropped friend's slot is kept for its own address for a minute, then free again", reserved && found && preferred && stillThere && expired && reservations.getItems().empty());
+		}
+		{
+			KickBlockList blocked;
+			blocked.add("1.2.3.4");
+			const bool now = blocked.isBlocked("1.2.3.4") && !blocked.isBlocked("1.2.3.5");
+			blocked.update(KICK_BLOCK_SECONDS - 1.0f);
+			const bool almost = blocked.isBlocked("1.2.3.4");
+			blocked.update(2.0f);
+			report("lobby: a kicked address cannot come back for a minute, other addresses are not affected", now && almost && !blocked.isBlocked("1.2.3.4"));
+		}
+
+		// Packets
+		{
+			LobbyStatePacket packet;
+			packet.mYourSlot = 2;
+			packet.mSlotState[0] = 1; packet.mSlotState[1] = 3; packet.mSlotState[2] = 2;
+			packet.mNames[0] = "Hosty"; packet.mNames[1] = "Friend One"; packet.mNames[2] = "Knux";
+			packet.mPingMs[1] = 212; packet.mPingMs[2] = 40;
+			packet.mDelaySetting = 0xff; packet.mEffectiveDelay = 3; packet.mReadyCheckSeconds = 17;
+			std::vector<uint8> bytes;
+			{
+				VectorBinarySerializer serializer(false, bytes);
+				packet.serializePacket(serializer, 1);
+			}
+			LobbyStatePacket back;
+			VectorBinarySerializer reader(true, bytes);
+			const bool ok = back.serializePacket(reader, 1);
+			report("lobby: the lobby state packet carries names, pings, input delay and ready check", ok && back.mNames[0] == "Hosty" && back.mNames[1] == "Friend One" && back.mPingMs[1] == 212 && back.mPingMs[3] == 0xffff && back.mEffectiveDelay == 3 && back.mDelaySetting == 0xff && back.mReadyCheckSeconds == 17 && back.mYourSlot == 2);
+		}
+		{
+			// An absurdly long name or chat text on the wire is refused, not allocated
+			LobbyChatPacket tooLong;
+			tooLong.mQuickMessage = 0;
+			tooLong.mText = std::string(1000, 'a');
+			std::vector<uint8> bytes;
+			{
+				VectorBinarySerializer serializer(false, bytes);
+				tooLong.serializePacket(serializer, 1);
+			}
+			LobbyChatPacket back;
+			VectorBinarySerializer reader(true, bytes);
+			const bool refused = !back.serializePacket(reader, 1) || back.mText.size() <= LobbyChatPacket::MAX_TEXT_BYTES;
+			LobbyReadyPacket readyPacket;
+			readyPacket.mName = std::string(5000, 'b');
+			std::vector<uint8> readyBytes;
+			{
+				VectorBinarySerializer serializer(false, readyBytes);
+				readyPacket.serializePacket(serializer, 1);
+			}
+			LobbyReadyPacket readyBack;
+			VectorBinarySerializer readyReader(true, readyBytes);
+			const bool readyRefused = !readyBack.serializePacket(readyReader, 1) || readyBack.mName.size() <= LobbyStatePacket::MAX_NAME_BYTES;
+			report("lobby: over-long names and chat lines on the wire are refused", refused && readyRefused);
+		}
+	}
+
 }
 
 int main()
@@ -378,6 +557,7 @@ int main()
 	runFailureTests();
 	runBroadcastTests();
 	runPacketLimitTests();
+	runLobbyLogicTests();
 	report("test hooks are off by default (no marker file next to this test program)", !TestHooks::isEnabled() && TestHooks::getEnv("PATH") == nullptr);
 	report("LAN discovery finds a host with the matching session code", lanFound);
 	report("LAN discovery rejects a different session code", lanMismatchRejected);

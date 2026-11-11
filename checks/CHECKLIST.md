@@ -171,3 +171,15 @@ Offline core tests (checksun_online_core_tests.ps1, part of run_online_backend_
 | A12 | No testhooks.enabled in the zip |
 
 Limits: all on one computer (loopback/LAN fallback); the Retry button press itself is simulated by a test switch; a stranger who skips the handshake is covered by unit tests of the proof, not by a raw-packet runtime test.
+
+## Lobby features and bad internet (2026-11-11, stage B)
+
+Offline core tests (23 new lines starting with "lobby:"): names cleaned (default Player, markup, control characters, non-ASCII and 12 letters), chat cleaning and 40 character limit, the 12 quick messages, chat rate limit, ping smoothing and the 150 ms warning, Auto input delay curve and cycling, the input delay line (N frames exactly, all four players alike, changing the delay only skips or repeats one frame), slot reservation, kick block, lobby packets (round trip, over-long names and chat refused).
+
+| Stage | What it proves |
+| --- | --- |
+| L6-L14 | Host and two friends (one computer): names sent and cleaned (a name full of forbidden characters becomes BadNameXY 12), ping measured per friend and known to the friend, chat (a quick message and a free text with markup reach everybody cleaned up; a flood of 6 lines from one player is dropped except one), input delay set by the host in the lobby seen by everybody, a friend whose connection drops silently comes back to the same slot with its name, the host kicks a player (told, no Retry, a retry is refused), a ready check that ends without the unready friend (prompt shown, left out, can press Retry and is back) |
+| W1-W3 | Lag proxy (checks\udp_lag_proxy.ps1: 200 ms round trip, 30 ms jitter each way, 3 percent loss, datagrams may overtake each other) between friend and host: joins, the traffic went through the proxy with the set delay and loss, no repairs and the sync check keeps passing, the friend keeps at least 30 fps (average 45 or more), the host measures about 200 ms and warns, the input delay in use is the one chosen (off, Auto, fixed 4), the default name is Player, and each change of the friend's button reaches the game exactly N frames after it reached the host (measured from logs) |
+| W4 | The same proxy with both lobby screens open: the host sees the friend's ping (red) and the warning, the friend sees its own ping and the input delay that Auto chose (4 to 6 frames) |
+
+Limits: everything on one computer. The proxy imitates delay, jitter, loss and reordering on loopback; it does not imitate NAT, bandwidth limits, a congested line or a path that changes. The ping is the round trip including both games' frame timing (about 20 ms even on one computer). The frames-per-second figure is the friend's simulated frames per second, which says the game keeps running, not how the controls feel. How the input delay feels to a person was not tested (nobody played). The player name is a setting in settings.json edited from the lobby; there is no entry for it in the Options menu. Kick is a short block by the player's random per-run identity, not a ban.

@@ -563,8 +563,12 @@ void Application::update(float timeElapsed)
 				}
 				else if (mode.compare(0, 11, "joindirect:") == 0)
 				{
-					// Developer test: join 127.0.0.1 with the given secret (8 hexadecimal digits)
-					manager.startJoinDirect("127.0.0.1", NetplayManager::DEFAULT_HOST_PORT, (uint32)(strtoul(mode.c_str() + 11, nullptr, 16) & 0x3fffffff));
+					// Developer test: join 127.0.0.1 with the given secret (8 hexadecimal digits), optionally followed by ":port" (to go through the lag proxy of the checks)
+					uint16 port = NetplayManager::DEFAULT_HOST_PORT;
+					const size_t colon = mode.find(':', 11);
+					if (colon != std::string::npos)
+						port = (uint16)atoi(mode.c_str() + colon + 1);
+					manager.startJoinDirect("127.0.0.1", port, (uint32)(strtoul(mode.c_str() + 11, nullptr, 16) & 0x3fffffff));
 				}
 				else if (mode.size() >= 8 && (mode.compare(0, 8, "hostlan:") == 0 || mode.compare(0, 8, "joinlan:") == 0))
 				{

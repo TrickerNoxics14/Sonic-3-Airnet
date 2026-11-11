@@ -72,6 +72,7 @@ public:
 	void clear();
 
 	inline State getState() const				{ return mState; }
+	inline DisconnectReason getDisconnectReason() const  { return mDisconnectReason; }
 	inline uint16 getLocalConnectionID() const  { return mLocalConnectionID; }
 	inline uint16 getRemoteConnectionID() const { return mRemoteConnectionID; }
 	inline const SocketAddress& getRemoteAddress() const  { return mRemoteAddress; }

@@ -24,6 +24,7 @@
 #include "oxygen/application/input/ControlsIn.h"
 #include "oxygen/application/input/InputManager.h"
 #include "oxygen/application/modding/ModManager.h"
+#include "oxygen/network/netplay/NetplayManager.h"
 #include "oxygen/application/overlays/DebugSidePanel.h"
 #include "oxygen/application/video/VideoOut.h"
 #include "oxygen/menu/imgui/ImGuiIntegration.h"
@@ -692,6 +693,28 @@ namespace
 		// Developer checks read these opt-in test results from the engine log.
 		if (name.isValid())
 			RMX_LOG_INFO("CHECK|" << name.getString() << "|" << (passed ? "PASS" : "FAIL") << "|" << (detail.isValid() ? detail.getString() : std::string()));
+	}
+
+	// Online play: the label of a player slot (0 to 3) for the game screen: the name from the lobby, or "P1" to "P4" when it is not known; and the ping (-1 if unknown)
+	lemon::StringRef Netplay_getPlayerLabel(uint8 slot)
+	{
+		lemon::Runtime* runtime = lemon::Runtime::getActiveRuntime();
+		RMX_CHECK(nullptr != runtime, "No lemon script runtime active", return lemon::StringRef());
+		std::string name = NetplayManager::instance().getPlayerName(slot);
+		if (name.empty())
+			name = "P" + std::to_string((int)slot + 1);
+		static std::string lastLabels[4];
+		if (slot < 4 && lastLabels[slot] != name)
+		{
+			lastLabels[slot] = name;
+			RMX_LOG_INFO("Netplay: the screen label of player " << (int)(slot + 1) << " is now \"" << name << "\"");
+		}
+		return lemon::StringRef(runtime->addString(name));
+	}
+
+	int32 Netplay_getPlayerPing(uint8 slot)
+	{
+		return NetplayManager::instance().getPlayerPingMs(slot);
 	}
 
 	uint8 Checks_capture(lemon::StringRef label)
@@ -1476,6 +1499,11 @@ void LemonScriptBindings::registerBindings(lemon::Module& module)
 			.setParameters("name", "passed", "detail");
 		builder.addNativeFunction("Checks.capture", lemon::wrap(&Checks_capture), defaultFlags)
 			.setParameters("label");
+
+		builder.addNativeFunction("Netplay.getPlayerLabel", lemon::wrap(&Netplay_getPlayerLabel), defaultFlags)
+			.setParameters("slot");
+		builder.addNativeFunction("Netplay.getPlayerPing", lemon::wrap(&Netplay_getPlayerPing), defaultFlags)
+			.setParameters("slot");
 
 	#if 0
 		// Only for debugging value stack issues in lemonscript itself

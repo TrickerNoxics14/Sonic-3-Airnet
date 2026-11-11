@@ -29,9 +29,9 @@ try {
     $results.Add("PASS online package built from the stable fork and passed content guards (no test-hooks marker shipped)")
 
     # D join by code, E bad connection, M public matchmaking, N four players, R reconnect, L lobby,
-    # S join secret (wrong code refused), X failure reasons and Retry, U the unzipped package ignores developer variables
+    # S join secret (wrong code refused), X failure reasons and Retry, W a lag proxy with 200 ms / jitter / loss, L also the lobby features, U the unzipped package ignores developer variables
     $runtimeScript = Join-Path $checksDir "run_checks.ps1"
-    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,U 2>&1
+    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,W,U 2>&1
     $runtimeExitCode = $LASTEXITCODE
     $runtimeOutput | ForEach-Object {
         Write-Output $_

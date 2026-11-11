@@ -32,6 +32,31 @@ Back keeps the lobby open; LEAVE LOBBY closes it. Windows may ask whether the ga
 first time somebody hosts: choose Allow.
 The F9 window below still works the same way (it is also the way to host on a VPN or the same network).
 
+IN THE LOBBY
+  Names:    NAME sets the name the others see (12 letters, plain characters only, default "Player"). It is saved in
+            settings.json (section Online, PlayerName). Everybody in the lobby, and the labels below the screens
+            during the game, show the names.
+  Ping:     each friend's round trip time is shown next to the name (measured by the host, about once a second).
+            The host gets a red warning when somebody is above 150 ms.
+  Chat:     SAY sends a quick message (Left/Right picks one of 12, the last choice is WRITE A MESSAGE for a short
+            text of up to 40 plain characters). One message per 1.2 seconds per player; the host drops the rest.
+  Host:     KICK removes a friend (that friend cannot come back for a minute; this is a short block, not a ban).
+            INPUT DELAY is chosen by the host, see below, and everybody sees it.
+  Start:    if somebody is not ready when the host presses START GAME, everybody who is not ready gets a prompt and
+            20 seconds. When the time is up (or the host presses START GAME again) the game starts without them.
+            They can press RETRY to join the running game.
+  Reconnect: a friend whose connection breaks while waiting in the lobby, or while playing, comes back to the same
+            player slot by itself (the host keeps the slot for a minute).
+
+INPUT DELAY (host setting: AUTO or 0 to 6 frames)
+  The online game is host-driven lockstep, not rollback: the host runs the game and decides what every player's
+  input is on every frame; a friend's game runs the frames it gets from the host. A friend therefore sees its own
+  button press after one round trip, while the host sees its own at once. Input delay holds back the inputs of ALL
+  players (the host's own too) by the same number of frames before they enter the game. It does not make anybody
+  faster; it makes the host's controls feel as late as the friends' and keeps all players on the same footing.
+  AUTO picks about one frame per 33 ms of the slowest friend's measured ping above 20 ms (a good connection: 0),
+  re-checks every few seconds while playing, and never goes above 6. A fixed number stays as set. 0 means off.
+
 PLAY WITH A CODE (works anywhere, free, no router setup)
 --------------------------------------------------------
 HOST:   Main menu -> press F9 -> "Host (works anywhere)".
@@ -106,7 +131,7 @@ TEAMWORK CONTROLS
 
 ONLINE RECONNECT (custom engine)
   A friend whose transport connection drops automatically retries the existing
-  host for up to 90 seconds, receives a fresh game snapshot, and resumes the
+  host (up to 40 seconds in the lobby, 90 seconds in a running game), receives a fresh game snapshot, and resumes the
   current session. The host must keep the session open. This cannot reconnect to
   a host that closed the game or guarantee recovery after its network address
   changes. Local script-only installations do not include the reconnect engine.

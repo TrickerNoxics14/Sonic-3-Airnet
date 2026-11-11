@@ -16,6 +16,7 @@ class MenuBackground;
 
 // Online lobby: one player creates a lobby and shares its code, friends join with the code and press Ready.
 // When everybody is ready, the host starts the game as usual (Normal Game, Act Select, ...) and the friends follow.
+// In the lobby: player names with their ping, quick chat messages, the host's input delay setting, kicking a player, and a ready check with a time limit.
 class LobbyMenu : public GameMenuBase
 {
 public:
@@ -48,7 +49,14 @@ private:
 		START,		// Create a lobby or join one
 		JOIN,		// Typing the code
 		HOSTING,	// In a lobby as the host
-		JOINED		// In a lobby as a friend
+		JOINED,		// In a lobby as a friend
+		TEXT		// Typing a player name or a chat line
+	};
+
+	enum class TextMode
+	{
+		NAME,
+		CHAT
 	};
 
 private:
@@ -58,19 +66,30 @@ private:
 	void joinLobby();
 	bool joinWithCode(const std::string& code);
 	void leaveLobby();
-	void startGame();
+	void startGame(bool force = false);
+	void pressStart();
 	void goBack();
 	void getSlotStates(uint8 outStates[4], bool& outConnected) const;
 	void showFailureAndReturnToStart();
 	void retry();
+	void openTextScreen(TextMode mode);
+	void sendQuickChat();
+	void updateEntryTexts();
+	void updateTestHooks(float timeElapsed);
+	std::string getPlayerNameOfSlot(int slot) const;
+	int getPingOfSlot(int slot) const;
+	int findKickTarget(int startSlot, int step) const;
 
 private:
 	MenuBackground* mMenuBackground = nullptr;
 	State mState = State::INACTIVE;
 	Screen mScreen = Screen::START;
+	TextMode mTextMode = TextMode::NAME;
 	GameMenuEntries mMenuEntries;
 	std::string mMessage;		// Shown to the player, e.g. why joining failed
 	bool mShowCopied = false;
+	int mQuickIndex = 1;		// Quick chat message 1 to 12, or 13 for "write a message"
+	int mKickSlot = 0;			// The friend the Kick entry points at (0 = nobody)
 
 	// What the player tried last, so that "Retry" can do the same again after a failure
 	std::string mLastJoinCode;
@@ -78,4 +97,13 @@ private:
 	float mAutoRetryTimer = 0.0f;		// Developer test switch S3AIR_LOBBY_AUTORETRY
 	bool mLastHostViaServer = true;
 	NetplayFailure::Reason mFailure = NetplayFailure::Reason::NONE;
+
+	// Developer test switches (only with the test hooks enabled): chat, kick, start and input delay without key presses
+	float mHookLobbyTimer = 0.0f;		// Seconds since somebody was in the lobby
+	bool mHookChatDone = false;
+	bool mHookSpamDone = false;
+	bool mHookKickDone = false;
+	bool mHookStartDone = false;
+	bool mHookDelayDone = false;
+	int mLastWarnedSlot = -1;			// The friend the host was last warned about (high ping), for the log
 };

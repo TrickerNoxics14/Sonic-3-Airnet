@@ -27,6 +27,8 @@ namespace NetplayFailure
 		HOST_CLOSED,			// The host left or closed the lobby, or stopped answering
 		CONNECTION_LOST,		// A running game lost its connection and could not get it back
 		BAD_GAME_DATA,			// The game data sent by the host was damaged or implausible
+		KICKED,					// The host removed this player from the lobby
+		LEFT_OUT,				// The ready check ran out before this player was ready: the game started without it
 		COUNT
 	};
 
@@ -43,6 +45,8 @@ namespace NetplayFailure
 			case Reason::HOST_CLOSED:			return "HOST_CLOSED";
 			case Reason::CONNECTION_LOST:		return "CONNECTION_LOST";
 			case Reason::BAD_GAME_DATA:			return "BAD_GAME_DATA";
+			case Reason::KICKED:				return "KICKED";
+			case Reason::LEFT_OUT:				return "LEFT_OUT";
 			default:							return "NONE";
 		}
 	}
@@ -60,6 +64,8 @@ namespace NetplayFailure
 			case Reason::HOST_CLOSED:			return "The host closed the lobby or stopped answering.";
 			case Reason::CONNECTION_LOST:		return "The connection to the host was lost.\nJoin again with the host's code.";
 			case Reason::BAD_GAME_DATA:			return "The game data from the host was damaged.\nTry joining again.";
+			case Reason::KICKED:				return "The host removed you from the lobby.";
+			case Reason::LEFT_OUT:				return "The game started while you were not ready.\nPress Retry to join the running game.";
 			default:							return "";
 		}
 	}
@@ -67,6 +73,6 @@ namespace NetplayFailure
 	// A new attempt with the same code can make sense (a fixed network problem, a host that was not ready yet)
 	inline bool isRetryable(Reason reason)
 	{
-		return (reason != Reason::NONE);
+		return (reason != Reason::NONE && reason != Reason::KICKED);
 	}
 }

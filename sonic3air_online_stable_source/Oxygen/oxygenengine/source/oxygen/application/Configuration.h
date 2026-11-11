@@ -231,6 +231,9 @@ public:
 	// Game server
 	GameServerBase mGameServerBase;
 
+	// Online play: the name shown to the other players in the lobby (kept clean by NetplayLobby::sanitizeName, never the Windows user name)
+	std::string mOnlinePlayerName = "Player";
+
 	// Internal
 	bool mForceCompileScripts = false;
 	int mScriptOptimizationLevel = -1;		// -1: Auto, 0: No optimization at all, up to 3: Full optimization

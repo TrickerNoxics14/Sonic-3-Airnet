@@ -95,6 +95,29 @@ function bool DropIn.net()
 	return u8[DropIn.ROLE_ADDRESS] != 0
 }
 
+// Draws the label of a player on the screen. While playing online with the online build of the game, the label is the player's name
+// from the lobby (the engine function draws it; asking by name keeps this working in the stock game, where it does not exist).
+// Otherwise (or when the engine does not answer) the given fallback text is drawn, e.g. "P2".
+// "rings" shows a ring count behind the name, or 0xffff for none (the fallback text then has to include it itself).
+function void DropIn.drawPlayerLabel(u8 slot, u16 x, u16 y, u32 color, u8 alignment, u16 renderQueue, u16 rings, string fallbackText)
+{
+	if (DropIn.net())
+	{
+		u8[0x8fff3f] = 0
+		u8[0x8fff30] = slot
+		u16[0x8fff32] = x
+		u16[0x8fff34] = y
+		u32[0x8fff36] = color
+		u16[0x8fff3a] = renderQueue
+		u16[0x8fff3c] = rings
+		u8[0x8fff3e] = alignment
+		System.callFunctionByName("Engine.drawNetPlayerLabel")
+		if (u8[0x8fff3f] == 1)
+			return
+	}
+	Renderer.drawText(DropIn.FONT, x, y, fallbackText, color, alignment, 0, renderQueue, false)
+}
+
 function bool DropIn.fourViewEngineAvailable()
 {
 	u8[0x8fff02] = 0

@@ -171,3 +171,25 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Fix: NetplayFailure reasons with plain messages, JoinReply refusal packet, heartbeat, timeouts on both sides, Retry in the lobby
 - Guard: runtime stage X (server unreachable, wrong code, blocked, version, mods, lobby full + retry, host closed, host killed, host cannot reach server)
 - Lesson: every wait needs a timeout and every timeout a reason the player can act on.
+
+## 2026-11-11 · identity-by-address · cpp
+- Seed: NetplayHost kick block and slot reservation keyed by the friend's IP address - the L12 check failed: a kicked friend came straight back because its retry arrived from 127.0.0.1 instead of the LAN address of the same computer (two addresses, one player); on the other side, two friends in one household share one address and would have blocked each other
+- Broken assumption: one player = one IP address
+- Search: `grep -n "getRemoteAddress().getIP()" Oxygen/oxygenengine/source/oxygen/network/netplay/*.cpp`
+- Fix: the join message carries a random per-run token (JoinAuthPacket::mClientToken); NetplayHost::identityOf uses it (address only if there is none) for kick block, slot reservation and "same friend coming back". Siblings left on purpose: the failed-code counter per address (it limits guessing from one place) and the known-peer list for server hosting (it is about where packets may come from)
+- Guard: L12 (a retry is refused), L11 (same slot back), core tests for the reservation and block lists
+- Lesson: decide what identifies a player before using it as a key; an address is where packets come from, not who sent them.
+
+## 2026-11-11 · test-pins-internal-path · powershell
+- Seed: L11 first demanded the log line "taking over its old player slot" from the host; the reconnect really worked, through another path (the dropped friend reused its UDP port, so the host had already replaced the old connection)
+- Broken assumption: a behaviour has exactly one internal route, and the log line of that route proves the behaviour
+- Fix: the host logs one line for the outcome ("friend came back to its player slot N", whichever route) and the check looks for that, plus the friend's own "back in player slot 3"
+- Guard: L11
+- Lesson: assert the outcome the player sees; log the outcome at one place that every route passes.
+
+## 2026-11-11 · evidence-picture-of-the-wrong-window · powershell
+- Seed: run_checks.ps1 L2 pictures: "host" and "friend 2" screenshots both showed friend 2's window (several game windows on one screen, SetForegroundWindow is not allowed to steal focus)
+- Broken assumption: the window that is asked to come to the front is the one that gets photographed
+- Fix: Save-WindowPicture minimizes the other game windows, restores the wanted one, then takes the picture
+- Guard: pictures L2-lobby-host.png / L2-lobby-friend2.png / W4-lobby-host.png were looked at by eye
+- Lesson: a picture is evidence only if it shows what its file name says.

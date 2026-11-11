@@ -12,6 +12,7 @@
 #include "oxygen/network/netplay/NetplayHost.h"
 #include "oxygen/network/netplay/NetplayModFingerprint.h"
 #include "oxygen/network/netplay/NetplayAuth.h"
+#include "oxygen/application/Configuration.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/modding/ModManager.h"
@@ -32,6 +33,10 @@ NetplayManager::NetplayManager() :
 {
 	mUseIPv6 = USE_IPv6;
 
+	// Developer test: the host's input delay ("auto" or a number of frames)
+	if (const char* delay = TestHooks::getEnv("S3AIR_NETPLAY_DELAY"))
+		mInputDelaySetting = (_stricmp(delay, "auto") == 0) ? NetplayLobby::INPUT_DELAY_AUTO : NetplayLobby::clampDelaySetting(atoi(delay));
+
 #if defined(DEBUG) && 0
 	// Just for testing / debugging
 	mConnectionManager.mDebugSettings.mSendingPacketLoss = 0.0f;
@@ -50,6 +55,7 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 {
 	if (!restartConnection(true, port) || nullptr == mNetplayHost)
 		return false;
+	mNetplayHost->setInputDelaySetting(mInputDelaySetting);
 	clearFailure();
 	mTestCloseTimer = 0.0f;
 
@@ -96,6 +102,54 @@ void NetplayManager::startJoinDirect(std::string_view ip, uint16 port, uint32 se
 
 	mNetplayClient->setAuthSecret(secret);
 	mNetplayClient->connectDirectlyToHost(ip, port);
+}
+
+std::string NetplayManager::getLocalPlayerName() const
+{
+	// Developer test: a name without touching the settings file
+	if (const char* testName = TestHooks::getEnv("S3AIR_PLAYER_NAME"))
+		return NetplayLobby::sanitizeName(testName);
+	return NetplayLobby::sanitizeName(Configuration::instance().mOnlinePlayerName);
+}
+
+void NetplayManager::setLocalPlayerName(const std::string& name)
+{
+	Configuration& configuration = Configuration::instance();
+	const std::string clean = NetplayLobby::sanitizeName(name);
+	if (configuration.mOnlinePlayerName == clean)
+		return;
+	configuration.mOnlinePlayerName = clean;
+	configuration.saveSettings();
+	RMX_LOG_INFO("Netplay: the player name is now \"" << clean << "\"");
+
+	// A friend tells the host right away, the host's lobby message goes out with its next update
+	if (nullptr != mNetplayClient)
+		mNetplayClient->sendLobbyReady(mNetplayClient->isLobbyReady());
+}
+
+void NetplayManager::setInputDelaySetting(int setting)
+{
+	mInputDelaySetting = NetplayLobby::clampDelaySetting(setting);
+	if (nullptr != mNetplayHost)
+		mNetplayHost->setInputDelaySetting(mInputDelaySetting);
+}
+
+std::string NetplayManager::getPlayerName(int slot) const
+{
+	if (nullptr != mNetplayHost && mNetplayHost->getHostState() != NetplayHost::HostState::FAILED)
+		return mNetplayHost->getPlayerName(slot);
+	if (nullptr != mNetplayClient && mNetplayClient->hasLobbyState())
+		return mNetplayClient->getLobbyName(slot);
+	return std::string();
+}
+
+int NetplayManager::getPlayerPingMs(int slot) const
+{
+	if (nullptr != mNetplayHost)
+		return mNetplayHost->getPlayerPing(slot);
+	if (nullptr != mNetplayClient && mNetplayClient->hasLobbyState())
+		return mNetplayClient->getLobbyPing(slot);
+	return -1;
 }
 
 void NetplayManager::reportFailure(NetplayFailure::Reason reason, const std::string& detail)
@@ -167,6 +221,7 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 	{
 		int latency = 0;
 		int connected = 0;
+		const int worstPing = mNetplayHost->getWorstPing();
 		for (const auto* player : mNetplayHost->getPlayerConnections())
 		{
 			if (player->getState() == NetConnection::State::CONNECTED)
@@ -175,8 +230,8 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 				latency = std::max(latency, player->mCurrentLatency);
 			}
 		}
-		fprintf(file, "[host] t=%us state=%d frame=%u fps=%.1f friends=%d, delay=%d frames, repairs=%d\n",
-			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayHost->getHostState(), (unsigned)frame, fps, connected, latency, mNetplayHost->getResyncCount());
+		fprintf(file, "[host] t=%us state=%d frame=%u fps=%.1f friends=%d, delay=%d frames, repairs=%d, inputdelay=%d, ping=%d\n",
+			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayHost->getHostState(), (unsigned)frame, fps, connected, latency, mNetplayHost->getResyncCount(), mNetplayHost->getEffectiveInputDelay(), worstPing);
 	}
 	fclose(file);
 }

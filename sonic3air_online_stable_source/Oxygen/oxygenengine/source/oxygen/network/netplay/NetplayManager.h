@@ -10,6 +10,7 @@
 
 #include "oxygen/network/netplay/ExternalAddressQuery.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
+#include "oxygen/network/netplay/NetplayLobbyLogic.h"
 
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
@@ -55,6 +56,18 @@ public:
 	void startJoinDirect(std::string_view ip, uint16 port, uint32 secret);
 	void closeConnections();
 
+	// The name other players see (the option "Online player name", default "Player"); always clean, see NetplayLobby::sanitizeName
+	std::string getLocalPlayerName() const;
+	void setLocalPlayerName(const std::string& name);
+
+	// Input delay chosen by the host: -1 = Auto, otherwise a number of frames; kept while the lobby is closed and opened again
+	inline int getInputDelaySetting() const  { return mInputDelaySetting; }
+	void setInputDelaySetting(int setting);
+
+	// For the game scripts: the name and the ping of a player slot while playing online ("" / -1 when unknown)
+	std::string getPlayerName(int slot) const;
+	int getPlayerPingMs(int slot) const;
+
 	// Remembers why something failed, shows it in plain language and writes it to the online log
 	void reportFailure(NetplayFailure::Reason reason, const std::string& detail = std::string());
 	void clearFailure();
@@ -79,6 +92,7 @@ private:
 	UDPSocket mUDPSocket;
 	float mLanSearchTimer = 0.0f;
 	uint32 mHostSecret = 0;
+	int mInputDelaySetting = NetplayLobby::INPUT_DELAY_AUTO;
 	float mTestCloseTimer = 0.0f;
 	float mOnlineLogTimer = 0.0f;
 	bool mOnlineLogStarted = false;

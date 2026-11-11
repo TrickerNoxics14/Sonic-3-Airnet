@@ -12,6 +12,7 @@
 #include "oxygen_netcore/network/NetConnection.h"
 #include "oxygen_netcore/serverclient/NetplaySetupPackets.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
+#include "oxygen/network/netplay/NetplayLobbyLogic.h"
 
 class ControlsIn;
 class NetplayManager;
@@ -76,7 +77,22 @@ public:
 	inline uint8 getLobbySlotState(int slot) const  { return (slot >= 0 && slot < 4) ? mLobbySlotState[slot] : 0; }
 	inline bool isLobbyHostStarting() const	{ return mLobbyHostStarting; }
 	inline bool isLobbyReady() const		{ return mLobbyMyReady; }
-	void sendLobbyReady(bool ready);
+	void sendLobbyReady(bool ready);		// Also tells the host our name
+
+	// More from the host's lobby messages
+	struct ChatLine
+	{
+		int mSlot = 0;
+		std::string mText;
+	};
+	inline const std::string& getLobbyName(int slot) const  { static const std::string empty; return (slot >= 0 && slot < 4) ? mLobbyNames[slot] : empty; }
+	inline int getLobbyPing(int slot) const  { return (slot >= 0 && slot < 4 && mLobbyPingMs[slot] != 0xffff) ? (int)mLobbyPingMs[slot] : -1; }
+	inline int getLobbyDelaySetting() const  { return (mLobbyDelaySetting == 0xff) ? -1 : (int)mLobbyDelaySetting; }
+	inline int getLobbyEffectiveDelay() const  { return (int)mLobbyEffectiveDelay; }
+	inline int getLobbyReadyCheckSeconds() const  { return (int)mLobbyReadyCheckSeconds; }
+	inline const std::deque<ChatLine>& getChatLog() const  { return mChatLog; }
+	void sendChat(int quickMessage, const std::string& freeText);
+	inline bool isRejoiningLobby() const  { return mLobbyRejoin; }		// The connection broke while in the lobby and is being restored
 
 private:
 	struct ReceivedFrame
@@ -134,6 +150,14 @@ private:
 	bool mLobbyHostStarting = false;
 	bool mLobbyKnown = false;
 	bool mLobbyMyReady = false;
+	std::string mLobbyNames[4];
+	uint16 mLobbyPingMs[4] = { 0xffff, 0xffff, 0xffff, 0xffff };
+	uint8 mLobbyDelaySetting = 0xff;
+	uint8 mLobbyEffectiveDelay = 0;
+	uint8 mLobbyReadyCheckSeconds = 0;
+	std::deque<ChatLine> mChatLog;
+	bool mLobbyRejoin = false;				// The connection broke in the lobby: coming back to the same player slot
+	bool mLobbyPingLogged = false;
 	uint32 mRepairRequestedFrame = 0;
 	int mDesyncCount = 0;
 	uint32 mLastSyncOkFrame = 0;

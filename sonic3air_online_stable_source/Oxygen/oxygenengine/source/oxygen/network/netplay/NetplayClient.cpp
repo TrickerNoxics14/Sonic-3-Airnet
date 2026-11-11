@@ -35,7 +35,8 @@ NetplayClient::~NetplayClient()
 	// TODO: Call this only if netplay game was actually active
 	EngineMain::getDelegate().onStopNetplayGame(false);
 
-	// TODO: This just destroys the connection, but doesn't tell the host about it
+	// Tell the host that we are leaving (so that the slot is free at once), then drop the connection
+	mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 	mHostConnection.clear();
 }
 
@@ -95,6 +96,37 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mNetplayManager.mLastErrorMessage = "Connection lost. Reconnecting to your game...";
 		RMX_LOG_INFO("Netplay client: reconnecting to the existing session");
 	}
+
+	// Developer test: the lobby connection breaks without a word (as if the network dropped), to see that the friend comes back to its slot
+	static bool lobbyDropTestDone = false;		// (once per run of the game, not once per connection)
+	if (!lobbyDropTestDone && nullptr != TestHooks::getEnv("S3AIR_NETPLAY_LOBBY_DROP_TEST") && mState == State::CONNECTED && mHostVerified && mLobbyKnown && mStateTimer > 6.0f)
+	{
+		lobbyDropTestDone = true;
+		RMX_LOG_INFO("Netplay client: automated check dropping the lobby connection");
+		mHostConnection.clear();
+	}
+
+	// The connection to the host broke while we were waiting in its lobby: try to come back to the same slot for a while
+	//  -> Not if the host closed the lobby on purpose (it said so), that is a different message
+	if (mState == State::CONNECTED && mHostVerified && mLobbyKnown && !mLobbyRejoin && !mResumeSession)
+	{
+		const NetConnection::State connectionState = mHostConnection.getState();
+		const bool hostSaidGoodbye = (connectionState == NetConnection::State::DISCONNECTED && mHostConnection.getDisconnectReason() == NetConnection::DisconnectReason::MANUAL_REMOTE);
+		if ((connectionState == NetConnection::State::DISCONNECTED || connectionState == NetConnection::State::EMPTY) && !hostSaidGoodbye)
+		{
+			mReconnectAddress = mHostConnection.getRemoteAddress();
+			mLobbyRejoin = true;
+			mReconnectRemaining = 40.0f;
+			mHostConnection.clear();
+			beginConnectTo(mReconnectAddress);
+			mState = State::CONNECT_TO_HOST;
+			mTimedState = State::NONE;
+			mStateTimer = 0.0f;
+			mNetplayManager.mLastErrorMessage = "Connection lost. Reconnecting to the lobby...";
+			RMX_LOG_INFO("Netplay client: lost the lobby connection, trying to come back to player slot " << (int)(mLobbyYourSlot + 1));
+		}
+	}
+
 	if (mReconnectRemaining > 0.0f)
 	{
 		mReconnectRemaining -= deltaSeconds;
@@ -102,7 +134,15 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		{
 			mReconnectRemaining = 0.0f;
 			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
-			fail(NetplayFailure::Reason::CONNECTION_LOST, "Could not reconnect within 90 seconds.");
+			if (mLobbyRejoin)
+			{
+				mLobbyRejoin = false;
+				fail(NetplayFailure::Reason::HOST_CLOSED, "Could not reconnect to the lobby within 40 seconds.");
+			}
+			else
+			{
+				fail(NetplayFailure::Reason::CONNECTION_LOST, "Could not reconnect within 90 seconds.");
+			}
 			return;
 		}
 		if (mState == State::CONNECT_TO_HOST && (mStateTimer > 5.0f || mHostConnection.getState() == NetConnection::State::DISCONNECTED))
@@ -321,7 +361,12 @@ void NetplayClient::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 		uint16 input = controlsIn.getInputFromController(0);
 		if (nullptr != TestHooks::getEnv("S3AIR_CHECKS"))
 			if (const char* testInput = TestHooks::getEnv("S3AIR_NETPLAY_TEST_INPUT"))
+			{
 				input = (uint16)strtoul(testInput, nullptr, 0);
+				// Developer test: the input switches on and off every two seconds, so that the delay between a change and its effect can be measured
+				if (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_TEST_TOGGLE") && ((frameNumber / 120) % 2) == 0)
+					input = 0;
+			}
 		packet.mInputs.push_back(input);
 		{
 			static uint16 lastSent = 0;
@@ -355,6 +400,21 @@ void NetplayClient::sendLobbyReady(bool ready)
 		return;
 	LobbyReadyPacket packet;
 	packet.mReady = ready ? 1 : 0;
+	packet.mName = mNetplayManager.getLocalPlayerName();
+	mHostConnection.sendPacket(packet, NetConnection::SendFlags::NONE);
+}
+
+void NetplayClient::sendChat(int quickMessage, const std::string& freeText)
+{
+	if (mHostConnection.getState() != NetConnection::State::CONNECTED || !mHostVerified)
+		return;
+	LobbyChatPacket packet;
+	if (NetplayLobby::getQuickMessage(quickMessage) != nullptr)
+		packet.mQuickMessage = (uint8)quickMessage;
+	else
+		packet.mText = NetplayLobby::sanitizeChat(freeText);
+	if (packet.mQuickMessage == 0 && packet.mText.empty())
+		return;
 	mHostConnection.sendPacket(packet, NetConnection::SendFlags::NONE);
 }
 
@@ -394,8 +454,69 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			mLobbyYourSlot = packet.mYourSlot;
 			mLobbyHostStarting = (packet.mHostStarting != 0);
 			memcpy(mLobbySlotState, packet.mSlotState, sizeof(mLobbySlotState));
+			bool detailsChanged = (mLobbyDelaySetting != packet.mDelaySetting || mLobbyEffectiveDelay != packet.mEffectiveDelay);
+			for (int k = 0; k < 4; ++k)
+			{
+				const std::string name = NetplayLobby::sanitizeText(packet.mNames[k], NetplayLobby::MAX_NAME_LENGTH);		// (the host cleaned them up already, but nothing is trusted)
+				detailsChanged = detailsChanged || (name != mLobbyNames[k]);
+				mLobbyNames[k] = name;
+				mLobbyPingMs[k] = packet.mPingMs[k];
+			}
+			mLobbyDelaySetting = packet.mDelaySetting;
+			mLobbyEffectiveDelay = packet.mEffectiveDelay;
+			if (!mLobbyPingLogged && packet.mYourSlot < 4 && packet.mPingMs[packet.mYourSlot] != 0xffff)
+			{
+				mLobbyPingLogged = true;
+				RMX_LOG_INFO("Netplay client: lobby: the host measured our ping: " << (int)packet.mPingMs[packet.mYourSlot] << " ms");
+			}
+			if (packet.mReadyCheckSeconds != 0 && mLobbyReadyCheckSeconds == 0)
+				RMX_LOG_INFO("Netplay client: lobby: the host wants to start, ready check running (" << (int)packet.mReadyCheckSeconds << " seconds)");
+			mLobbyReadyCheckSeconds = packet.mReadyCheckSeconds;
+			if (detailsChanged)
+				RMX_LOG_INFO("Netplay client: lobby: names " << mLobbyNames[0] << "," << mLobbyNames[1] << "," << mLobbyNames[2] << "," << mLobbyNames[3] << ", input delay " << NetplayLobby::describeInputDelay(getLobbyDelaySetting(), getLobbyEffectiveDelay()));
 			if (changed)
 				RMX_LOG_INFO("Netplay client: lobby: you are slot " << (int)(mLobbyYourSlot + 1) << ", players " << (int)mLobbySlotState[0] << (int)mLobbySlotState[1] << (int)mLobbySlotState[2] << (int)mLobbySlotState[3] << (mLobbyHostStarting ? ", the host is picking the game" : ""));
+			return true;
+		}
+
+		case LobbyChatBroadcastPacket::PACKET_TYPE:
+		{
+			LobbyChatBroadcastPacket packet;
+			if (!evaluation.readPacket(packet))
+				return false;
+			const std::string text = NetplayLobby::sanitizeChat(packet.mText);
+			if (!text.empty() && packet.mSlot < 4)
+			{
+				ChatLine line;
+				line.mSlot = packet.mSlot;
+				line.mText = text;
+				mChatLog.push_back(line);
+				while (mChatLog.size() > 8)
+					mChatLog.pop_front();
+				RMX_LOG_INFO("Netplay client: chat, player " << (int)(packet.mSlot + 1) << " (" << mLobbyNames[packet.mSlot] << "): " << text);
+			}
+			return true;
+		}
+
+		case LobbyPingPacket::PACKET_TYPE:
+		{
+			LobbyPingPacket packet;
+			if (!evaluation.readPacket(packet))
+				return false;
+			LobbyPongPacket pong;
+			pong.mToken = packet.mToken;
+			mHostConnection.sendPacket(pong, NetConnection::SendFlags::UNRELIABLE);
+			return true;
+		}
+
+		case LobbyLeavePacket::PACKET_TYPE:
+		{
+			LobbyLeavePacket packet;
+			if (!evaluation.readPacket(packet))
+				return false;
+			const bool kicked = (packet.mReason == (uint8)NetplayLobby::LeaveReason::KICKED);
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(kicked ? NetplayFailure::Reason::KICKED : NetplayFailure::Reason::LEFT_OUT);
 			return true;
 		}
 
@@ -524,7 +645,9 @@ void NetplayClient::handleJoinChallenge(uint32 hostNonce)
 	JoinAuthPacket answer;
 	answer.mClientNonce = mClientNonce;
 	answer.mProof = NetplayAuth::computeProof('C', mAuthSecret, mHostNonce, mClientNonce);
-	answer.mPreferredSlot = mResumeSession ? mPlayerIndex : 0;		// After a connection loss, ask for the same player slot again
+	static const uint32 processToken = std::max<uint32>(NetplayAuth::randomNonce(), 1);
+	answer.mClientToken = processToken;
+	answer.mPreferredSlot = mResumeSession ? mPlayerIndex : (mLobbyRejoin ? mLobbyYourSlot : 0);		// After a connection loss, ask for the same player slot again
 	mHostConnection.sendPacket(answer, NetConnection::SendFlags::NONE);
 	mAuthSent = true;
 }
@@ -547,6 +670,15 @@ void NetplayClient::handleJoinReply(const JoinReplyPacket& packet)
 			}
 			mHostVerified = true;
 			RMX_LOG_INFO("Netplay client: the host proved the code, player slot " << (int)(packet.mSlot + 1));
+			sendLobbyReady(mLobbyMyReady);		// The host learns our name right away
+			if (mLobbyRejoin)
+			{
+				mLobbyRejoin = false;
+				mReconnectRemaining = 0.0f;
+				mNetplayManager.mLastErrorMessage.clear();
+				mLobbyYourSlot = packet.mSlot;
+				RMX_LOG_INFO("Netplay client: reconnected to the lobby, back in player slot " << (int)(packet.mSlot + 1));
+			}
 			// Test hook: press Ready right away
 			if (nullptr != TestHooks::getEnv("S3AIR_LOBBY_AUTOREADY"))
 				sendLobbyReady(true);
@@ -556,6 +688,11 @@ void NetplayClient::handleJoinReply(const JoinReplyPacket& packet)
 		case NetplayAuth::JoinResult::LOBBY_FULL:
 			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 			fail(NetplayFailure::Reason::LOBBY_FULL);
+			return;
+
+		case NetplayAuth::JoinResult::KICKED:
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(NetplayFailure::Reason::KICKED);
 			return;
 
 		default:

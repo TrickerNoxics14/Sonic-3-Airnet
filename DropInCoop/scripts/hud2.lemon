@@ -39,7 +39,7 @@ function void RenderHUD()
 			if (index < 2 || DropIn.partyPlayer(index) != 0)
 			{
 				u16 rings = index == 0 ? ring_counter : index == 1 ? ring_counter.player2 : DropIn.partyRings(index)
-				Renderer.drawText(DropIn.FONT, 4 + getScreenWidth() * index / 4, getScreenHeight() - 12, stringformat("P%d R%d", index + 1, rings), 0xffffffff, 1, 0, 0xe100, false)
+				DropIn.drawPlayerLabel(index, 4 + getScreenWidth() * index / 4, getScreenHeight() - 12, 0xffffffff, 1, 0xe100, rings, stringformat("P%d R%d", index + 1, rings))
 			}
 		}
 		return

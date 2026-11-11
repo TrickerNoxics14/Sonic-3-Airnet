@@ -1,0 +1,47 @@
+/*
+	This script file is part of the Sonic 3 A.I.R. script software distribution.
+	Copyright (C) 2017-2026 by Eukaryot
+
+	Published under the GNU GPLv3 open source software license, see license.txt
+	or https://www.gnu.org/licenses/gpl-3.0.en.html
+*/
+
+
+//-------------------------------------------------------//
+// Online play: player names on the screen               //
+//-------------------------------------------------------//
+
+// A mod that wants to show the name of an online player asks for it by name (System.callFunctionByName), which also works
+// when this function does not exist (the stock game): the mod then draws its own label.
+//
+// Input, in the shared memory:
+//   u8  [0x8fff30]  player slot (0 to 3)
+//   s16 [0x8fff32]  x position
+//   s16 [0x8fff34]  y position
+//   u32 [0x8fff36]  text color (0xaabbggrr as for Renderer.drawText)
+//   u16 [0x8fff3a]  render queue
+//   u16 [0x8fff3c]  ring count to show behind the name, or 0xffff for none
+//   u8  [0x8fff3e]  text alignment as for Renderer.drawText (4 = left, 5 = centered)
+// Output:
+//   u8  [0x8fff3f]  1 once the label was drawn
+function void Engine.drawNetPlayerLabel()
+{
+	u8 slot = u8[0x8fff30] & 3
+	s16 px = s16[0x8fff32]
+	s16 py = s16[0x8fff34]
+	u32 color = u32[0x8fff36]
+	u16 renderQueue = u16[0x8fff3a]
+	u16 rings = u16[0x8fff3c]
+	u8 alignment = u8[0x8fff3e]
+
+	string label = Netplay.getPlayerLabel(slot)
+	if (rings == 0xffff)
+	{
+		Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.6f)", px, py, label, color, alignment, 0, renderQueue, false)
+	}
+	else
+	{
+		Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.6f)", px, py, stringformat("%s R%d", label, rings), color, alignment, 0, renderQueue, false)
+	}
+	u8[0x8fff3f] = 1
+}

@@ -85,14 +85,21 @@ struct JoinStateChunkPacket : public highlevel::PacketBase
 };
 
 
-// Lobby (before the game starts): the host tells every client who is in the lobby and who is ready
+// Lobby (before the game starts): the host tells every client who is in the lobby, who is ready, and what the input delay is
 struct LobbyStatePacket : public highlevel::PacketBase
 {
 	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyStatePacket");
 
+	static const size_t MAX_NAME_BYTES = 16;
+
 	uint8 mYourSlot = 0;				// The slot (1 to 3) of the client who receives this packet
 	uint8 mSlotState[4] = { 0 };		// Per slot: 0 = empty, 1 = host, 2 = joined, 3 = ready
 	uint8 mHostStarting = 0;			// 1 once the host leaves the lobby screen to pick the game
+	std::string mNames[4];				// Player names (already cleaned up by the host)
+	uint16 mPingMs[4] = { 0xffff, 0xffff, 0xffff, 0xffff };		// Round trip time per slot as measured by the host, 0xffff = unknown
+	uint8 mDelaySetting = 0xff;			// Input delay chosen by the host: 0xff = Auto, otherwise the number of frames
+	uint8 mEffectiveDelay = 0;			// The input delay that is in use right now
+	uint8 mReadyCheckSeconds = 0;		// Seconds left of a running ready check (0 = none)
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
@@ -100,20 +107,105 @@ struct LobbyStatePacket : public highlevel::PacketBase
 		for (int k = 0; k < 4; ++k)
 			serializer.serialize(mSlotState[k]);
 		serializer.serialize(mHostStarting);
+		for (int k = 0; k < 4; ++k)
+			serializer.serialize(mNames[k], MAX_NAME_BYTES);
+		for (int k = 0; k < 4; ++k)
+			serializer.serialize(mPingMs[k]);
+		serializer.serialize(mDelaySetting);
+		serializer.serialize(mEffectiveDelay);
+		serializer.serialize(mReadyCheckSeconds);
 	}
 };
 
 
-// Sent from a client to the host: the player pressed Ready (or took it back)
+// Sent from a client to the host: the player pressed Ready (or took it back); also sent every two seconds, together with the player's name
 struct LobbyReadyPacket : public highlevel::PacketBase
 {
 	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyReadyPacket");
 
 	uint8 mReady = 0;
+	std::string mName;		// The host cleans it up again, nothing the friend sends is trusted
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
 		serializer.serialize(mReady);
+		serializer.serialize(mName, LobbyStatePacket::MAX_NAME_BYTES);
+	}
+};
+
+
+// A chat line from a client to the host (a quick message by number, or a short free text); the host checks it and passes it on
+struct LobbyChatPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyChatPacket");
+
+	static const size_t MAX_TEXT_BYTES = 64;
+
+	uint8 mQuickMessage = 0;		// 1 to 12, or 0 for free text
+	std::string mText;
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mQuickMessage);
+		serializer.serialize(mText, MAX_TEXT_BYTES);
+	}
+};
+
+
+// A chat line that the host passes on to everybody, with the slot of the player who said it
+struct LobbyChatBroadcastPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyChatBroadcastPacket");
+
+	uint8 mSlot = 0;
+	std::string mText;		// Already the final text (the quick message, or the cleaned up free text)
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mSlot);
+		serializer.serialize(mText, LobbyChatPacket::MAX_TEXT_BYTES);
+	}
+};
+
+
+// Ping measurement: the host sends a token, the friend sends it straight back (both unreliable, a lost one is just no measurement)
+struct LobbyPingPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyPingPacket");
+
+	uint32 mToken = 0;
+
+	virtual bool isReliablePacket() const override  { return false; }
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mToken);
+	}
+};
+
+struct LobbyPongPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyPongPacket");
+
+	uint32 mToken = 0;
+
+	virtual bool isReliablePacket() const override  { return false; }
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mToken);
+	}
+};
+
+
+// The host sends a friend away (kicked, or not ready when the game started)
+struct LobbyLeavePacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("LobbyLeavePacket");
+
+	uint8 mReason = 0;		// A NetplayLobby::LeaveReason
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mReason);
 	}
 };
 
@@ -237,12 +329,14 @@ struct JoinAuthPacket : public highlevel::PacketBase
 	uint32 mClientNonce = 0;
 	uint64 mProof = 0;
 	uint8 mPreferredSlot = 0;	// The player slot (1 to 3) this friend had before a connection loss, or 0
+	uint32 mClientToken = 0;	// Random number chosen once per run of the game: tells the host that it is the same player again (even from another address)
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
 		serializer.serialize(mClientNonce);
 		serializer.serialize(mProof);
 		serializer.serialize(mPreferredSlot);
+		serializer.serialize(mClientToken);
 	}
 };
 

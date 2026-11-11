@@ -431,7 +431,7 @@ function bool Standalone.onWriteToSpriteTable(s16 px, s16 py, u16 renderQueue)
 		if (!drawnByExtraSlot)
 			Standalone.drawCharacterSpriteDirect(char.character, px, py, char.animation.sprite, flags, 0x40 + char.character * 0x20, renderQueue)
 		super.active = savedSuper
-		Renderer.drawText(DropIn.FONT, px, py - 28, stringformat("P%d", DropIn.partyIndex(A0) + 1), 0xffffffff, 5, 0, renderQueue + 1, false)
+		DropIn.drawPlayerLabel(DropIn.partyIndex(A0), px, py - 28, 0xffffffff, 5, renderQueue + 1, 0xffff, stringformat("P%d", DropIn.partyIndex(A0) + 1))
 		return true
 	}
 	return base.Standalone.onWriteToSpriteTable(px, py, renderQueue)

@@ -604,6 +604,13 @@ void Configuration::serializeStandardSettings(JsonSerializer& serializer)
 	// Script
 	serializer.serialize("ScriptOptimizationLevel", mScriptOptimizationLevel);
 
+	// Online play
+	if (serializer.beginObject("Online"))
+	{
+		serializer.serialize("PlayerName", mOnlinePlayerName);
+		serializer.endObject();
+	}
+
 	// Game server
 	if (serializer.beginObject("GameServer"))
 	{
