@@ -137,6 +137,16 @@ Everybody who plays together needs the same version. The game can update itself 
     is switched off in this fork; it would have reported updates for a different program.
   For the person who publishes a release: checks\release.ps1 -Version x.y.z -Notes "..." (see the comments in that script).
 
+WHAT HAS BEEN TESTED (honest status of this build)
+--------------------------------------------------
+All online features were tested by automated checks on ONE computer: two to four game windows talking over the
+loopback connection, a local lag simulator (200 ms round trip, jitter and 3 percent packet loss), and a local test server
+that imitates GitHub for the updater. Nobody has yet played it over the real internet between two different home
+networks, so how well it works through every router and firewall is not proven; use the VPN option or the optional
+relay if the code does not connect. The feel of the input delay settings has not been judged by a human player.
+Known limits: the sync check only watches the 64 KB work RAM; the relay and the updater have never run against a
+real public server; updates need public GitHub releases; four-view split screen is not part of this online build.
+
 NOTES
 -----
 - Each player has their own rings and score. Getting hit only takes away your own rings.

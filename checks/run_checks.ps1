@@ -61,8 +61,16 @@ $recoveryPath = Join-Path $checksDir '.run-recovery.json'
 # This run creates it for its own duration and removes it again; the release package never contains it (make_package.ps1 refuses to ship it).
 $testHooksMarker = Join-Path $bin 'testhooks.enabled'
 $gameExitCode = 0
+# Online stages that only make sense on the stable online fork (U, the unzipped package, is engine independent and stays in this run).
+$onlineStageIds = @('D', 'E', 'M', 'N', 'R', 'L', 'S', 'X', 'W', 'Y')
+$delegatedOnlineStages = @()
+$delegatedOnlineWanted = @()
+if (-not $EngineRoot -and -not $Quick) {
+	$delegatedOnlineWanted = @($onlineStageIds | Where-Object { ($Only.Count -eq 0) -or ($Only -contains $_) })
+	$delegatedOnlineStages = $onlineStageIds
+}
 
-$results = New-Object System.Collections.ArrayList
+$results =New-Object System.Collections.ArrayList
 $startedProcesses = New-Object System.Collections.ArrayList
 
 function Add-Result([string]$id, [string]$title, [bool]$passed, [string]$detail)
@@ -345,6 +353,10 @@ function Get-QuadCaptureStats([string]$path)
 
 function Wants([string]$stage)
 {
+	# The online stages need the stable online fork. In a default run (no -EngineRoot) they are not run against the legacy test engine
+	# (its join codes, handshake and lobby differ, so every one of them would fail for that reason alone); they run in a child run
+	# against the stable fork after the local stages (see "Online stages" below) and their results are merged into this report.
+	if ($delegatedOnlineStages -contains $stage) { return $false }
 	return ($Only.Count -eq 0) -or ($Only -contains $stage)
 }
 
@@ -2098,6 +2110,38 @@ public class RelayFlood
 catch
 {
 	Add-Result "X1" "The check run completed" $false $_.Exception.Message
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Online stages: run against the stable online fork in a child run (it needs the mutex, so this run lets go of it meanwhile)
+
+if ($delegatedOnlineWanted.Count -gt 0)
+{
+	Write-Step ("Online stages " + ($delegatedOnlineWanted -join ',') + ": run against the stable online fork in a child run")
+	$childReport = Join-Path $checksDir "online_stable_runtime_report.txt"
+	Remove-Item -LiteralPath $childReport -ErrorAction SilentlyContinue
+	$childRoot = Join-Path $root "sonic3air_online_stable_source"
+	try
+	{
+		$checkRunMutex.ReleaseMutex()
+		$childArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $checksDir 'run_checks.ps1'), '-RuntimeOnly', '-EngineRoot', $childRoot, '-Only', ($delegatedOnlineWanted -join ','))
+		& powershell @childArguments 2>&1 | ForEach-Object { Write-Host $_ }
+		$childExit = $LASTEXITCODE
+	}
+	finally { [void]$checkRunMutex.WaitOne(60000) }
+	$childMerged = 0; $childFails = 0
+	if (Test-Path -LiteralPath $childReport)
+	{
+		foreach ($childLine in Get-Content -LiteralPath $childReport)
+		{
+			$childMatch = [regex]::Match($childLine, '^(PASS|FAIL)\s+(\S+)\s+(.*?)(\s+--\s+(.*))?$')
+			if ($childMatch.Success) { $childMerged++; if ($childMatch.Groups[1].Value -eq "FAIL") { $childFails++ }; $results.Add([pscustomobject]@{ Id = $childMatch.Groups[2].Value; Title = $childMatch.Groups[3].Value; Passed = ($childMatch.Groups[1].Value -eq 'PASS'); Detail = $childMatch.Groups[5].Value }) | Out-Null }
+		}
+	}
+	if (($childMerged -eq 0) -or (($childExit -ne 0) -and ($childFails -eq 0)))
+	{
+		Add-Result 'ONL' 'The online stages ran against the stable fork and reported results' $false ("child exit code $childExit, " + $childMerged + " result lines read from online_stable_runtime_report.txt")
+	}
 }
 
 # ---------------------------------------------------------------------------------------------------------------
