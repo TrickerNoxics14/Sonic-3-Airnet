@@ -119,7 +119,7 @@ function Remove-CheckedTree([string]$path)
 
 function Stop-TestGames
 {
-	foreach ($process in @(Get-Process -Name "Sonic3AIR" -ErrorAction SilentlyContinue))
+	foreach ($process in @(Get-Process -Name "Sonic3AIR", "AirNet" -ErrorAction SilentlyContinue))
 	{
 		$path = $null
 		try { $path = $process.Path } catch { }
@@ -287,7 +287,7 @@ function Reset-UpdateState
 	foreach ($name in @("download", "staging", "backup")) { $path = Join-Path $updateDir $name; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force } }
 }
 
-function Invoke-Game([string]$installDir, [string]$mode, [string]$apiBase, [string]$waitPattern, [int]$timeoutSeconds, [switch]$KeepRunning, [string]$repo = 'test/repo')
+function Invoke-Game([string]$installDir, [string]$mode, [string]$apiBase, [string]$waitPattern, [int]$timeoutSeconds, [switch]$KeepRunning, [string]$repo = 'test/repo', [string]$exeName = 'Sonic3AIR.exe')
 {
 	Reset-UpdateState
 	# An empty $apiBase / $repo leaves the switch unset: the game then uses the real api.github.com and the repository from its settings
@@ -295,7 +295,7 @@ function Invoke-Game([string]$installDir, [string]$mode, [string]$apiBase, [stri
 	if ($apiBase -ne '') { $variables['S3AIR_UPDATE_API'] = $apiBase }
 	if ($repo -ne '') { $variables['S3AIR_UPDATE_REPO'] = $repo }
 	foreach ($key in $variables.Keys) { [Environment]::SetEnvironmentVariable($key, [string]$variables[$key], 'Process') }
-	try { $process = Start-Process -FilePath (Join-Path $installDir "Sonic3AIR.exe") -WorkingDirectory $installDir -PassThru }
+	try { $process = Start-Process -FilePath (Join-Path $installDir $exeName) -WorkingDirectory $installDir -PassThru }
 	finally { foreach ($key in $variables.Keys) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') } }
 	[void]$startedProcesses.Add($process)
 	$null = Wait-Until { ((Read-SharedText $script:updateLog) -match $waitPattern) -or $process.HasExited } $timeoutSeconds
@@ -635,6 +635,16 @@ function Invoke-GameChecks
 	Rename-Item -LiteralPath (Join-Path $install "version.txt.off") -NewName "version.txt"
 	Add-Result "T12" "A development build without version.txt has the updater switched off and asks the server nothing" (($log -match "updates are switched off") -and -not ((Get-ServerRequests) -match "releases/latest")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
 
+	# T12b: a renamed program would fail after the whole download (the package and the install helper use Sonic3AIR.exe), so the updater says so at once and asks the server nothing
+	Rename-Item -LiteralPath (Join-Path $install "Sonic3AIR.exe") -NewName "AirNet.exe"
+	try
+	{
+		Clear-ServerLog
+		$log = Invoke-Game $install "apply" $apiBase "switched off" 90 -exeName "AirNet.exe"
+	}
+	finally { Rename-Item -LiteralPath (Join-Path $install "AirNet.exe") -NewName "Sonic3AIR.exe" }
+	Add-Result "T12b" "A game program renamed away from Sonic3AIR.exe has the updater switched off with an explanation and asks the server nothing (instead of failing after the download)" (($log -match "switched off: Updates only work when the game program is named Sonic3AIR.exe") -and -not ((Get-ServerRequests) -match "releases/latest")) (($log -split "`n" | Select-Object -Last 2) -join " | ")
+
 	# T13: the Options menu with the update entry, in two states, with pictures (looked at by eye) and proof that the game keeps running
 	Publish-Release "v1.1.0" (New-GoodPackageEntries "1.1.0") -notes "Test release notes: new things.`nSecond line of the notes with a longer text that has to wrap around to the next line of the menu.`n- a list entry`n- another entry" | Out-Null
 	$picture = Invoke-MenuPicture $install $apiBase "update available" "T13-update-available.png"
@@ -730,6 +740,17 @@ function Invoke-ReleaseChecks
 		finally { $archive.Dispose() }
 	}
 	Add-Result "R1f" "The release zip has version.txt = 99.0.0, update_helper.ps1, and no save, settings, ROM or test marker" (($versionInZip -eq "99.0.0") -and $hasHelper -and ($zipEntriesBad.Count -eq 0)) ("version.txt: '" + $versionInZip + "'")
+
+	# R1g: without -Build a dry run says so when Sonic3AIR.exe is older than the source (a real release always builds, so a stale program cannot be shipped under a new tag)
+	$staleExe = Get-Item -LiteralPath (Join-Path $root "sonic3air_online_stable_source\Oxygen\sonic3air\bin\Release_x64\Sonic3AIR.exe")
+	$staleExeOriginalTime = $staleExe.LastWriteTime
+	try
+	{
+		$staleExe.LastWriteTime = [datetime]"2001-01-01"
+		$staleRun = Run-Release @("-Version", "99.0.0", "-Notes", "Dry run notes", "-DryRun", "-AllowDirty")
+	}
+	finally { $staleExe.LastWriteTime = $staleExeOriginalTime }
+	Add-Result "R1g" "release.ps1 -DryRun without -Build notices that Sonic3AIR.exe is older than the source" ($staleRun.Text -match "Sonic3AIR\.exe is older than the source file") ""
 
 	if ($SkipReal -or -not (Test-Path -LiteralPath $zipPath)) { return }
 

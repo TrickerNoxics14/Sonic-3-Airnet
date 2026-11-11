@@ -258,3 +258,64 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Fix: the window is 100 s
 - Siblings: the other X checks wait 60-80 s for events that take about 15-25 s; W/Y waits have large margins
 - Lesson: a wait window must be a multiple of the measured time, not the design value; a check that sits on the edge fails only on busy days.
+## 2026-11-11 · low-entropy-secret-hashed-once · cpp
+- Seed: NetplayAuth.h derived the LAN broadcast tag, the relay lobby name/key and the join secret as ONE SHA-1 of a 40 bit session ID (30 bit direct secret, one SHA-1 for the proof). Anything an observer sees (tag, proof, relay lobby name) was an offline brute-force oracle: 2^40 single hashes is minutes of GPU time.
+- Broken assumption: "only a hash goes over the network" protects a secret that has few bits
+- Fix: key stretching (400000 chained SHA-1 per derived value, about 150 ms, computed once per hosting/joining and cached, `NetplayAuth::STRETCH_ITERATIONS`), full 64 bit values derived from the stretched master (the secret used to be truncated to 32 bits), new domain strings (...2). Honest limit written into the header: a cost multiplier, not impossibility; the 30 bit direct join code stays weak against a GPU farm (about a day of one GPU), the 40 bit session code needs years of one GPU
+- Search: `rg -n "buildSHA1|hashToUint64" sonic3air_online_stable_source` for any new value derived from a code or from a session ID
+- Guard: core tests "auth: values derived from a code go through key stretching" (iteration floor, cached second use, the old single hash no longer matches)
+- Lesson: a one-way hash of a small secret is not a secret; either add entropy or add cost, and say which.
+
+## 2026-11-11 · shared-key-is-not-ownership · cpp
+- Seed: RelayCore.h let any caller of HOST_REGISTER with the lobby key become the host of an existing lobby. The key derives from the session code that every friend holds.
+- Broken assumption: "knows the key" means "is the host"
+- Fix: HOST_REGISTER also carries a random 64 bit host secret that only the registering game process knows (RelayProtocol version 2); a later registration without the same secret is dropped silently and counted as a wrong key
+- Siblings: DATA_H2R already needs the random host token; NetplayHost identity is a client-sent token (see the handoff: an address block on kick was rejected because it would lock out friends behind one NAT)
+- Guard: core tests "a friend who knows the lobby key but not the host secret cannot take the lobby over" (mutation: removing the secret comparison turned two tests red), "the real host can re-register from a new address"
+- Lesson: when every participant shares a secret, ownership needs a second secret that only the owner has.
+
+## 2026-11-11 · per-source-state-keyed-by-address-and-port · cpp
+- Seed: RelayCore kept rate limits and wrong-key counters per IP:port with a cap of 8192. One machine rotating the source port got a fresh allowance for every datagram, bypassed the block, and could fill the table so that real senders were dropped.
+- Fix: state keyed by IP address only (allowance per IP raised to 8/s, burst 24, so a family behind one router still works); when the table is full, entries quiet for 120 s and then 10 s are dropped before newcomers are refused
+- Guard: core tests (port rotation, flood fills the table then a newcomer is served), run_checks Y4c (another source port of a blocked IP stays blocked; the "other address" is now 127.0.0.2)
+- Lesson: an attacker chooses the source port for free; key abuse state by something that costs them.
+
+## 2026-11-11 · counter-never-decays · cpp
+- Seed: NetplayHost::mFailedAuthByIP counted wrong proofs per IP forever (never reset, never pruned): eight typos, or a guesser behind the same NAT, locked a friend out for the whole session and the map grew without bound. Same shape: UDPSocket::mLanRequesterIPs stopped accepting new addresses at 16 entries for the life of the process.
+- Fix: `NetplayLobby::AuthFailureTracker` (60 s window, a proven code resets, 256 entries at most, oldest dropped), `UDPSocket::rememberRecentAddress` (most recent 64)
+- Search: `rg -n "std::map<std::string, int>|size\(\) < [0-9]+\)" sonic3air_online_stable_source/Oxygen/oxygenengine/source`
+- Guard: core tests "an address that guessed wrong codes is ignored only for a minute", "the LAN requester list makes room"
+- Lesson: every limiter needs a way back; a block that never ends is an outage for the wrong person.
+
+## 2026-11-11 · unproven-connections-fill-the-table · cpp
+- Seed: NetplayHost::createNetConnection refused every newcomer once 8 connections existed, and a stranger needs no secret to open one, so eight idle connections kept real friends out for as long as they were reopened.
+- Fix: at most two unproven connections per address; a full table gives way (the oldest unproven connection older than 3 s is replaced); proven connections are never replaced (`NetplayLobby::chooseConnectionToReplace`). The fallback identity of a friend without token is now address and port (two friends behind one NAT were one identity, so one could take over the other's slot).
+- Guard: core tests for the policy. Not tested end to end with eight real UDP clients.
+- Lesson: a cap on a resource that anonymous peers can take must prefer the peers that proved something.
+
+## 2026-11-11 · transient-hint-hides-status · cpp
+- Seed: LobbyMenu::pressStart set mMessage ("Asked everybody to get ready...", "Nobody has joined yet.") and nothing cleared it while hosting, so the ready check countdown, the relay warning, the high ping warning and the "everybody is ready" line (all in the else branch of `if (!mMessage.empty())`) were never drawn again. W4 and Y3 passed because they read a log line written by update(), not what render() drew.
+- Fix: hosting hints expire after 4 s (mHostingMessageSeconds); render() logs "Lobby: on screen: <what the bottom line shows>" when it changes; W4 and Y3 now require that line
+- Search: `rg -n "mMessage" sonic3air_online_stable_source/Oxygen/sonic3air/source/sonic3air/menu`
+- Lesson: a check for something that is drawn must observe what is drawn; a decision logged before the drawing proves only the decision.
+
+## 2026-11-11 · promised-by-readme-nobody-implements · cpp
+- Seed: README_ONLINE.txt and make_package.ps1 said the game installs bundled_mods by itself; no code did, so a fresh unzipped package ran without the co-op mod. Check A9 only grepped the README, so nothing could notice.
+- Fix: ModManager::installBundledMods (called from EngineMain::initFileSystem, before the ROM is needed): mirrors bundled_mods/<name> into the mods folder (copies changed files, removes leftovers) and switches a newly installed mod on once
+- Guard: run_checks U8a/U8b start a freshly unzipped package with an empty local savedata folder (the game then uses it instead of %APPDATA%)
+- Lesson: a feature promised in a README needs a check that performs it, not one that greps the promise.
+
+## 2026-11-11 · release-from-stale-build · powershell
+- Seed: release.ps1 packaged whatever Sonic3AIR.exe was in the build folder unless -Build was given (the clean-tree check cannot see ignored build output), and it compared the new version only with local tags.
+- Fix: a real release always builds; the exe must be newer than every tracked source file (a dry run warns); tags are fetched from origin first (failure refuses a real release)
+- Lesson: a release must be derived from the commit it names, not from what happens to be on disk.
+
+## 2026-11-11 · helper-and-game-disagree-about-a-file-name · cpp
+- Seed: the update package contains Sonic3AIR.exe, update_helper.ps1 looks for the RUNNING exe's name; a renamed program passed the game's package check and failed in the helper after the whole download.
+- Fix: the updater is switched off with an explanation when the exe is not named Sonic3AIR.exe (check T12b)
+- Lesson: validate the preconditions of the last step before doing the expensive first steps.
+
+## 2026-11-11 · unsigned-parameter-for-screen-position · lemon
+- Seed: DropIn.drawPlayerLabel(u8 slot, u16 x, u16 y, ...) received s16 positions (py - 28, px partly off-screen); a negative value became 65xxx in the stock-engine fallback Renderer.drawText (s32).
+- Fix: s16 parameters and s16 shared-memory stores; check A15 on the package
+- Search: `rg -n "u16 (x|y)\b" DropInCoop/scripts`

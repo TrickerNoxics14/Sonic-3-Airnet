@@ -40,15 +40,15 @@ namespace Relay
 		int mMaxLobbiesPerIP = 4;
 		double mHostTimeoutSeconds = 45.0;		// A lobby disappears when its host was silent for this long (the game repeats its registration every 5 seconds)
 		double mPipeTimeoutSeconds = 60.0;		// A friend that sent nothing for this long is forgotten
-		double mControlPerSecond = 2.0;			// Registration and join requests per second and sender address
-		double mControlBurst = 10.0;
+		double mControlPerSecond = 8.0;			// Registration and join requests per second and sender IP address (friends and a host behind the same router share it)
+		double mControlBurst = 24.0;
 		int mMaxBadKeys = 8;					// Wrong keys from one address before it is ignored ...
 		double mBlockSeconds = 60.0;			// ... for this long
 		double mDataPacketsPerSecond = 3000.0;	// Per friend and direction (a state transfer to a joining friend peaks at about 1500 datagrams per second)
 		double mDataPacketBurst = 6000.0;
 		double mDataBytesPerSecond = 3000000.0;
 		double mDataByteBurst = 6000000.0;
-		size_t mMaxSources = 8192;				// Addresses that are remembered for the rate limits
+		size_t mMaxSources = 8192;				// IP addresses that are remembered for the rate limits
 	};
 
 	struct Stats
@@ -92,12 +92,12 @@ namespace Relay
 				case RelayProtocol::HOST_REGISTER:
 				case RelayProtocol::CLIENT_JOIN:
 				{
-					if (size != RelayProtocol::HELLO_SIZE)
+					if (size != ((type == RelayProtocol::HOST_REGISTER) ? RelayProtocol::HOST_HELLO_SIZE : RelayProtocol::HELLO_SIZE))
 					{
 						++mStats.mDroppedInvalid;
 						return;
 					}
-					Source* source = getSource(from, now);
+					Source* source = getSource(from.mIP, now);
 					if (nullptr == source)
 					{
 						++mStats.mDroppedRate;
@@ -115,13 +115,13 @@ namespace Relay
 					}
 					const uint64_t lobby = RelayProtocol::get64(data + RelayProtocol::HEADER_SIZE);
 					const uint64_t key = RelayProtocol::get64(data + RelayProtocol::HEADER_SIZE + 8);
-					if (lobby == 0)
+					if (lobby == 0 || (type == RelayProtocol::HOST_REGISTER && RelayProtocol::get64(data + RelayProtocol::HELLO_SIZE) == 0))
 					{
 						++mStats.mDroppedInvalid;
 						return;
 					}
 					if (type == RelayProtocol::HOST_REGISTER)
-						handleHostRegister(from, *source, lobby, key, now);
+						handleHostRegister(from, *source, lobby, key, RelayProtocol::get64(data + RelayProtocol::HELLO_SIZE), now);
 					else
 						handleClientJoin(from, *source, lobby, key, now);
 					break;
@@ -213,6 +213,7 @@ namespace Relay
 		struct Lobby
 		{
 			uint64_t mKey = 0;
+			uint64_t mHostSecret = 0;		// Random number of the registering game, not derivable from the code: only the real host can re-register or take over the lobby
 			Endpoint mHost;
 			uint32_t mHostToken = 0;
 			double mHostSeen = 0.0;
@@ -237,30 +238,31 @@ namespace Relay
 			return token;
 		}
 
-		Source* getSource(const Endpoint& from, double now)
+		Source* getSource(uint32_t ip, double now)
 		{
-			auto it = mSources.find(from);
+			auto it = mSources.find(ip);
 			if (it == mSources.end())
 			{
-				if (mSources.size() >= mLimits.mMaxSources)
+				if (mSources.size() >= mLimits.mMaxSources && now - mLastPrune >= 1.0)		// (not for every datagram: a flood from many addresses must not make each datagram expensive)
 				{
-					if (now - mLastPrune >= 1.0)		// (not for every datagram: a flood from many addresses must not make each datagram expensive)
-						pruneSources(now);
+					pruneSources(now, 120.0);
 					if (mSources.size() >= mLimits.mMaxSources)
-						return nullptr;		// Memory stays bounded: during a flood from thousands of addresses new ones are not served
+						pruneSources(now, 10.0);	// Still full: a flood from thousands of addresses. Forget the ones that have been quiet a little while so that real newcomers are still served
 				}
-				it = mSources.emplace(from, Source()).first;
+				if (mSources.size() >= mLimits.mMaxSources)
+					return nullptr;		// Memory stays bounded; only a flood that really comes from thousands of different IP addresses gets here
+				it = mSources.emplace(ip, Source()).first;
 			}
 			it->second.mLastSeen = now;
 			return &it->second;
 		}
 
-		void pruneSources(double now)
+		void pruneSources(double now, double quietSeconds = 120.0)
 		{
 			mLastPrune = now;
 			for (auto it = mSources.begin(); it != mSources.end(); )
 			{
-				if (now - it->second.mLastSeen > 120.0 && now >= it->second.mBlockedUntil)
+				if (now - it->second.mLastSeen > quietSeconds && now >= it->second.mBlockedUntil)
 					it = mSources.erase(it);
 				else
 					++it;
@@ -304,7 +306,7 @@ namespace Relay
 			mLobbies.erase(it);
 		}
 
-		void handleHostRegister(const Endpoint& from, Source& source, uint64_t lobbyID, uint64_t key, double now)
+		void handleHostRegister(const Endpoint& from, Source& source, uint64_t lobbyID, uint64_t key, uint64_t hostSecret, double now)
 		{
 			auto it = mLobbies.find(lobbyID);
 			if (it == mLobbies.end())
@@ -319,13 +321,16 @@ namespace Relay
 				}
 				Lobby lobby;
 				lobby.mKey = key;
+				lobby.mHostSecret = hostSecret;
 				lobby.mHostToken = randomToken();
 				it = mLobbies.emplace(lobbyID, std::move(lobby)).first;
 				++mStats.mLobbiesCreated;
 			}
-			else if (it->second.mKey != key)
+			else if (it->second.mKey != key || it->second.mHostSecret != hostSecret)
 			{
-				badKey(source, now);		// Not a word back: somebody who does not know the key learns nothing
+				// Wrong key, or the right key (every friend knows it) without the secret of the game that registered the lobby: somebody who is not the host
+				// must not be able to take the lobby over. Not a word back, so that nobody learns anything.
+				badKey(source, now);
 				return;
 			}
 
@@ -534,7 +539,7 @@ namespace Relay
 		std::map<uint64_t, Lobby> mLobbies;
 		std::map<Endpoint, uint64_t> mHostByEndpoint;
 		std::map<Endpoint, std::pair<uint64_t, uint16_t>> mPipeByEndpoint;
-		std::map<Endpoint, Source> mSources;
+		std::map<uint32_t, Source> mSources;		// By IP address, not by IP and port: changing the source port must not give a sender a fresh rate limit or a fresh bad-key count
 		double mLastPrune = 0.0;
 		std::vector<uint8_t> mScratch;
 	};

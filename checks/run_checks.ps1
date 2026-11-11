@@ -496,6 +496,10 @@ try
 
 				$markerEntries = @($entries.Keys | Where-Object { $_ -match '(?i)testhooks\.enabled' })
 				Add-Result "A12" "The package does not contain the developer test-hooks marker file" ($markerEntries.Count -eq 0) ($markerEntries -join ", ")
+
+				$labelCommonEntry = $entries[$prefix + "bundled_mods/DropInCoop/scripts/common.lemon"]
+				$labelCommonText = if ($labelCommonEntry) { Get-EntryText $labelCommonEntry } else { "" }
+				Add-Result "A15" "Package: DropIn.drawPlayerLabel takes signed positions (a label partly off the left edge keeps its negative x in the stock-engine fallback instead of becoming 65xxx)" ($labelCommonText -match 'function\s+void\s+DropIn\.drawPlayerLabel\(u8 slot, s16 x, s16 y,') "bundled_mods/DropInCoop/scripts/common.lemon"
 		}
 		finally
 		{
@@ -913,6 +917,7 @@ try
 				$wFriendProc = Start-GameProcess @{ 'S3AIR_NETPLAY' = ("joindirect:" + $wSecret + ":28841"); 'S3AIR_LOBBY_OPEN' = 'show'; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOGNAME' = '_wfriend'; 'S3AIR_PLAYER_NAME' = 'Laggy' }
 				$w4In = Wait-Until { (Get-NetLog '_whost') -match 'a friend proved the code and is player 2' } 120
 				$w4Warned = Wait-Until { (Get-NetLog '_whost') -match 'Lobby: showing the high ping warning for player 2' } 60
+				$w4Drawn = Wait-Until { (Get-NetLog '_whost') -match 'Lobby: on screen: high ping warning' } 30		# written by the screen drawing code itself: a warning hidden by another message would not appear
 				Start-Sleep -Seconds 4
 
 				$shots = @(@($wHostProc, 'W4-lobby-host.png', @($wFriendProc)), @($wFriendProc, 'W4-lobby-friend.png', @($wHostProc)))
@@ -935,7 +940,7 @@ try
 				$friendDelay = [regex]::Match($w4Friend, 'input delay AUTO \((\d) frames\)')
 				$lastDelay = $null
 				foreach ($match in [regex]::Matches($w4Friend, 'input delay AUTO \((\d) frames\)')) { $lastDelay = [int]$match.Groups[1].Value }
-				Add-Result 'W4a' 'Lobby through the lag proxy: the friend joins with its name, the host sees the ping per player (about 200 ms) and is warned about the high ping' ($w4In -and $w4Warned -and ($w4Host -match 'player 2 is called "Laggy"') -and $hostPing.Success -and ([int]$hostPing.Groups[1].Value -ge 150) -and ([int]$hostPing.Groups[1].Value -le 330)) ("host measured: " + $hostPing.Groups[1].Value + " ms, warning shown: $w4Warned")
+				Add-Result 'W4a' 'Lobby through the lag proxy: the friend joins with its name, the host sees the ping per player (about 200 ms) and is warned about the high ping' ($w4In -and $w4Warned -and $w4Drawn -and ($w4Host -match 'player 2 is called "Laggy"') -and $hostPing.Success -and ([int]$hostPing.Groups[1].Value -ge 150) -and ([int]$hostPing.Groups[1].Value -le 330)) ("host measured: " + $hostPing.Groups[1].Value + " ms, warning decided: $w4Warned, warning drawn on screen: $w4Drawn")
 				Add-Result 'W4b' 'Lobby through the lag proxy: the friend sees its own ping and the input delay that Auto chose from it (4 to 6 frames)' ($friendPing.Success -and ([int]$friendPing.Groups[1].Value -ge 100) -and ($null -ne $lastDelay) -and ($lastDelay -ge 4) -and ($lastDelay -le 6)) ("friend sees ping " + $friendPing.Groups[1].Value + " ms, input delay Auto = $lastDelay frames")
 			}
 			catch
@@ -965,7 +970,7 @@ try
 				$gameLog = Join-Path $appdata "logfile.txt"
 				if (Test-Path -LiteralPath $gameLog) { Remove-Item -LiteralPath $gameLog -Force }
 
-				# No test variables: this is the product as shipped (it installs its bundled co-op mod by itself)
+				# No test variables: this is the product as shipped (the engine installs its bundled co-op mod by itself, see U8)
 				$packageProcess = Start-Process -FilePath $packageExe.FullName -WorkingDirectory $packageDir -PassThru
 				[void]$startedProcesses.Add($packageProcess)
 				$ready = Wait-Until { ((Read-SharedText $gameLog) -match "Ready to go") -or $packageProcess.HasExited } 45
@@ -981,6 +986,58 @@ try
 				Start-Sleep -Seconds 5
 				$stillRunning = -not $packageProcess.HasExited
 				Add-Result "U3" "The unzipped package keeps running for 5 seconds after start" $stillRunning ""
+
+				# U8: the bundled co-op mod installs itself (the README promises "built in and switches itself on"). A second, completely fresh unzipped copy gets an empty
+				# local save folder (savedata next to the exe makes the game use that instead of %APPDATA%), so it starts like a new player's game: nothing installed.
+				# The mod must appear in its mods folder, be switched on, and a later start must repair a stale or damaged copy and remove leftover files.
+				$freshDir = Join-Path ([IO.Path]::GetTempPath()) ("s3air_freshcheck_" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+				try
+				{
+					[IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $freshDir)
+					$freshExe = Get-ChildItem -LiteralPath $freshDir -Filter "Sonic3AIR.exe" -Recurse -File | Select-Object -First 1
+					$freshGameDir = $freshExe.DirectoryName
+					$freshSave = Join-Path $freshGameDir "savedata"
+					New-Item -ItemType Directory -Path $freshSave | Out-Null
+					$bundledMod = Join-Path $freshGameDir "bundled_mods\DropInCoop"
+					$freshMods = Join-Path $freshSave "mods"
+					$installedFresh = Join-Path $freshMods "DropInCoop"
+					$hashTree = { param($dir) $result = @{}; foreach ($f in Get-ChildItem -LiteralPath $dir -Recurse -File) { $sha = [Security.Cryptography.SHA256]::Create(); try { $result[$f.FullName.Substring($dir.Length).ToLowerInvariant()] = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($f.FullName))) } finally { $sha.Dispose() } }; return $result }
+					$bundledHashes = & $hashTree $bundledMod
+
+					$freshProcess = Start-Process -FilePath $freshExe.FullName -WorkingDirectory $freshGameDir -PassThru
+					[void]$startedProcesses.Add($freshProcess)
+					$null = Wait-Until { (Test-Path -LiteralPath (Join-Path $freshMods "active-mods.json")) -or $freshProcess.HasExited } 45
+					Start-Sleep -Seconds 2
+					Stop-StartedProcesses
+					Start-Sleep -Seconds 1
+					$installedHashes = if (Test-Path -LiteralPath $installedFresh) { & $hashTree $installedFresh } else { @{} }
+					$sameFiles = ($installedHashes.Count -eq $bundledHashes.Count) -and (@($bundledHashes.Keys | Where-Object { $installedHashes[$_] -ne $bundledHashes[$_] }).Count -eq 0)
+					$activeText = if (Test-Path -LiteralPath (Join-Path $freshMods "active-mods.json")) { [string](Read-SharedText (Join-Path $freshMods "active-mods.json")) } else { "" }
+					Add-Result "U8a" "A fresh unzipped package (no mods installed yet) installs its bundled co-op mod into its mods folder, file for file, and switches it on" ($sameFiles -and ($activeText -match '"DropInCoop"')) ("files: bundled " + $bundledHashes.Count + ", installed " + $installedHashes.Count + ", identical: $sameFiles, active-mods.json: " + $activeText.Trim().Replace("`r`n", " "))
+
+					# Damage the installed copy (a changed file, a leftover file) and switch the mod off on purpose; the next start repairs the files and respects the choice
+					$someFile = @($bundledHashes.Keys | Where-Object { $_ -match 'scripts[\\/].*\.lemon$' } | Select-Object -First 1)[0]
+					Set-Content -LiteralPath (Join-Path $installedFresh $someFile.TrimStart('\')) -Value "// damaged" -Encoding ascii
+					Set-Content -LiteralPath (Join-Path $installedFresh "scripts\leftover_debug_script.lemon") -Value "// leftover" -Encoding ascii
+					Set-Content -LiteralPath (Join-Path $freshMods "active-mods.json") -Value '{"ActiveMods":[],"UseLegacyLoading":false}' -Encoding ascii
+					$freshProcess = Start-Process -FilePath $freshExe.FullName -WorkingDirectory $freshGameDir -PassThru
+					[void]$startedProcesses.Add($freshProcess)
+					$null = Wait-Until { -not (Test-Path -LiteralPath (Join-Path $installedFresh "scripts\leftover_debug_script.lemon")) -or $freshProcess.HasExited } 45
+					Start-Sleep -Seconds 2
+					Stop-StartedProcesses
+					Start-Sleep -Seconds 1
+					$repairedHashes = & $hashTree $installedFresh
+					$repaired = ($repairedHashes.Count -eq $bundledHashes.Count) -and (@($bundledHashes.Keys | Where-Object { $repairedHashes[$_] -ne $bundledHashes[$_] }).Count -eq 0)
+					$activeAfter = [string](Read-SharedText (Join-Path $freshMods "active-mods.json"))
+					Add-Result "U8b" "The next start repairs a damaged or stale installed copy and removes leftover files, and does not switch the mod on again after the player switched it off" ($repaired -and ($activeAfter -notmatch '"DropInCoop"')) ("repaired: $repaired, active-mods.json: " + $activeAfter.Trim().Replace("`r`n", " "))
+				}
+				catch { Add-Result "U8a" "A fresh unzipped package installs its bundled co-op mod" $false ($_.Exception.Message + " (script line " + $_.InvocationInfo.ScriptLineNumber + ": " + $_.InvocationInfo.Line.Trim() + ")") }
+				finally
+				{
+					Stop-StartedProcesses
+					Start-Sleep -Seconds 1
+					if (Test-Path -LiteralPath $freshDir) { try { Remove-Item -LiteralPath $freshDir -Recurse -Force } catch { } }
+				}
 
 					# A player's computer may have leftover developer variables. The packaged game must ignore them (no marker file next to it),
 					# and with the marker file the very same variables must work (so that the first result means something).
@@ -1321,6 +1378,7 @@ try
 					Start-Sleep -Seconds 12
 					$y3Friend = Start-GameProcess @{ 'S3AIR_NETPLAY' = "joinintro:${y3Code}:28841"; 'S3AIR_LOBBY_OPEN' = 'show'; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_RELAY' = $yRelayAddress; 'S3AIR_LOGNAME' = '_yfriend'; 'S3AIR_PLAYER_NAME' = 'Relayed' }
 					$y3In = Wait-Until { (Get-NetLog '_yhost') -match 'a friend proved the code and is player 2' } 120
+					$y3Drawn = Wait-Until { (Get-NetLog '_yhost') -match 'Lobby: on screen: relay warning' } 30		# the host screen really drew the relay warning
 					Start-Sleep -Seconds 6
 					foreach ($shot in @(@($y3Host, 'Y3-lobby-host.png', $y3Friend), @($y3Friend, 'Y3-lobby-friend.png', $y3Host)))
 					{
@@ -1335,7 +1393,7 @@ try
 					$y3FriendText = Get-NetLog '_yfriend'
 					Copy-Item (Join-Path $appdata 'logfile_yhost.txt') (Join-Path $lastLogs 'Y3-host.txt') -Force -ErrorAction SilentlyContinue
 					Copy-Item (Join-Path $appdata 'logfile_yfriend.txt') (Join-Path $lastLogs 'Y3-friend.txt') -Force -ErrorAction SilentlyContinue
-					Add-Result 'Y3' 'Lobby through the relay: the friend joins with its name and sees the lobby, the host sees it as player 2 (see Y3-lobby-host.png and Y3-lobby-friend.png for the relay warnings)' ($y3In -and ($y3FriendText -match 'lobby: you are slot 2') -and ($y3HostText -match 'player 2 is called "Relayed"')) "joined: $y3In"
+					Add-Result 'Y3' 'Lobby through the relay: the friend joins with its name and sees the lobby, the host sees it as player 2 (see Y3-lobby-host.png and Y3-lobby-friend.png for the relay warnings)' ($y3In -and $y3Drawn -and ($y3FriendText -match 'lobby: you are slot 2') -and ($y3HostText -match 'player 2 is called "Relayed"')) "joined: $y3In, host screen drew the relay warning: $y3Drawn"
 				}
 				catch { Add-Result 'Y3' 'Lobby through the relay' $false $_.Exception.Message }
 				finally { Stop-StartedProcesses }
@@ -1364,11 +1422,11 @@ public class RelayFlood
 }
 '@ -ErrorAction SilentlyContinue
 
-					function New-RelayClient { $c = New-Object System.Net.Sockets.UdpClient(0, [System.Net.Sockets.AddressFamily]::InterNetwork); $c.Client.ReceiveTimeout = 1500; return $c }
+					function New-RelayClient([string]$localIp = '') { if ($localIp) { $c = New-Object System.Net.Sockets.UdpClient((New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse($localIp), 0))) } else { $c = New-Object System.Net.Sockets.UdpClient(0, [System.Net.Sockets.AddressFamily]::InterNetwork) }; $c.Client.ReceiveTimeout = 1500; return $c }
 					function Send-Relay($c, [byte[]]$bytes) { [void]$c.Send($bytes, $bytes.Length, (New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Loopback, $relayPort))) }
 					function Receive-Relay($c) { $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0); try { return ,($c.Receive([ref]$remote)) } catch { return $null } }
 					function Get-BigEndian([uint64]$value, [int]$bytes) { $result = New-Object byte[] $bytes; for ($i = 0; $i -lt $bytes; $i++) { $result[$bytes - 1 - $i] = [byte](($value -shr (8 * $i)) -band 0xff) }; return $result }
-					function New-Hello([byte]$type, [uint64]$lobby, [uint64]$key) { return [byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, $type) + (Get-BigEndian $lobby 8) + (Get-BigEndian $key 8)) }
+					function New-Hello([byte]$type, [uint64]$lobby, [uint64]$key) { $hello = @(0x53, 0x33, 0x52, 0x4c, 2, $type) + (Get-BigEndian $lobby 8) + (Get-BigEndian $key 8); if ($type -eq 1) { $hello += (Get-BigEndian ([uint64]0x5ec2e75ec2e75ec2) 8) }; return [byte[]]$hello }
 					$lobbyId = [uint64]0x5eed5eed01; $goodKey = [uint64]0x1122334455667788
 
 					# A host registers, a friend joins, data goes both ways through the real program
@@ -1383,9 +1441,9 @@ public class RelayFlood
 					$forwardedOk = $false
 					if ($hostToken -and $friendToken)
 					{
-						Send-Relay $friendClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 6) + $friendToken + @(11, 22, 33)))
+						Send-Relay $friendClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 2, 6) + $friendToken + @(11, 22, 33)))
 						$atHost = Receive-Relay $hostClient
-						Send-Relay $hostClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 8) + $hostToken + @(0, 1) + @(44, 55)))
+						Send-Relay $hostClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 2, 8) + $hostToken + @(0, 1) + @(44, 55)))
 						$atFriend = Receive-Relay $friendClient
 						$forwardedOk = ($atHost -and $atHost.Length -eq 15 -and $atHost[5] -eq 9 -and $atHost[12] -eq 11 -and $atHost[14] -eq 33) -and ($atFriend -and $atFriend.Length -eq 12 -and $atFriend[5] -eq 7 -and $atFriend[10] -eq 44 -and $atFriend[11] -eq 55)
 					}
@@ -1397,21 +1455,25 @@ public class RelayFlood
 					for ($i = 0; $i -lt 9; $i++) { Send-Relay $stranger (New-Hello 3 $lobbyId ([uint64](0x4000 + $i))); if ($null -ne (Receive-Relay $stranger)) { $answers++ } }
 					Send-Relay $stranger (New-Hello 3 $lobbyId $goodKey)
 					$answeredAfterBlock = ($null -ne (Receive-Relay $stranger))
-					$other = New-RelayClient
+					$otherPort = New-RelayClient; $otherPort.Client.ReceiveTimeout = 400		# same IP address, other source port: must not escape the block
+					Send-Relay $otherPort (New-Hello 3 $lobbyId $goodKey)
+					$answeredOtherPort = ($null -ne (Receive-Relay $otherPort))
+					$otherPort.Close()
+					$other = New-RelayClient '127.0.0.2'		# another IP address: the wrong-key block is per IP address, not per port
 					Send-Relay $other (New-Hello 3 $lobbyId $goodKey)
 					$otherJoined = ($null -ne (Receive-Relay $other))
-					Add-Result 'Y4c' 'Real relay program: wrong keys get no answer; after 8 the address is ignored even with the right key; other addresses are not affected' (($answers -eq 0) -and (-not $answeredAfterBlock) -and $otherJoined) "answers to wrong keys: $answers, answered after block: $answeredAfterBlock, other friend joined: $otherJoined"
+					Add-Result 'Y4c' 'Real relay program: wrong keys get no answer; after 8 the IP address is ignored even with the right key (also from another source port); other IP addresses are not affected' (($answers -eq 0) -and (-not $answeredAfterBlock) -and (-not $answeredOtherPort) -and $otherJoined) "answers to wrong keys: $answers, answered after block: $answeredAfterBlock, answered on another source port of the same IP: $answeredOtherPort, other IP address joined: $otherJoined"
 
 					# A flood of valid data from the friend: the relay caps it and stays responsive
 					$before = Read-KeyValueFile $abuseStats
-					$floodData = [byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 6) + $friendToken + (1..100 | ForEach-Object { 7 }))
+					$floodData = [byte[]](@(0x53, 0x33, 0x52, 0x4c, 2, 6) + $friendToken + (1..100 | ForEach-Object { 7 }))
 					$elapsedMs = [RelayFlood]::Send($friendClient.Client, $relayPort, $floodData, 40000)
 					Start-Sleep -Seconds 3
 					$hostClient.Client.ReceiveTimeout = 300
 					$after = Read-KeyValueFile $abuseStats
 					Add-Result 'Y4d' 'Real relay program: a flood of 40000 datagrams from one address is rate limited (the relay forwarded only what the limit allows and dropped the rest)' (([int64]$after['dropped_rate'] -gt 0) -and ([int64]$after['forwarded'] -le 6000 + 3000 * ($elapsedMs / 1000.0 + 2) + 500)) ("sent 40000 in $elapsedMs ms (from the friend's own address and token); relay received " + $after['received'] + ", forwarded " + $after['forwarded'] + ", dropped by rate " + $after['dropped_rate'])
 					$relayAlive = -not $relayProcess.HasExited
-					$fresh = New-RelayClient
+					$fresh = New-RelayClient '127.0.0.2'
 					Send-Relay $fresh (New-Hello 3 $lobbyId $goodKey)
 					$freshJoined = ($null -ne (Receive-Relay $fresh))
 					Add-Result 'Y4e' 'Real relay program: still running and still serving a new friend after the flood' ($relayAlive -and $freshJoined) "running: $relayAlive, new friend joined: $freshJoined"
@@ -1420,7 +1482,7 @@ public class RelayFlood
 					$garbage = New-RelayClient; $garbage.Client.ReceiveTimeout = 400
 					Send-Relay $garbage ([byte[]](1..200 | ForEach-Object { 0xaa }))
 					Send-Relay $garbage ([byte[]](1..5000 | ForEach-Object { 0x53 }))
-					Send-Relay $garbage ([byte[]]@(0x53, 0x33, 0x52, 0x4c, 1, 3))
+					Send-Relay $garbage ([byte[]]@(0x53, 0x33, 0x52, 0x4c, 2, 3))
 					$garbageAnswer = Receive-Relay $garbage
 					Start-Sleep -Milliseconds 2500		# (the counter file is rewritten once per second)
 					$final = Read-KeyValueFile $abuseStats

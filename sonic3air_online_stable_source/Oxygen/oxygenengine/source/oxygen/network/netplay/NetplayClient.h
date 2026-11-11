@@ -55,7 +55,7 @@ public:
 	inline bool isReceivingGameState() const								{ return mReceivingJoinState; }
 
 	// The secret from the code that the player typed (see NetplayAuth.h): without it the host does not let us in, and without the host's proof we do not trust it
-	inline void setAuthSecret(uint32 secret)  { mAuthSecret = secret; }
+	inline void setAuthSecret(uint64 secret)  { mAuthSecret = secret; }
 	inline bool isHostVerified() const  { return mHostVerified; }
 
 	// The relay server (an optional fallback, see NetplayManager): used when the direct connection to the host did not work
@@ -133,7 +133,7 @@ private:
 	bool mServerKnewNoHost = false;		// The game server said that it does not know this code (the relay is the last chance)
 
 	// Handshake with the host
-	uint32 mAuthSecret = 0;
+	uint64 mAuthSecret = 0;
 	bool mHostVerified = false;		// The host answered the challenge correctly (and let us in): only then is anything it says believed
 	bool mAuthSent = false;
 	uint32 mHostNonce = 0;

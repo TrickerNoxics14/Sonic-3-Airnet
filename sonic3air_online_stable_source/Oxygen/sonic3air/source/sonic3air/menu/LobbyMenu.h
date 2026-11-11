@@ -106,4 +106,6 @@ private:
 	bool mHookStartDone = false;
 	bool mHookDelayDone = false;
 	int mLastWarnedSlot = -1;			// The friend the host was last warned about (high ping), for the log
+	float mHostingMessageSeconds = 0.0f;	// A hint that was set while hosting (nobody joined yet, ready check asked) is shown for a few seconds only: it must not hide the warnings and the ready check status for good
+	std::string mLastDrawnStatus;		// What the bottom line of the lobby screen showed last (written to the log when it changes, so that the checks see what was really drawn)
 };

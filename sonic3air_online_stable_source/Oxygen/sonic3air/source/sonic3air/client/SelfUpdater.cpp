@@ -421,6 +421,12 @@ SelfUpdater::SelfUpdater()
 		mState = (int)State::DISABLED;
 		mMessage = "This copy of the game has no version information (a development build), so updates are switched off.";
 	}
+	else if (_wcsicmp(mExeName.c_str(), L"Sonic3AIR.exe") != 0)
+	{
+		// The update package contains "Sonic3AIR.exe" and the install helper looks for the program under the running name: a renamed program would fail after the whole download
+		mState = (int)State::DISABLED;
+		mMessage = "Updates only work when the game program is named Sonic3AIR.exe (it is named " + WString(mExeName).toStdString() + "). Rename it back to update.";
+	}
 	else if (!isValidRepoName(mRepo))
 	{
 		mState = (int)State::DISABLED;

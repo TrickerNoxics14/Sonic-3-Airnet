@@ -15,6 +15,9 @@
 #include "oxygen/helper/Logging.h"
 #include "oxygen/helper/Utils.h"
 
+#include <filesystem>
+#include <fstream>
+
 
 ModManager::~ModManager()
 {
@@ -466,4 +469,128 @@ void ModManager::onActiveModsChanged(bool duringStartup)
 		// Tell the engine so it can make the necessary updates in all systems
 		EngineMain::instance().onActiveModsChanged();
 	}
+}
+
+
+namespace
+{
+	bool bundledFilesEqual(const std::filesystem::path& a, const std::filesystem::path& b)
+	{
+		std::error_code error;
+		if (std::filesystem::file_size(a, error) != std::filesystem::file_size(b, error) || error)
+			return false;
+		std::ifstream streamA(a, std::ios::binary), streamB(b, std::ios::binary);
+		if (!streamA || !streamB)
+			return false;
+		char bufferA[8192], bufferB[8192];
+		while (streamA && streamB)
+		{
+			streamA.read(bufferA, sizeof(bufferA));
+			streamB.read(bufferB, sizeof(bufferB));
+			if (streamA.gcount() != streamB.gcount() || memcmp(bufferA, bufferB, (size_t)streamA.gcount()) != 0)
+				return false;
+		}
+		return true;
+	}
+}
+
+int ModManager::installBundledMods(const std::wstring& modsPath, const std::wstring& bundledPath)
+{
+	namespace fs = std::filesystem;
+	int changes = 0;
+	try
+	{
+		std::error_code error;
+		const fs::path bundledRoot(bundledPath);
+		if (!fs::is_directory(bundledRoot, error))
+			return 0;
+
+		std::vector<std::string> newlyInstalled;
+		for (const fs::directory_entry& modEntry : fs::directory_iterator(bundledRoot, error))
+		{
+			if (!modEntry.is_directory())
+				continue;
+			const fs::path source = modEntry.path();
+			const fs::path target = fs::path(modsPath) / source.filename();
+			const bool isNew = !fs::exists(target, error);
+			int modChanges = 0;
+
+			// Copy new and changed files
+			std::vector<fs::path> sourceFiles;
+			for (const fs::directory_entry& fileEntry : fs::recursive_directory_iterator(source, error))
+			{
+				if (!fileEntry.is_regular_file())
+					continue;
+				const fs::path relative = fs::relative(fileEntry.path(), source);
+				sourceFiles.push_back(relative);
+				const fs::path targetFile = target / relative;
+				if (!fs::exists(targetFile, error) || !bundledFilesEqual(fileEntry.path(), targetFile))
+				{
+					fs::create_directories(targetFile.parent_path(), error);
+					fs::copy_file(fileEntry.path(), targetFile, fs::copy_options::overwrite_existing, error);
+					if (error)
+					{
+						RMX_LOG_INFO("Bundled mod: could not copy " << relative.string() << " (" << error.message() << ")");
+					}
+					else
+						++modChanges;
+				}
+			}
+
+			// Remove files that are not part of the bundled mod any more (old or leftover scripts would make the mod differ from the one the other players have)
+			if (!isNew)
+			{
+				std::vector<fs::path> extraFiles;
+				for (const fs::directory_entry& fileEntry : fs::recursive_directory_iterator(target, error))
+				{
+					if (fileEntry.is_regular_file() && std::find(sourceFiles.begin(), sourceFiles.end(), fs::relative(fileEntry.path(), target)) == sourceFiles.end())
+						extraFiles.push_back(fileEntry.path());
+				}
+				for (const fs::path& extra : extraFiles)
+				{
+					fs::remove(extra, error);
+					++modChanges;
+				}
+			}
+
+			if (modChanges > 0)
+			{
+				RMX_LOG_INFO("Bundled mod \"" << source.filename().string() << "\" installed in the mods folder (" << modChanges << " files " << (isNew ? "new" : "updated") << ")");
+			}
+			else
+			{
+				RMX_LOG_INFO("Bundled mod \"" << source.filename().string() << "\" is up to date");
+			}
+			changes += modChanges;
+			if (isNew)
+				newlyInstalled.push_back(source.filename().string());
+		}
+
+		// A bundled mod that was installed for the first time is switched on (whoever deactivates it later keeps it off: only a new installation switches it on)
+		if (!newlyInstalled.empty())
+		{
+			const std::wstring activePath = modsPath + L"active-mods.json";
+			Json::Value root = FTX::FileSystem->exists(activePath) ? JsonHelper::loadFile(activePath) : Json::Value(Json::objectValue);
+			if (!root.isObject())
+				root = Json::Value(Json::objectValue);
+			Json::Value names = root["ActiveMods"].isArray() ? root["ActiveMods"] : Json::Value(Json::arrayValue);
+			for (const std::string& name : newlyInstalled)
+			{
+				bool found = false;
+				for (Json::ArrayIndex i = 0; i < names.size(); ++i)
+					found = found || (names[i].isString() && names[i].asString() == name);
+				if (!found)
+					names.append(name);
+			}
+			root["ActiveMods"] = names;
+			root["UseLegacyLoading"] = false;
+			JsonHelper::saveFile(activePath, root);
+			RMX_LOG_INFO("Bundled mod switched on for the first time");
+		}
+	}
+	catch (const std::exception& e)
+	{
+		RMX_LOG_INFO("Bundled mod installation failed: " << e.what());
+	}
+	return changes;
 }

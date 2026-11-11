@@ -192,6 +192,9 @@ public:
 	bool sendLanSearchRequest(uint16 port);
 	bool takeLanFoundAddress(SocketAddress& outAddress);
 	bool hasLanRequester(const std::string& ip) const;
+	// Remembers an address in a most-recently-seen list of at most "capacity" entries: a repeated address moves to the end, a full list drops its oldest entry
+	// (so that a stream of other addresses cannot keep a real friend out for as long as the program runs)
+	static void rememberRecentAddress(std::vector<std::string>& list, const std::string& ip, size_t capacity);
 	inline bool consumedLanPacket()  { const bool result = mConsumedLanPacket;  mConsumedLanPacket = false;  return result; }	// The last receive only handled a LAN discovery packet inside the socket
 	static std::vector<std::string> getSubnetBroadcastAddresses();		// Broadcast addresses of the network adapters (empty on platforms where this is not implemented)		// Somebody on the network asked for this host's session code (and got an answer)
 
@@ -225,6 +228,7 @@ private:
 	SocketAddress mRelayAddress;
 	uint64 mRelayLobby = 0;
 	uint64 mRelayKey = 0;
+	uint64 mRelayHostSecret = 0;		// Host only: random per hosting, proves to the relay that this game is the one that registered the lobby (see RelayProtocol.h)
 	uint32 mRelayToken = 0;			// Host: the host token from the relay. Friend: our token
 	bool mRelayReady = false;
 	int mRelayRefusal = 0;

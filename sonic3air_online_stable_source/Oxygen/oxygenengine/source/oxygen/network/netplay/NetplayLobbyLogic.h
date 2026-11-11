@@ -342,6 +342,109 @@ namespace NetplayLobby
 	};
 
 
+	// Wrong codes per address. After MAX_AUTH_FAILURES wrong proofs an address is ignored, but only for a while (the count restarts after
+	// AUTH_FAILURE_WINDOW_SECONDS without another failure; a friend behind the same network address as a guesser, or one who mistyped, is not locked out for the whole session),
+	// and the list cannot grow without bound (the entry that expires first is dropped when it is full).
+	static const int MAX_AUTH_FAILURES = 8;
+	static const float AUTH_FAILURE_WINDOW_SECONDS = 60.0f;
+	static const size_t MAX_AUTH_FAILURE_ENTRIES = 256;
+
+	class AuthFailureTracker
+	{
+	public:
+		inline bool isBlocked(const std::string& ip) const
+		{
+			for (const Item& item : mItems)
+				if (item.mIP == ip)
+					return item.mCount >= MAX_AUTH_FAILURES;
+			return false;
+		}
+		inline int recordFailure(const std::string& ip)
+		{
+			for (Item& item : mItems)
+			{
+				if (item.mIP == ip)
+				{
+					item.mRemaining = AUTH_FAILURE_WINDOW_SECONDS;
+					return ++item.mCount;
+				}
+			}
+			if (mItems.size() >= MAX_AUTH_FAILURE_ENTRIES)
+			{
+				auto oldest = std::min_element(mItems.begin(), mItems.end(), [](const Item& a, const Item& b) { return a.mRemaining < b.mRemaining; });
+				mItems.erase(oldest);
+			}
+			Item item;
+			item.mIP = ip;
+			item.mCount = 1;
+			item.mRemaining = AUTH_FAILURE_WINDOW_SECONDS;
+			mItems.push_back(item);
+			return 1;
+		}
+		// A friend that proved the code starts over
+		inline void recordSuccess(const std::string& ip)
+		{
+			mItems.erase(std::remove_if(mItems.begin(), mItems.end(), [&ip](const Item& item) { return item.mIP == ip && item.mCount < MAX_AUTH_FAILURES; }), mItems.end());
+		}
+		inline void update(float deltaSeconds)
+		{
+			for (Item& item : mItems)
+				item.mRemaining -= deltaSeconds;
+			mItems.erase(std::remove_if(mItems.begin(), mItems.end(), [](const Item& item) { return item.mRemaining <= 0.0f; }), mItems.end());
+		}
+		inline size_t size() const  { return mItems.size(); }
+
+	private:
+		struct Item
+		{
+			std::string mIP;
+			int mCount = 0;
+			float mRemaining = 0.0f;
+		};
+		std::vector<Item> mItems;
+	};
+
+
+	// Connections that did not prove the code yet must not be able to lock real friends out: a stranger needs no secret to open one.
+	// Each address may hold only a few of them, and when the table is full the oldest one that had its chance is replaced by the newcomer.
+	static const int MAX_PENDING_PER_ADDRESS = 2;
+	static const float MIN_PENDING_AGE_TO_REPLACE = 3.0f;
+	static const int REFUSE_NEW_CONNECTION = -2;
+	static const int ACCEPT_NEW_CONNECTION = -1;
+
+	struct ConnectionInfo
+	{
+		std::string mIP;
+		bool mAuthenticated = false;
+		float mPendingSeconds = 0.0f;
+	};
+
+	// Result: ACCEPT_NEW_CONNECTION, REFUSE_NEW_CONNECTION, or the index of the existing connection to remove first
+	inline int chooseConnectionToReplace(const std::vector<ConnectionInfo>& existing, const std::string& newIP, size_t maxTotal)
+	{
+		int sameAddressCount = 0, oldestSameAddress = -1, oldestAny = -1;
+		for (size_t k = 0; k < existing.size(); ++k)
+		{
+			const ConnectionInfo& info = existing[k];
+			if (info.mAuthenticated)
+				continue;
+			if (info.mIP == newIP)
+			{
+				++sameAddressCount;
+				if (oldestSameAddress < 0 || info.mPendingSeconds > existing[oldestSameAddress].mPendingSeconds)
+					oldestSameAddress = (int)k;
+			}
+			if (info.mPendingSeconds >= MIN_PENDING_AGE_TO_REPLACE && (oldestAny < 0 || info.mPendingSeconds > existing[oldestAny].mPendingSeconds))
+				oldestAny = (int)k;
+		}
+		if (sameAddressCount >= MAX_PENDING_PER_ADDRESS)
+			return oldestSameAddress;
+		if (existing.size() >= maxTotal)
+			return (oldestAny >= 0) ? oldestAny : REFUSE_NEW_CONNECTION;
+		return ACCEPT_NEW_CONNECTION;
+	}
+
+
 	// Why the host sends a friend away
 	enum class LeaveReason : uint8
 	{

@@ -62,6 +62,7 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 
 	// Everybody who connects has to prove that they know the code: the secret comes either from the join code (direct IP connections) or from the session code
 	mHostSecret = directSecret ? NetplayAuth::makeRandomSecret() : NetplayAuth::secretFromSession(mSessionID);
+	NetplayAuth::prepareSecret(mHostSecret);		// The slow key stretching happens now, once, not when the first friend connects
 
 	// A friend in the same network finds us directly with the code, without the game server
 	//  -> Only a one way hash of the session ID goes over the network, so that somebody who merely listens to the broadcast does not learn the code
@@ -147,11 +148,12 @@ bool NetplayManager::beginRelayAsClient()
 	return canUseRelayAsClient() && startRelay(UDPSocket::RelayRole::CLIENT);
 }
 
-bool NetplayManager::setupAsHostWithSecret(uint16 port, uint32 secret)
+bool NetplayManager::setupAsHostWithSecret(uint16 port, uint64 secret)
 {
 	if (!setupAsHost(false, port, true))
 		return false;
 	mHostSecret = secret;
+	NetplayAuth::prepareSecret(mHostSecret);
 	return true;
 }
 
@@ -162,6 +164,7 @@ void NetplayManager::startJoinViaServer()
 	clearFailure();
 
 	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
+	NetplayAuth::prepareSecret(NetplayAuth::secretFromSession(mSessionID));		// The slow key stretching happens now, once, not in the middle of the handshake
 	mUDPSocket.setLanSearchSession(NetplayAuth::lanTagFromSession(mSessionID));
 	mLanSearchTimer = 0.0f;
 	mRelaySessionKnown = true;
@@ -176,17 +179,19 @@ void NetplayManager::startJoinIntroduced(uint64 sessionID, std::string_view ip, 
 	clearFailure();
 
 	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
+	NetplayAuth::prepareSecret(NetplayAuth::secretFromSession(mSessionID));		// The slow key stretching happens now, once, not in the middle of the handshake
 	mRelaySessionKnown = true;
 	mNetplayClient->connectDirectlyToHost(ip, port);
 }
 
-void NetplayManager::startJoinDirect(std::string_view ip, uint16 port, uint32 secret)
+void NetplayManager::startJoinDirect(std::string_view ip, uint16 port, uint64 secret)
 {
 	if (!restartConnection(false) || nullptr == mNetplayClient)
 		return;
 	clearFailure();
 
 	mNetplayClient->setAuthSecret(secret);
+	NetplayAuth::prepareSecret(secret);		// The slow key stretching happens now, once, not in the middle of the handshake
 	mNetplayClient->connectDirectlyToHost(ip, port);
 }
 

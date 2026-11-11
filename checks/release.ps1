@@ -4,8 +4,8 @@
 #   checks\release.ps1 -Version 1.2.3 -Notes "What is new" [-Build]       (the real thing: needs a committed tree, git push rights and the gh CLI logged in)
 #
 # What it does:
-#   1. checks the version (x.y.z, newer than every existing tag vX.Y.Z), that the working tree is committed, and that the tag does not exist
-#   2. optionally builds the game (-Build), then runs make_package.ps1 -Version (which writes version.txt into the package and refuses saves, ROMs, test fixtures)
+#   1. fetches the tags from origin, checks the version (x.y.z, newer than every existing tag vX.Y.Z), that the working tree is committed, and that the tag does not exist
+#   2. builds the game (always for a real release; with -Build for a dry run, which otherwise only warns when Sonic3AIR.exe is older than the source), then runs make_package.ps1 -Version (which writes version.txt into the package and refuses saves, ROMs, test fixtures)
 #   3. refuses to go on if the build embeds a personal Windows path (the warning of make_package.ps1)
 #   4. inspects the zip once more with the rules the in-game updater applies (it would refuse a package with unsafe names or user data)
 #   5. writes release\vX.Y.Z\  Sonic3AIR_Online.zip, Sonic3AIR_Online.zip.sha256, Sonic3AIR_Online.manifest.json (version, asset, size, sha256)
@@ -52,6 +52,22 @@ if ($dirty.Count -gt 0)
 	Write-Host ("note: dry run with " + $dirty.Count + " uncommitted change(s) (-AllowDirty). A real release would be refused.") -ForegroundColor Yellow
 }
 
+# Tags made from another clone must count too: refresh them first (the "newer than every tag" rule below reads the local tag list).
+# A real release needs this to work; a dry run only warns.
+$env:GIT_TERMINAL_PROMPT = "0"		# never wait for a password prompt
+$fetchOk = $false
+$fetchOutput = @()
+try
+{
+	$fetchOutput = & git -C $root fetch --tags --quiet origin 2>&1
+	$fetchOk = ($LASTEXITCODE -eq 0)
+}
+catch { $fetchOutput = @($_.Exception.Message) }
+if (-not $fetchOk)
+{
+	if (-not $DryRun) { Fail ("could not fetch the tags from origin, so a newer release made elsewhere cannot be ruled out: " + ($fetchOutput -join " ")) }
+	Write-Host ("note: could not fetch the tags from origin (" + ($fetchOutput -join " ") + "); the version check only knows the local tags.") -ForegroundColor Yellow
+}
 $existingTags = @(Run-Git tag --list "v*")
 if ($existingTags -contains $tag) { Fail "the tag $tag already exists" }
 function ConvertTo-VersionKey([string]$text)
@@ -66,10 +82,23 @@ foreach ($existing in $existingTags)
 }
 
 # ---- 2. Build and package ----------------------------------------------------------------------------------------------------------
-if ($Build)
+# A real release is always built here from the committed tree (-Build is implied): the package must be the program of the tagged source, not
+# whatever was left in the build folder. A dry run may reuse an existing build, but says so when it is older than the source.
+$mustBuild = $Build -or (-not $DryRun)
+if ($mustBuild)
 {
 	& (Join-Path $checksDir "build_online_stable.ps1")
 	if ($LASTEXITCODE -ne 0) { Fail "the build failed" }
+}
+$exeForCheck = Join-Path $root "sonic3air_online_stable_source\Oxygen\sonic3air\bin\Release_x64\Sonic3AIR.exe"
+if (-not (Test-Path -LiteralPath $exeForCheck)) { Fail "Sonic3AIR.exe was not found at $exeForCheck (run with -Build)" }
+$sourceFiles = @(Run-Git ls-files -- sonic3air_online_stable_source) | ForEach-Object { Join-Path $root $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+$newestSource = $sourceFiles | ForEach-Object { Get-Item -LiteralPath $_ } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+if ($null -ne $newestSource -and (Get-Item -LiteralPath $exeForCheck).LastWriteTimeUtc -lt $newestSource.LastWriteTimeUtc)
+{
+	$staleText = "Sonic3AIR.exe is older than the source file " + $newestSource.FullName + ": the package would not contain this source's program (build with -Build)"
+	if (-not $DryRun) { Fail $staleText }
+	Write-Host ("note: " + $staleText) -ForegroundColor Yellow
 }
 $helperPath = Join-Path $checksDir "package_files\update_helper.ps1"
 $parseErrors = $null

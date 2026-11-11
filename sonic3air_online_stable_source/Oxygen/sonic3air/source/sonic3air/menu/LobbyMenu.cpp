@@ -28,6 +28,8 @@
 
 namespace
 {
+	const float HOSTING_MESSAGE_SECONDS = 4.0f;
+
 	enum Action
 	{
 		CREATE_LOBBY = 1,
@@ -372,6 +374,7 @@ void LobbyMenu::pressStart()
 	{
 		playMenuSound(0xad);
 		mMessage = "Nobody has joined yet.";
+		mHostingMessageSeconds = HOSTING_MESSAGE_SECONDS;
 	}
 	else if (!host->isReadyCheckActive())
 	{
@@ -379,6 +382,7 @@ void LobbyMenu::pressStart()
 		playMenuSound(0x63);
 		host->beginReadyCheck();
 		mMessage = "Asked everybody to get ready.\nPress START GAME again to start now without waiting.";
+		mHostingMessageSeconds = HOSTING_MESSAGE_SECONDS;
 	}
 	else
 	{
@@ -615,6 +619,18 @@ void LobbyMenu::update(float timeElapsed)
 	// A ready check that ended: the host goes on to pick the game, without the players who were left out
 	if (mState == State::SHOW && mScreen == Screen::HOSTING && nullptr != manager.getNetplayHost() && manager.getNetplayHost()->takeReadyCheckFinished())
 		startGame(true);
+
+	// A hint of the host ("Nobody has joined yet", "Asked everybody to get ready") goes away after a few seconds, so that the ready check countdown, the relay and
+	// high ping warnings and the status line below can show (they are not drawn while a message is set)
+	if (mScreen == Screen::HOSTING && mHostingMessageSeconds > 0.0f)
+	{
+		mHostingMessageSeconds -= timeElapsed;
+		if (mHostingMessageSeconds <= 0.0f)
+		{
+			mHostingMessageSeconds = 0.0f;
+			mMessage.clear();
+		}
+	}
 
 	// The host is warned about a friend with a high ping (the text is drawn in "render"; the log says when it first appeared)
 	if (mState == State::SHOW && mScreen == Screen::HOSTING && nullptr != manager.getNetplayHost())
@@ -1057,8 +1073,10 @@ void LobbyMenu::render()
 
 	// At the bottom: what the player needs to know right now
 	const int bottomY = 202;
+	std::string drawnStatus = "nothing";
 	if (!mMessage.empty())
 	{
+		drawnStatus = "message";
 		// The message can have several lines (the first ones say what happened and what to do)
 		int lineY = bottomY;
 		size_t begin = 0;
@@ -1074,6 +1092,7 @@ void LobbyMenu::render()
 	}
 	else if (mScreen == Screen::JOINED && nullptr != client && client->getLobbyReadyCheckSeconds() > 0 && !client->isLobbyReady())
 	{
+		drawnStatus = "friend ready prompt";
 		// The host wants to start: whoever is not ready is asked to be
 		const bool blink = (std::fmod(FTX::getTime(), 0.8f) < 0.5f);
 		drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "THE HOST WANTS TO START! PRESS READY (" + std::to_string(client->getLobbyReadyCheckSeconds()) + ")", 4, blink ? yellow : orange);
@@ -1085,16 +1104,19 @@ void LobbyMenu::render()
 		const int relayedSlot = host->getRelayedSlot();
 		if (relayedSlot > 0 && !host->isReadyCheckActive())
 		{
+			drawnStatus = "relay warning";
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "WARNING: " + shorten(host->getPlayerName(relayedSlot), 12) + " plays through the relay server.", 4, red);
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY + 10), "That adds delay for them. Input delay evens out the lag.", 4, grey);
 		}
 		else if (host->isReadyCheckActive())
 		{
+			drawnStatus = "ready check countdown";
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "Waiting for players to get ready... " + std::to_string(host->getReadyCheckSecondsLeft()) + " s", 4, yellow);
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY + 10), "Press START GAME again to start without them.", 4, grey);
 		}
 		else if (highSlot > 0)
 		{
+			drawnStatus = "high ping warning";
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "WARNING: " + shorten(host->getPlayerName(highSlot), 12) + " has a high ping (" + std::to_string(highPing) + " ms).", 4, red);
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY + 10), "The game may feel slow for them. Input delay evens out the lag.", 4, grey);
 		}
@@ -1102,7 +1124,15 @@ void LobbyMenu::render()
 		{
 			const int count = host->getConnectedClientCount();
 			const char* hint = (count == 0) ? "Waiting for friends to join..." : (host->areAllClientsReady() ? "Everybody is ready!" : "Waiting for everybody to be ready...");
+			drawnStatus = (count == 0) ? "waiting for friends hint" : (host->areAllClientsReady() ? "everybody ready hint" : "waiting for ready hint");
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), hint, 4, grey);
 		}
+	}
+
+	// Written to the log whenever the bottom line changes: the checks read it to know what the lobby screen really showed (not only what the logic decided to show)
+	if (drawnStatus != mLastDrawnStatus)
+	{
+		mLastDrawnStatus = drawnStatus;
+		RMX_LOG_INFO("Lobby: on screen: " << drawnStatus);
 	}
 }

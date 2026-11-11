@@ -380,7 +380,7 @@ void OnlineCoopWindow::buildImGuiContent()
 		}
 		else
 		{
-			const std::string code = makeJoinCode(addresses[mSelectedAddress], NetplayManager::DEFAULT_HOST_PORT, netplayManager.getHostSecret());
+			const std::string code = makeJoinCode(addresses[mSelectedAddress], NetplayManager::DEFAULT_HOST_PORT, (uint32)netplayManager.getHostSecret());
 			ImGui::Text("Give your friend this code:");
 			ImGui::SetWindowFontScale(2.4f);
 			ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "%s", code.c_str());

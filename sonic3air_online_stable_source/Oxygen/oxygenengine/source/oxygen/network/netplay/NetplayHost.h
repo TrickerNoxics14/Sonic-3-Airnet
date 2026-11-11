@@ -177,7 +177,7 @@ private:
 	std::vector<std::string> mKnownPeerIPs;
 	std::vector<PlayerConnection*> mPlayerConnections;
 	std::vector<PlayerConnection*> mRetiredConnections;
-	std::map<std::string, int> mFailedAuthByIP;		// Wrong codes per address: after a few, that address gets ignored
+	NetplayLobby::AuthFailureTracker mFailedAuth;		// Wrong codes per address: after a few, that address gets ignored for a minute
 	int mMaxClients = MAX_PLAYERS - 1;
 	float mHostStateTimer = 0.0f;
 	HostState mTimedHostState = HostState::NONE;

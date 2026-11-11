@@ -11,6 +11,7 @@
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include <chrono>
+#include <random>
 
 #ifdef _WIN32
 	#define WIN32_LEAN_AND_MEAN
@@ -930,6 +931,16 @@ bool UDPSocket::takeLanFoundAddress(SocketAddress& outAddress)
 	return true;
 }
 
+void UDPSocket::rememberRecentAddress(std::vector<std::string>& list, const std::string& ip, size_t capacity)
+{
+	auto it = std::find(list.begin(), list.end(), ip);
+	if (it != list.end())
+		list.erase(it);
+	else if (capacity > 0 && list.size() >= capacity)
+		list.erase(list.begin());
+	list.push_back(ip);
+}
+
 bool UDPSocket::hasLanRequester(const std::string& ip) const
 {
 	return std::find(mLanRequesterIPs.begin(), mLanRequesterIPs.end(), ip) != mLanRequesterIPs.end();
@@ -978,6 +989,14 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 	mRelayAddress = relayAddress;
 	mRelayLobby = lobbyID;
 	mRelayKey = key;
+	mRelayHostSecret = 0;
+	if (role == RelayRole::HOST)
+	{
+		// Random per hosting and never derived from the code (every friend knows the code): only this game can re-register the lobby at the relay
+		std::random_device randomDevice;
+		while (mRelayHostSecret == 0)
+			mRelayHostSecret = ((uint64)randomDevice() << 32) ^ (uint64)randomDevice();
+	}
 	mRelayToken = 0;
 	mRelayReady = false;
 	mRelayRefusal = 0;
@@ -993,6 +1012,7 @@ void UDPSocket::stopRelay()
 	mRelayAddress.clear();
 	mRelayLobby = 0;
 	mRelayKey = 0;
+	mRelayHostSecret = 0;
 	mRelayToken = 0;
 	mRelayReady = false;
 	mRelayRefusal = 0;
@@ -1010,7 +1030,10 @@ void UDPSocket::updateRelay()
 	mRelayLastHello = now;
 
 	std::vector<uint8_t> hello;
-	RelayProtocol::buildHello(hello, (mRelayRole == RelayRole::HOST) ? RelayProtocol::HOST_REGISTER : RelayProtocol::CLIENT_JOIN, mRelayLobby, mRelayKey);
+	if (mRelayRole == RelayRole::HOST)
+		RelayProtocol::buildHostHello(hello, mRelayLobby, mRelayKey, mRelayHostSecret);
+	else
+		RelayProtocol::buildHello(hello, RelayProtocol::CLIENT_JOIN, mRelayLobby, mRelayKey);
 	sendData(hello.data(), hello.size(), mRelayAddress);
 }
 
@@ -1138,8 +1161,7 @@ bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
 
 		// Remember who asked: this is a friend on the same network who knows the code
 		const std::string& requesterIP = outReceiveResult.mSenderAddress.getIP();
-		if (std::find(mLanRequesterIPs.begin(), mLanRequesterIPs.end(), requesterIP) == mLanRequesterIPs.end() && mLanRequesterIPs.size() < 16)
-			mLanRequesterIPs.push_back(requesterIP);
+		rememberRecentAddress(mLanRequesterIPs, requesterIP, 64);
 	}
 	else if (isHere && mLanSearchSession != 0 && sessionID == mLanSearchSession)
 	{

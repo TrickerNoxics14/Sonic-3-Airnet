@@ -588,6 +588,9 @@ bool EngineMain::initFileSystem()
 	// Create mod data folder (the default mod directory)
 	FTX::FileSystem->createDirectory(config.mGameAppDataPath + L"mods");
 
+	// Mods that come with the game (the online package ships the co-op mod this way) are installed and, the first time, switched on
+	ModManager::installBundledMods(config.mGameAppDataPath + L"mods/");
+
 	// Add package providers
 	if (!loadFilePackages(false))
 		return false;

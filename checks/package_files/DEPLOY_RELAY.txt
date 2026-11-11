@@ -58,15 +58,18 @@ WHAT IT PROTECTS AGAINST (and what it does not)
     are kept in memory only while a lobby or friend is active.
   * It does not read the game data it forwards. It sees a one-way hash of the lobby (not the session
     code) and a key hash, and it forwards only for somebody who knows the key. A wrong key gets no answer
-    at all; 8 wrong keys block that address for a minute.
-  * Rate limits: per sender address for registrations and join requests, per friend and direction for
+    at all; 8 wrong keys block that IP address (all its ports) for a minute. Taking over a registered lobby
+    needs a secret that only the hosting game knows, not just the lobby key that every friend has.
+  * Rate limits: per sender IP address for registrations and join requests, per friend and direction for
     data (packets and bytes per second), a cap on lobbies (512, 4 per address), on friends per lobby (6)
     and on remembered addresses. Every reply is smaller than the request that caused it, so it cannot
     be used to amplify traffic. Forged data needs a random 32-bit token that the relay hands out only
     to somebody who proved the key.
   * What it cannot do: it does not encrypt the game's traffic (the game does not either). Whoever runs
     the relay can see that traffic and could, with effort, work out the session code of a lobby (the code
-    is a 40-bit number; the relay sees its hash). Run a relay yourself, or trust the person who does.
+    is a 40-bit number; the relay sees a slowed-down hash of it, so every guess costs tens of thousands of
+    hashes, but a determined operator with a lot of computing time could still find it). Run a relay yourself,
+    or trust the person who does.
     A relay does not defend against a flood so large that it fills the server's network connection:
     that needs the hosting provider's protection.
 

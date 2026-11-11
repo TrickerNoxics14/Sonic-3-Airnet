@@ -49,11 +49,11 @@ public:
 
 	// Hosting: with "directSecret" the host is joined by an IP join code that contains a fresh random secret (see "getHostSecret"), otherwise by the session code
 	bool setupAsHost(bool registerSessionAtServer, uint16 port = DEFAULT_HOST_PORT, bool directSecret = false);
-	bool setupAsHostWithSecret(uint16 port, uint32 secret);		// Developer test: a host with a given secret
-	inline uint32 getHostSecret() const  { return mHostSecret; }
+	bool setupAsHostWithSecret(uint16 port, uint64 secret);		// Developer test: a host with a given secret
+	inline uint64 getHostSecret() const  { return mHostSecret; }
 	inline bool isLanRequester(const std::string& ip) const  { return mUDPSocket.hasLanRequester(ip); }
 	void startJoinViaServer();
-	void startJoinDirect(std::string_view ip, uint16 port, uint32 secret);
+	void startJoinDirect(std::string_view ip, uint16 port, uint64 secret);
 	void startJoinIntroduced(uint64 sessionID, std::string_view ip, uint16 port);		// Developer test: as if the game server had introduced the host at this address (the session code is known, so a relay is possible)
 	void closeConnections();
 
@@ -113,7 +113,7 @@ private:
 	bool mRelaySessionKnown = false;		// This join started from a session code, which is what the relay needs (a direct IP join code has none)
 	bool mRelayReadyLogged = false;
 	float mLanSearchTimer = 0.0f;
-	uint32 mHostSecret = 0;
+	uint64 mHostSecret = 0;
 	int mInputDelaySetting = NetplayLobby::INPUT_DELAY_AUTO;
 	float mTestCloseTimer = 0.0f;
 	float mOnlineLogTimer = 0.0f;

@@ -15,13 +15,14 @@
 // datagram to the other side. The payload is an ordinary datagram of the game's own protocol, which is still checked end to end
 // (join code challenge, see NetplayAuth.h). The relay does not read the payload.
 //
-//   host   -> relay : HOST_REGISTER (lobby, key), repeated every few seconds; the relay answers HOST_REGISTERED (token)
+//   host   -> relay : HOST_REGISTER (lobby, key, host secret), repeated every few seconds; the relay answers HOST_REGISTERED (token)
 //   friend -> relay : CLIENT_JOIN (lobby, key);                              the relay answers CLIENT_JOINED (token) or CLIENT_REFUSED (reason)
 //   friend -> relay : DATA_C2R (token, payload)            -> relay -> host   : DATA_R2H (host token, friend id, payload)
 //   host   -> relay : DATA_H2R (host token, friend id, payload) -> relay -> friend : DATA_R2C (token, payload)
 //
 // "lobby" and "key" are one way hashes of the session code (see NetplayAuth::relayLobbyFromSession / relayKeyFromSession): the relay never sees
-// the code. The first host that registers a lobby sets its key; whoever does not know the key gets no answer at all.
+// the code. The first host that registers a lobby sets its key and its host secret (a random number that only this game process knows, NOT derived from the code,
+// because every friend knows the code); whoever does not know the key, or tries to take over a lobby without its host secret, gets no answer at all.
 // Every answer is smaller than the request that caused it, so the relay cannot be used to amplify traffic.
 //
 // Inside the game the relayed peers look like ordinary peers with a made-up address ("240.0.x.y", a range that is never routed on the internet):
@@ -35,17 +36,18 @@
 namespace RelayProtocol
 {
 	static const uint8_t MAGIC[4] = { 'S', '3', 'R', 'L' };
-	static const uint8_t VERSION = 1;
+	static const uint8_t VERSION = 2;					// 2: HOST_REGISTER carries a host secret (only the registering game knows it)
 	static const uint16_t DEFAULT_PORT = 28842;
 	static const size_t HEADER_SIZE = 6;				// magic, version, type
 	static const size_t HELLO_SIZE = HEADER_SIZE + 16;	// lobby (8 bytes), key (8 bytes)
+	static const size_t HOST_HELLO_SIZE = HELLO_SIZE + 8;	// lobby, key, host secret (8 bytes)
 	static const size_t MAX_DATAGRAM_SIZE = 4096;		// What the relay accepts; the game's own datagrams are about 1.1 KB at most
 	static const size_t MAX_PAYLOAD_SIZE = MAX_DATAGRAM_SIZE - 16;
 	static const uint16_t VIRTUAL_PORT = 1;
 
 	enum Type : uint8_t
 	{
-		HOST_REGISTER	= 1,	// host -> relay: lobby, key
+		HOST_REGISTER	= 1,	// host -> relay: lobby, key, host secret
 		HOST_REGISTERED	= 2,	// relay -> host: lobby, host token
 		CLIENT_JOIN		= 3,	// friend -> relay: lobby, key
 		CLIENT_JOINED	= 4,	// relay -> friend: token
@@ -94,6 +96,13 @@ namespace RelayProtocol
 		put64(out, key);
 	}
 
+
+	// Registration message of the host: like buildHello, plus the host secret
+	inline void buildHostHello(std::vector<uint8_t>& out, uint64_t lobby, uint64_t key, uint64_t hostSecret)
+	{
+		buildHello(out, HOST_REGISTER, lobby, key);
+		put64(out, hostSecret);
+	}
 	// Data datagram of a friend (token, payload)
 	inline void buildClientData(std::vector<uint8_t>& out, Type type, uint32_t token, const uint8_t* payload, size_t payloadSize)
 	{

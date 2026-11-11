@@ -106,9 +106,29 @@ NetConnection* NetplayHost::createNetConnection(const SocketAddress& senderAddre
 		if (connection->getState() == NetConnection::State::DISCONNECTED || connection->getState() == NetConnection::State::EMPTY)
 			retireConnection(connection);
 
-	// Strangers who never prove anything must not be able to pile up connections (the player slot is only assigned after the proof)
-	if (mPlayerConnections.size() >= (size_t)(MAX_PLAYERS * 2))
-		return nullptr;
+	// Strangers who never prove anything must not be able to pile up connections (the player slot is only assigned after the proof), and must not
+	// be able to keep real friends out either: one address holds only a few unproven connections, and a full table gives way to a newcomer
+	{
+		std::vector<NetplayLobby::ConnectionInfo> infos;
+		for (const PlayerConnection* existing : mPlayerConnections)
+		{
+			NetplayLobby::ConnectionInfo info;
+			info.mIP = existing->getRemoteAddress().getIP();
+			info.mAuthenticated = existing->mAuthenticated;
+			info.mPendingSeconds = existing->mPendingSeconds;
+			infos.push_back(info);
+		}
+		const int victim = NetplayLobby::chooseConnectionToReplace(infos, senderAddress.getIP(), (size_t)(MAX_PLAYERS * 2));
+		if (victim == NetplayLobby::REFUSE_NEW_CONNECTION)
+			return nullptr;
+		if (victim >= 0)
+		{
+			PlayerConnection* old = mPlayerConnections[(size_t)victim];
+			RMX_LOG_INFO("Netplay host: dropped an unproven connection to make room for a new one");
+			old->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			retireConnection(old);
+		}
+	}
 
 	// Remove from connecting players
 	for (size_t k = 0; k < mConnectingPlayers.size(); ++k)
@@ -176,8 +196,11 @@ int NetplayHost::getAuthenticatedCount() const
 
 std::string NetplayHost::identityOf(const PlayerConnection& connection)
 {
-	return (connection.mClientToken != 0) ? ("t" + std::to_string(connection.mClientToken)) : ("ip" + connection.getRemoteAddress().getIP());
+	// The token is chosen by the friend's game, so it only tells the same running game apart from another one. Without a token the exact address (with port) is used:
+	// two friends behind the same network address must not be taken for one player (slot takeover).
+	return (connection.mClientToken != 0) ? ("t" + std::to_string(connection.mClientToken)) : ("ip" + connection.getRemoteAddress().getIP() + ":" + std::to_string(connection.getRemoteAddress().getPort()));
 }
+
 
 void NetplayHost::refuseConnection(PlayerConnection& connection, uint8 result)
 {
@@ -193,21 +216,21 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 		return;
 
 	const std::string ip = connection.getRemoteAddress().getIP();
-	int& failures = mFailedAuthByIP[ip];
-	if (failures >= 8)
+	if (mFailedAuth.isBlocked(ip))
 	{
-		// Somebody keeps guessing: no more answers
+		// Somebody keeps guessing: no more answers for a minute (the block ends by itself, see AuthFailureTracker)
 		connection.mRefuseTimer = 1000.0f;
 		return;
 	}
 
 	if (!NetplayAuth::verifyFriendProof(mNetplayManager.getHostSecret(), connection.mHostNonce, packet.mClientNonce, packet.mProof))
 	{
-		++failures;
+		const int failures = mFailedAuth.recordFailure(ip);
 		RMX_LOG_INFO("Netplay host: refused a friend, the code was wrong (" << failures << ". wrong attempt from " << ip << ")");
 		refuseConnection(connection, (uint8)NetplayAuth::JoinResult::WRONG_CODE);
 		return;
 	}
+	mFailedAuth.recordSuccess(ip);
 
 	connection.mClientToken = packet.mClientToken;
 	const std::string identity = identityOf(connection);
@@ -344,6 +367,7 @@ void NetplayHost::updateConnection(float deltaSeconds)
 	updateHandshakes(deltaSeconds);
 	mReservations.update(deltaSeconds);
 	mKickBlocked.update(deltaSeconds);
+	mFailedAuth.update(deltaSeconds);
 	updatePings(deltaSeconds);
 	updateAutoDelay(deltaSeconds, false);
 

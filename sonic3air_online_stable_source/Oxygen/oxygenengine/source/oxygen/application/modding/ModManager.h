@@ -19,6 +19,11 @@ class ModManager : public SingleInstance<ModManager>
 public:
 	~ModManager();
 
+	// Mods that come with the game (folder "bundled_mods" next to the executable) are copied into the mods folder, so that the game and its co-op mod always match.
+	// A bundled mod that is not installed yet is also switched on. Nothing happens if there is no "bundled_mods" folder (source builds, stock builds).
+	// Returns the number of files that were copied or removed; never throws.
+	static int installBundledMods(const std::wstring& modsPath, const std::wstring& bundledPath = L"bundled_mods");
+
 	inline const std::wstring& getModsBasePath() const  { return mBasePath; }
 
 	inline const std::vector<Mod*>& getAllMods() const	   { return mAllMods; }

@@ -5,7 +5,9 @@ Up to four players can join from separate computers. Each gets their own
 full screen and controller slot. The host plays Sonic; player 2 is Tails,
 player 3 is Knuckles, and player 4 is a second Sonic by default (or the
 configured ESU character when an extra-character mod is installed).
-Nothing else to install: the co-op mod is built in and switches itself on.
+Nothing else to install: the co-op mod is built in. The game copies it into its mods folder (%APPDATA%\Sonic3AIR\mods) and
+switches it on the first time it starts, and repairs that copy at every start so that it always matches this folder.
+(If you switch it off in the Mods menu, it stays off; the copy is still kept up to date.)
 
 
 SETUP (once, on each computer)

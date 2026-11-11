@@ -99,14 +99,14 @@ function bool DropIn.net()
 // from the lobby (the engine function draws it; asking by name keeps this working in the stock game, where it does not exist).
 // Otherwise (or when the engine does not answer) the given fallback text is drawn, e.g. "P2".
 // "rings" shows a ring count behind the name, or 0xffff for none (the fallback text then has to include it itself).
-function void DropIn.drawPlayerLabel(u8 slot, u16 x, u16 y, u32 color, u8 alignment, u16 renderQueue, u16 rings, string fallbackText)
+function void DropIn.drawPlayerLabel(u8 slot, s16 x, s16 y, u32 color, u8 alignment, u16 renderQueue, u16 rings, string fallbackText)
 {
 	if (DropIn.net())
 	{
 		u8[0x8fff3f] = 0
 		u8[0x8fff30] = slot
-		u16[0x8fff32] = x
-		u16[0x8fff34] = y
+		s16[0x8fff32] = x
+		s16[0x8fff34] = y
 		u32[0x8fff36] = color
 		u16[0x8fff3a] = renderQueue
 		u16[0x8fff3c] = rings

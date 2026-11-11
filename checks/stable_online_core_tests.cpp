@@ -184,8 +184,8 @@ namespace
 	void runAuthTests()
 	{
 		using namespace NetplayAuth;
-		const uint32 secret = secretFromSession(0x123456789aull);
-		const uint32 otherSecret = secretFromSession(0x123456789bull);
+		const uint64 secret = secretFromSession(0x123456789aull);
+		const uint64 otherSecret = secretFromSession(0x123456789bull);
 		const uint32 hostNonce = 0x11112222u;
 		const uint32 clientNonce = 0x33334444u;
 
@@ -198,7 +198,7 @@ namespace
 		{
 			const uint64 session = 0x123456789aull;
 			const uint64 tag = lanTagFromSession(session);
-			report("auth: the LAN broadcast tag reveals neither the session ID nor the secret", tag != session && tag != (uint64)secretFromSession(session) && tag == lanTagFromSession(session) && tag != lanTagFromSession(session + 1));
+			report("auth: the LAN broadcast tag reveals neither the session ID nor the secret", tag != session && tag != secretFromSession(session) && tag == lanTagFromSession(session) && tag != lanTagFromSession(session + 1));
 		}
 		{
 			bool inRange = true, varies = false;
@@ -215,6 +215,31 @@ namespace
 			// The proofs really depend on every input
 			const uint64 base = computeProof('C', secret, hostNonce, clientNonce);
 			report("auth: the proof changes with the secret, both nonces and the role", base != computeProof('C', secret + 1, hostNonce, clientNonce) && base != computeProof('C', secret, hostNonce + 1, clientNonce) && base != computeProof('C', secret, hostNonce, clientNonce + 1) && base != computeProof('H', secret, hostNonce, clientNonce));
+		}
+		{
+			// Review finding: the tag, the relay lobby name and the proof were single hashes of a 40 bit / 30 bit secret, so every guess cost the attacker one hash
+			const uint64 session = 0x0123456789ull;
+			const auto start = std::chrono::steady_clock::now();
+			const uint64 firstTag = lanTagFromSession(session);		// the slow part runs here
+			const auto middle = std::chrono::steady_clock::now();
+			const uint64 secondTag = lanTagFromSession(session);
+			const uint64 lobby = relayLobbyFromSession(session), key = relayKeyFromSession(session), derivedSecret = secretFromSession(session);
+			const auto end = std::chrono::steady_clock::now();
+			const double firstMs = std::chrono::duration<double, std::milli>(middle - start).count();
+			const double repeatMs = std::chrono::duration<double, std::milli>(end - middle).count();
+			std::cout << "  (info: first derivation from a session ID " << firstMs << " ms, the next four " << repeatMs << " ms, " << STRETCH_ITERATIONS << " chained hashes)\n";
+			report("auth: values derived from a code go through key stretching (at least 100000 chained hashes per guess), computed once and then cached", STRETCH_ITERATIONS >= 100000 && firstTag == secondTag && firstMs > 5.0 * repeatMs && repeatMs < 50.0);
+			report("auth: tag, relay lobby, relay key and secret of one session are four different values", firstTag != lobby && firstTag != key && firstTag != derivedSecret && lobby != key && lobby != derivedSecret && key != derivedSecret);
+			// The old single-hash derivation (version 1) must no longer match: an attacker's table of single hashes is useless
+			report("auth: a plain single SHA-1 of the session ID no longer gives the LAN tag", firstTag != detail::hashToUint64("S3AIRLANTAG1|" + std::to_string(session)) && firstTag != detail::hashToUint64("S3AIRLANTAG2|" + std::to_string(session)));
+			const uint64 directSecret = 0x2aaaaaaaull;
+			const auto proofStart = std::chrono::steady_clock::now();
+			const uint64 proofA = computeProof('C', directSecret, 1, 2);
+			const double proofFirstMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - proofStart).count();
+			const auto proofStart2 = std::chrono::steady_clock::now();
+			const uint64 proofB = computeProof('C', directSecret, 1, 2);
+			const double proofRepeatMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - proofStart2).count();
+			report("auth: a proof for a join code secret also needs the slow stretching once, and a repeated proof (every handshake after the first) is cheap", proofA == proofB && proofFirstMs > 5.0 * proofRepeatMs && proofRepeatMs < 20.0);
 		}
 		{
 			// A code with the wrong secret yields a different proof than the host expects (join code level)
@@ -425,6 +450,55 @@ namespace
 			blocked.update(2.0f);
 			report("lobby: a kicked address cannot come back for a minute, other addresses are not affected", now && almost && !blocked.isBlocked("1.2.3.4"));
 		}
+		{
+			// Review findings: wrong-code counter that never decayed, connection table that strangers could fill, LAN requester list that never made room
+			AuthFailureTracker failures;
+			bool blockedAfterEight = false;
+			for (int i = 0; i < MAX_AUTH_FAILURES; ++i)
+				failures.recordFailure("9.9.9.9");
+			blockedAfterEight = failures.isBlocked("9.9.9.9") && !failures.isBlocked("9.9.9.8");
+			failures.update(AUTH_FAILURE_WINDOW_SECONDS - 1.0f);
+			const bool stillBlocked = failures.isBlocked("9.9.9.9");
+			failures.update(2.0f);
+			report("lobby: an address that guessed wrong codes is ignored only for a minute, then it may try again (the counter decays)", blockedAfterEight && stillBlocked && !failures.isBlocked("9.9.9.9") && failures.size() == 0);
+
+			AuthFailureTracker some;
+			some.recordFailure("1.1.1.1"); some.recordFailure("1.1.1.1");
+			some.recordSuccess("1.1.1.1");
+			report("lobby: a friend who proves the code after a typo starts over", some.size() == 0);
+
+			AuthFailureTracker many;
+			for (size_t i = 0; i < MAX_AUTH_FAILURE_ENTRIES * 3; ++i)
+				many.recordFailure("10.0." + std::to_string(i / 256) + "." + std::to_string(i % 256));
+			report("lobby: the list of wrong-code addresses stays bounded", many.size() <= MAX_AUTH_FAILURE_ENTRIES);
+
+			std::vector<ConnectionInfo> table;
+			auto add = [&table](const std::string& ip, bool authenticated, float seconds) { ConnectionInfo info; info.mIP = ip; info.mAuthenticated = authenticated; info.mPendingSeconds = seconds; table.push_back(info); };
+			report("lobby: a free connection table accepts a newcomer", chooseConnectionToReplace(table, "5.5.5.5", 8) == ACCEPT_NEW_CONNECTION);
+			add("6.6.6.6", false, 1.0f); add("6.6.6.6", false, 4.0f);
+			const int victim = chooseConnectionToReplace(table, "6.6.6.6", 8);
+			report("lobby: one address cannot hold more than two unproven connections (its oldest one gives way)", victim == 1 && chooseConnectionToReplace(table, "5.5.5.5", 8) == ACCEPT_NEW_CONNECTION);
+			table.clear();
+			for (int i = 0; i < 8; ++i)
+				add("7.7.7." + std::to_string(i), false, 0.5f + (float)i * 0.1f);
+			const int refused = chooseConnectionToReplace(table, "5.5.5.5", 8);
+			table[3].mPendingSeconds = 9.0f;
+			const int replaced = chooseConnectionToReplace(table, "5.5.5.5", 8);
+			report("lobby: a full table of fresh strangers refuses, but once one of them had its chance a real friend replaces the oldest", refused == REFUSE_NEW_CONNECTION && replaced == 3);
+			table.clear();
+			for (int i = 0; i < 8; ++i)
+				add("8.8.8." + std::to_string(i), true, 20.0f);
+			report("lobby: connections that proved the code are never replaced by a newcomer", chooseConnectionToReplace(table, "5.5.5.5", 8) == REFUSE_NEW_CONNECTION);
+
+			std::vector<std::string> recent;
+			for (int i = 0; i < 16; ++i)
+				UDPSocket::rememberRecentAddress(recent, "192.168.0." + std::to_string(i), 16);
+			UDPSocket::rememberRecentAddress(recent, "192.168.0.99", 16);
+			const bool oldestGone = std::find(recent.begin(), recent.end(), "192.168.0.0") == recent.end();
+			UDPSocket::rememberRecentAddress(recent, "192.168.0.5", 16);
+			report("lobby: the LAN requester list makes room for a new friend by forgetting the oldest entry, and does not grow",
+				recent.size() == 16 && oldestGone && std::find(recent.begin(), recent.end(), "192.168.0.99") != recent.end() && recent.back() == "192.168.0.5");
+		}
 
 		// Packets
 		{
@@ -488,6 +562,7 @@ namespace
 		std::vector<SentDatagram> mSent;
 		Relay::Core mCore;
 		double mNow = 1000.0;
+		uint64_t mHostSecret = 0x5ec2e75ec2e75ec2ull;		// What the registering host game sends along (see RelayProtocol.h)
 
 		explicit RelayFixture(const Relay::Limits& limits = Relay::Limits()) :
 			mCore(limits, [this](const Relay::Endpoint& to, const uint8_t* data, size_t size) { mSent.push_back({ to, std::vector<uint8_t>(data, data + size) }); })
@@ -499,7 +574,16 @@ namespace
 		void hello(const Relay::Endpoint& from, RelayProtocol::Type type, uint64_t lobby, uint64_t key)
 		{
 			std::vector<uint8_t> bytes;
-			RelayProtocol::buildHello(bytes, type, lobby, key);
+			if (type == RelayProtocol::HOST_REGISTER)
+				RelayProtocol::buildHostHello(bytes, lobby, key, mHostSecret);
+			else
+				RelayProtocol::buildHello(bytes, type, lobby, key);
+			send(from, bytes);
+		}
+		void hostHelloWithSecret(const Relay::Endpoint& from, uint64_t lobby, uint64_t key, uint64_t secret)
+		{
+			std::vector<uint8_t> bytes;
+			RelayProtocol::buildHostHello(bytes, lobby, key, secret);
 			send(from, bytes);
 		}
 		const SentDatagram* lastTo(const Relay::Endpoint& to) const
@@ -765,7 +849,7 @@ namespace
 			hellos.mSent.clear();
 			for (int i = 0; i < 2000; ++i)
 				hellos.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
-			report("relay abuse: a flood of join requests from one address is answered only a few times", hellos.mSent.size() <= 12 && hellos.mCore.getStats().mDroppedRate >= 1900);
+			report("relay abuse: a flood of join requests from one address is answered only a few times", hellos.mSent.size() <= (size_t)(hellos.mCore.getLimits().mControlBurst + 8) && hellos.mCore.getStats().mDroppedRate >= 1900);
 		}
 
 		// --- Limits: lobbies, friends, memory
@@ -799,11 +883,64 @@ namespace
 				sources.hello(RelayFixture::ep(0x0e000000 + (uint32_t)i, 9000), RelayProtocol::CLIENT_JOIN, 5, key);
 			report("relay limits: memory for remembered addresses stays bounded during a flood from many addresses", sources.mCore.getSourceCount() <= sources.mCore.getLimits().mMaxSources);
 
+			// Review findings: taking over a lobby with the shared key, and rotating the source port
+			{
+				RelayFixture hijack;
+				hijack.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+				const uint32_t realHostToken = hijack.hostToken(hostEp);
+				hijack.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+				const uint32_t friendToken = hijack.clientToken(friendEp);
+				const size_t sentBefore = hijack.mSent.size();
+				hijack.hostHelloWithSecret(friendEp, lobby, key, 0x1111222233334444ull);		// A friend knows the lobby key (it follows from the code) but not the host's secret
+				report("relay abuse: a friend who knows the lobby key but not the host secret cannot take the lobby over (no answer, counted as a wrong key)", hijack.mSent.size() == sentBefore && hijack.mCore.getStats().mWrongKeys == 1);
+				const uint8_t payload[2] = { 5, 6 };
+				std::vector<uint8_t> up;
+				RelayProtocol::buildClientData(up, RelayProtocol::DATA_C2R, friendToken, payload, sizeof(payload));
+				hijack.mSent.clear();
+				hijack.send(friendEp, up);
+				std::vector<uint8_t> down;
+				RelayProtocol::buildHostData(down, RelayProtocol::DATA_H2R, realHostToken, 1, payload, sizeof(payload));
+				hijack.send(hostEp, down);
+				report("relay abuse: after the takeover attempt the friend's data still goes to the real host and the real host's data still reaches the friend",
+					hijack.mSent.size() == 2 && hijack.mSent[0].mTo == hostEp && hijack.mSent[1].mTo == friendEp);
+
+				// The real host's address changes (router rebinding): the same secret re-registers it
+				const Relay::Endpoint movedHost = RelayFixture::ep(0x0a000001, 5001);
+				hijack.hello(movedHost, RelayProtocol::HOST_REGISTER, lobby, key);
+				report("relay: the real host can re-register from a new address with its secret and keeps its token", hijack.hostToken(movedHost) == realHostToken);
+				hijack.hostHelloWithSecret(movedHost, lobby, key, 0);
+				report("relay protocol: a registration with host secret 0 is refused", hijack.mCore.getStats().mDroppedInvalid >= 1);
+			}
+			{
+				// One address that changes its source port for every datagram is still one sender
+				RelayFixture rotate;
+				rotate.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+				for (int i = 0; i < 9000; ++i)
+					rotate.hello(RelayFixture::ep(0x0f000001, (uint16_t)(1000 + (i % 60000))), RelayProtocol::CLIENT_JOIN, lobby, key ^ 0x77);
+				const size_t sentBefore = rotate.mSent.size();
+				rotate.hello(RelayFixture::ep(0x0f000001, 61000), RelayProtocol::CLIENT_JOIN, lobby, key);		// Right key, yet another port
+				const Relay::Endpoint otherIP = RelayFixture::ep(0x0f000002, 1000);
+				rotate.mNow += 1.0;
+				rotate.hello(otherIP, RelayProtocol::CLIENT_JOIN, lobby, key);
+				report("relay limits: rotating the source port does not give a fresh allowance (one remembered address, wrong keys counted per IP, blocked for all its ports)",
+					rotate.mCore.getSourceCount() <= 3 && rotate.mCore.getStats().mWrongKeys == (uint64_t)rotate.mCore.getLimits().mMaxBadKeys && rotate.mSent.size() == sentBefore + 1 && rotate.clientToken(otherIP) != 0);
+
+				// A flood from thousands of different addresses must not shut real newcomers out once it is over
+				RelayFixture full;
+				for (int i = 0; i < 9000; ++i)
+					full.hello(RelayFixture::ep(0x10000000 + (uint32_t)i, 9000), RelayProtocol::CLIENT_JOIN, 5, key);
+				const bool filled = full.mCore.getSourceCount() >= full.mCore.getLimits().mMaxSources;
+				full.mNow += 11.0;
+				const Relay::Endpoint newcomer = RelayFixture::ep(0x20000001, 9000);
+				full.hello(newcomer, RelayProtocol::HOST_REGISTER, lobby, key);
+				report("relay limits: after a flood from thousands of addresses filled the table, a real newcomer is served again a few seconds later", filled && full.hostToken(newcomer) != 0);
+			}
+
 			// Amplification: no answer is ever larger than the request
 			RelayFixture amp;
 			bool smaller = true;
 			std::vector<uint8_t> request;
-			RelayProtocol::buildHello(request, RelayProtocol::HOST_REGISTER, lobby, key);
+			RelayProtocol::buildHostHello(request, lobby, key, 0x1234567812345678ull);
 			amp.send(hostEp, request);
 			smaller = smaller && !amp.mSent.empty() && amp.mSent.back().mData.size() <= request.size();
 			RelayProtocol::buildHello(request, RelayProtocol::CLIENT_JOIN, lobby, key);
