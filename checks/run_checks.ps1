@@ -57,6 +57,9 @@ $sourceMod = Join-Path $root "DropInCoop"
 $harnessSource = Join-Path $checksDir "harness\ChecksHarness"
 $reportPath = if ($RuntimeOnly -and $EngineRoot) { Join-Path $checksDir "online_stable_runtime_report.txt" } else { Join-Path $checksDir "last_report.txt" }
 $recoveryPath = Join-Path $checksDir '.run-recovery.json'
+# The engine honours the developer switches (S3AIR_NETPLAY, S3AIR_LOGNAME, ...) only while this marker file lies next to the executable.
+# This run creates it for its own duration and removes it again; the release package never contains it (make_package.ps1 refuses to ship it).
+$testHooksMarker = Join-Path $bin 'testhooks.enabled'
 $gameExitCode = 0
 
 $results = New-Object System.Collections.ArrayList
@@ -198,9 +201,25 @@ function Get-EntryText($entry)
 
 function New-SessionCode
 {
+	# 8 random characters (the first one is never 0) plus one check character, as the game's NetplayCodes::makeSessionCode writes them
 	$alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-	$chars = @(1..8 | ForEach-Object { $alphabet[(Get-Random -Maximum 32)] })
-	return ((-join $chars[0..3]) + "-" + (-join $chars[4..7]))
+	$indices = @(1..8 | ForEach-Object { Get-Random -Maximum 32 })
+	if ($indices[0] -eq 0) { $indices[0] = 1 }
+	$sum = 7
+	for ($i = 0; $i -lt 8; $i++) { $sum += (2 * $i + 1) * $indices[$i] }
+	$chars = @($indices | ForEach-Object { $alphabet[$_] })
+	return ((-join $chars[0..3]) + "-" + (-join $chars[4..7]) + $alphabet[$sum -band 31])
+}
+
+function New-Secret
+{
+	# A random 30 bit join secret as 8 hexadecimal digits (developer test modes hostdirect: and joindirect:)
+	return ('{0:x8}' -f (Get-Random -Minimum 1 -Maximum 0x3fffffff))
+}
+
+function Get-NetLog([string]$suffix)
+{
+	return Read-SharedText (Join-Path $appdata ("logfile" + $suffix + ".txt"))
 }
 
 function Get-OnlineLines
@@ -373,6 +392,7 @@ Write-Host ""
 try
 {
 	Assert-NoGameRunning
+	if (Test-Path -LiteralPath $testHooksMarker) { Remove-Item -LiteralPath $testHooksMarker -Force }		# Left behind by an interrupted run
 	if (Test-Path -LiteralPath $recoveryPath) {
 		$recovery = Get-Content -Raw -LiteralPath $recoveryPath | ConvertFrom-Json
 		[IO.File]::WriteAllText((Join-Path $game 'config.json'), $recovery.Config)
@@ -473,6 +493,9 @@ try
 
 			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|_devtools|DropInTest' })
 			Add-Result "A10" "No developer test mods in the package" ($testLeftovers.Count -eq 0) ($testLeftovers -join ", ")
+
+				$markerEntries = @($entries.Keys | Where-Object { $_ -match '(?i)testhooks\.enabled' })
+				Add-Result "A12" "The package does not contain the developer test-hooks marker file" ($markerEntries.Count -eq 0) ($markerEntries -join ", ")
 		}
 		finally
 		{
@@ -535,6 +558,7 @@ try
 	$savedConfigText = Read-SharedText (Join-Path $game "config.json")
 	$configPath = Join-Path $game "config.json"
 	@{ Config=$savedConfigText; Mods=$savedModsText; HadMods=($null -ne $savedModsText) } | ConvertTo-Json | Set-Content -LiteralPath $recoveryPath -Encoding utf8
+	Set-Content -LiteralPath $testHooksMarker -Value 'Developer test hooks are enabled while a check run is active. Created and removed by checks\run_checks.ps1.' -Encoding ascii
 
 	try
 	{
@@ -614,10 +638,10 @@ try
 					return $proc
 				}
 				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWin { [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hgt, bool repaint); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; } }' -ErrorAction SilentlyContinue
-				$uiHost = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "hostlan"; "S3AIR_LOGNAME" = "_host" }
+				$uiHost = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "hostlan"; "S3AIR_LOBBY_CODE" = $uiCode; "S3AIR_LOGNAME" = "_host" }
 				Start-Sleep -Seconds 12
 				$uiHost.Refresh(); [void][LobbyWin]::MoveWindow($uiHost.MainWindowHandle, 0, 0, 760, 480, $true)
-				$uiFriend = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "join"; "S3AIR_LOBBY_CODE" = "127.0.0.1"; "S3AIR_LOBBY_AUTOREADY" = "1"; "S3AIR_LOGNAME" = "_friend" }
+				$uiFriend = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "join"; "S3AIR_LOBBY_CODE" = $uiCode; "S3AIR_LOBBY_AUTOREADY" = "1"; "S3AIR_LOGNAME" = "_friend" }
 				Start-Sleep -Seconds 8
 				$uiFriend.Refresh(); [void][LobbyWin]::MoveWindow($uiFriend.MainWindowHandle, 780, 0, 760, 480, $true)
 				$uiReady = Wait-Until { (Read-SharedText $hostLogFile) -match "lobby: all players are ready" } 90
@@ -690,6 +714,38 @@ try
 				Start-Sleep -Seconds 5
 				$stillRunning = -not $packageProcess.HasExited
 				Add-Result "U3" "The unzipped package keeps running for 5 seconds after start" $stillRunning ""
+
+					# A player's computer may have leftover developer variables. The packaged game must ignore them (no marker file next to it),
+					# and with the marker file the very same variables must work (so that the first result means something).
+					$probeVariables = @{ 'S3AIR_NETPLAY' = ('hostlan:' + (New-SessionCode)); 'S3AIR_LOGNAME' = '_hookprobe'; 'S3AIR_NETPLAY_DUMP' = '1'; 'S3AIR_NETPLAY_DEBUG' = '1'; 'S3AIR_FORCE_ROLE' = '1' }
+					$probeLog = Join-Path $appdata 'logfile_hookprobe.txt'
+					$probeOnlineLog = Join-Path $appdata 'online_log_hookprobe.txt'
+					$probeMarker = Join-Path $packageDir 'testhooks.enabled'
+					foreach ($withMarker in @($false, $true))
+					{
+						Stop-StartedProcesses
+						Remove-Item -LiteralPath $gameLog, $probeLog, $probeOnlineLog, $onlineLog -Force -ErrorAction SilentlyContinue
+						if ($withMarker) { Set-Content -LiteralPath $probeMarker -Value 'test hooks' -Encoding ascii } elseif (Test-Path -LiteralPath $probeMarker) { Remove-Item -LiteralPath $probeMarker -Force }
+						foreach ($key in $probeVariables.Keys) { [Environment]::SetEnvironmentVariable($key, [string]$probeVariables[$key], 'Process') }
+						try { $probeProcess = Start-Process -FilePath $packageExe.FullName -WorkingDirectory $packageDir -PassThru }
+						finally { foreach ($key in $probeVariables.Keys) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') } }
+						[void]$startedProcesses.Add($probeProcess)
+						$null = Wait-Until { ((Read-SharedText $gameLog) -match 'Ready to go') -or ((Read-SharedText $probeLog) -match 'Ready to go') } 60
+						Start-Sleep -Seconds 14		# Hosting would have written its online log by now
+						$defaultLogText = Read-SharedText $gameLog
+						$hookLogExists = Test-Path -LiteralPath $probeLog
+						$hostingStarted = (Test-Path -LiteralPath $probeOnlineLog) -or (Test-Path -LiteralPath $onlineLog)
+						if ($withMarker)
+						{
+							Add-Result "U5" "Control: with the marker file next to the same package, the same variables are honoured" ($hookLogExists -and $hostingStarted) ("separate log file used: $hookLogExists, hosting started: $hostingStarted")
+						}
+						else
+						{
+							Add-Result "U4" "The packaged game ignores developer environment variables (no log renaming, no hosting, no dumps)" (($defaultLogText -match 'Ready to go') -and -not $hookLogExists -and -not $hostingStarted -and -not ($defaultLogText -match 'Netplay host')) ("default log used: " + ($defaultLogText -match 'Ready to go') + ", separate log file: $hookLogExists, hosting started: $hostingStarted")
+						}
+					}
+					Stop-StartedProcesses
+					if (Test-Path -LiteralPath $probeMarker) { Remove-Item -LiteralPath $probeMarker -Force }
 			}
 			catch
 			{
@@ -728,6 +784,151 @@ try
 			Stop-StartedProcesses
 			Save-RunLogs "D4"
 			Add-Result "D4" "A wrong or unknown code ends with a message, not a hang" $gaveUp ""
+			}
+
+			if (Wants 'S')
+			{
+				Write-Step 'S. Join secret: a wrong code is refused by the host, the right code gets in'
+				Set-ActiveMods @('DropInCoop')
+				Stop-StartedProcesses
+				$secret = New-Secret
+				$wrongSecret = New-Secret
+				while ($wrongSecret -eq $secret) { $wrongSecret = New-Secret }
+				$secretHostLog = '_shost'
+				$secretFriendLog = '_sfriend'
+				Remove-Item (Join-Path $appdata 'logfile_shost.txt'), (Join-Path $appdata 'logfile_sfriend.txt') -ErrorAction SilentlyContinue
+
+				$secretHost = Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$secret"; 'S3AIR_LOGNAME' = $secretHostLog }
+				Start-Sleep -Seconds 12
+				$wrongFriend = Start-GameProcess @{ 'S3AIR_NETPLAY' = "joindirect:$wrongSecret"; 'S3AIR_LOGNAME' = $secretFriendLog }
+				$refused = Wait-Until { (Get-NetLog $secretFriendLog) -match 'Netplay failure: WRONG_CODE' } 70
+				$hostText = Get-NetLog $secretHostLog
+				$friendText = Get-NetLog $secretFriendLog
+				Add-Result 'S1' 'A friend whose code has the wrong secret is refused by the host and told that the code is wrong' ($refused -and $hostText -match 'refused a friend, the code was wrong') ("friend told WRONG_CODE: $refused, host refused: " + ($hostText -match 'refused a friend, the code was wrong'))
+				Add-Result 'S2' 'The refused friend gets no player slot and no game' (-not ($friendText -match 'game state loaded|received start game packet') -and -not ($hostText -match 'proved the code')) ''
+				Stop-Process -Id $wrongFriend.Id -Force -ErrorAction SilentlyContinue
+				Start-Sleep -Seconds 2
+				Remove-Item (Join-Path $appdata 'logfile_sfriend.txt') -ErrorAction SilentlyContinue
+
+				# The same host, a friend with the right code (the earlier refusal must not have hurt the host)
+				$rightFriend = Start-GameProcess @{ 'S3AIR_NETPLAY' = "joindirect:$secret"; 'S3AIR_LOGNAME' = $secretFriendLog }
+				$secretJoined = Wait-Until { (Get-NetLog $secretFriendLog) -match 'game state loaded, now at frame' } 90
+				$hostText = Get-NetLog $secretHostLog
+				$friendText = Get-NetLog $secretFriendLog
+				Add-Result 'S3' 'A friend with the right secret gets in, both sides prove the code, and the game loads' ($secretJoined -and $friendText -match 'the host proved the code' -and $hostText -match 'a friend proved the code and is player 2') ("joined: $secretJoined")
+				Copy-Item (Join-Path $appdata 'logfile_shost.txt') (Join-Path $checksDir 'last_logs\S-logfile_host.txt') -Force -ErrorAction SilentlyContinue
+				Copy-Item (Join-Path $appdata 'logfile_sfriend.txt') (Join-Path $checksDir 'last_logs\S-logfile_friend.txt') -Force -ErrorAction SilentlyContinue
+				Stop-StartedProcesses
+			}
+
+			if (Wants 'X')
+			{
+				Write-Step 'X. Clear reasons: what the player is told when joining does not work'
+				Set-ActiveMods @('DropInCoop')
+				$lastLogs = Join-Path $checksDir 'last_logs'
+
+				function Remove-NetLogs([string[]]$suffixes)
+				{
+					foreach ($suffix in $suffixes) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+				}
+				function Save-NetLog([string]$suffix, [string]$tag)
+				{
+					Copy-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")) (Join-Path $lastLogs ("X-" + $tag + ".txt")) -Force -ErrorAction SilentlyContinue
+				}
+
+				# X1: the matchmaking server cannot be reached (all UDP traffic of this one process is dropped)
+				Stop-StartedProcesses
+				Remove-NetLogs @('_xfriend')
+				$x1 = Start-GameProcess @{ 'S3AIR_NETPLAY' = ('joinlan:' + (New-SessionCode)); 'S3AIR_NET_LOSS' = '100'; 'S3AIR_LOGNAME' = '_xfriend' }
+				$x1ok = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: SERVER_UNREACHABLE' } 60
+				Add-Result 'X1' 'Server unreachable: the friend is told so after about 15 seconds' $x1ok ''
+				Save-NetLog '_xfriend' 'server-unreachable'
+				Stop-StartedProcesses
+
+				# X2: nobody hosts with this code (needs the public matchmaking server to answer)
+				Remove-NetLogs @('_xfriend')
+				$x2 = Start-GameProcess @{ 'S3AIR_NETPLAY' = ('joinlan:' + (New-SessionCode)); 'S3AIR_LOGNAME' = '_xfriend' }
+				$x2ok = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: (WRONG_CODE|SERVER_UNREACHABLE)' } 80
+				$x2text = Get-NetLog '_xfriend'
+				Add-Result 'X2' 'Wrong code: nobody hosts with it, the friend is told to check the code' ($x2ok -and $x2text -match 'Netplay failure: WRONG_CODE') $(if ($x2text -match 'Netplay failure: SERVER_UNREACHABLE') { 'the public server did not answer, so the wrong-code message could not be reached' } else { '' })
+				Save-NetLog '_xfriend' 'wrong-code'
+				Stop-StartedProcesses
+
+				# X3: no host listening at the address (a blocked connection looks the same): timeout with the router and firewall hint
+				Remove-NetLogs @('_xfriend')
+				$x3 = Start-GameProcess @{ 'S3AIR_NETPLAY' = ('joindirect:' + (New-Secret)); 'S3AIR_LOGNAME' = '_xfriend' }
+				$x3ok = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: BLOCKED_OR_TIMEOUT' } 60
+				Add-Result 'X3' 'Blocked or no answer: the friend is told that a router or firewall probably blocks the connection' $x3ok ''
+				Save-NetLog '_xfriend' 'blocked'
+				Stop-StartedProcesses
+
+				# X4 and X5: a different game version, different mods (a developer switch makes the friend look different)
+				foreach ($case in @(@{ Id = 'X4'; Switch = 'S3AIR_NETPLAY_FAKE_BUILD'; Reason = 'VERSION_MISMATCH'; Title = 'Different game version' }, @{ Id = 'X5'; Switch = 'S3AIR_NETPLAY_FAKE_MODS'; Reason = 'MOD_MISMATCH'; Title = 'Different mods' }))
+				{
+					Remove-NetLogs @('_xhost', '_xfriend')
+					$caseSecret = New-Secret
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$caseSecret"; 'S3AIR_LOGNAME' = '_xhost' })
+					Start-Sleep -Seconds 12
+					$caseFriendVars = @{ 'S3AIR_NETPLAY' = "joindirect:$caseSecret"; 'S3AIR_LOGNAME' = '_xfriend' }
+					$caseFriendVars[$case.Switch] = '1'
+					[void](Start-GameProcess $caseFriendVars)
+					$caseOk = Wait-Until { (Get-NetLog '_xfriend') -match ('Netplay failure: ' + $case.Reason) } 80
+					$caseJoined = (Get-NetLog '_xfriend') -match 'game state loaded, now at frame'
+					Add-Result $case.Id ($case.Title + ': the friend is told, and does not join') ($caseOk -and -not $caseJoined) ''
+					Save-NetLog '_xfriend' ($case.Reason.ToLower())
+					Stop-StartedProcesses
+				}
+
+				# X6: lobby full, and Retry. The host has room for one friend only. A second friend is refused ("lobby full") and presses Retry by itself (test switch);
+				# when the first friend leaves, the retry gets in.
+				$lobbyCode = New-SessionCode
+				Remove-NetLogs @('_xhost', '_xfriend', '_xfriend2')
+				[void](Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'hostlan'; 'S3AIR_LOBBY_CODE' = $lobbyCode; 'S3AIR_NETPLAY_MAXCLIENTS' = '1'; 'S3AIR_LOGNAME' = '_xhost' })
+				Start-Sleep -Seconds 14
+				$firstFriend = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $lobbyCode; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOGNAME' = '_xfriend' }
+				$firstIn = Wait-Until { (Get-NetLog '_xhost') -match 'lobby: player 2 is ready' } 90
+				$secondFriend = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $lobbyCode; 'S3AIR_LOBBY_AUTORETRY' = '1'; 'S3AIR_LOGNAME' = '_xfriend2' }
+				$fullTold = Wait-Until { (Get-NetLog '_xfriend2') -match 'Netplay failure: LOBBY_FULL' } 90
+				Start-Sleep -Seconds 3
+				$secondText = Get-NetLog '_xfriend2'
+				$fullShown = $secondText -match 'showing the problem to the player \(LOBBY_FULL\) with a Retry button'
+				Save-ScreenPicture (Join-Path $lastLogs 'X-lobby-full-screen.png')
+				Add-Result 'X6' 'Lobby full: the second friend is told that the lobby is full, with a Retry button' ($firstIn -and $fullTold -and $fullShown) ("first friend in: $firstIn, told: $fullTold, retry shown: $fullShown")
+				Stop-Process -Id $firstFriend.Id -Force -ErrorAction SilentlyContinue
+				$retryIn = Wait-Until { (Get-NetLog '_xfriend2') -match 'the player pressed Retry' -and (Get-NetLog '_xfriend2') -match 'lobby: you are slot 2' } 120
+				Add-Result 'X7' 'Retry works: after a place became free, pressing Retry gets the friend into the lobby' $retryIn ''
+				Save-NetLog '_xfriend2' 'lobby-full-retry'
+				Save-NetLog '_xhost' 'lobby-host'
+				Stop-StartedProcesses
+
+				# X10: a host who cannot reach the matchmaking server gives up with a message after about 25 seconds (it used to wait forever)
+					Remove-NetLogs @('_xhost')
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = ('hostserver:' + (New-Secret)); 'S3AIR_NET_LOSS' = '100'; 'S3AIR_LOGNAME' = '_xhost' })
+					$x10ok = Wait-Until { (Get-NetLog '_xhost') -match 'Netplay failure: SERVER_UNREACHABLE' } 70
+					Add-Result 'X10' 'A host who cannot reach the matchmaking server is told so, instead of waiting forever' $x10ok ''
+					Save-NetLog '_xhost' 'host-server-unreachable'
+					Stop-StartedProcesses
+
+					# X8: the host closes its lobby (gracefully); X9: the host disappears without a word (the process is ended)
+				foreach ($case in @(@{ Id = 'X8'; Close = $true; Title = 'Host closed the lobby' }, @{ Id = 'X9'; Close = $false; Title = 'Host stopped answering' }))
+				{
+					$closeCode = New-SessionCode
+					Remove-NetLogs @('_xhost', '_xfriend')
+					$hostVars = @{ 'S3AIR_LOBBY_OPEN' = 'hostlan'; 'S3AIR_LOBBY_CODE' = $closeCode; 'S3AIR_LOGNAME' = '_xhost' }
+					if ($case.Close) { $hostVars['S3AIR_NETPLAY_CLOSE_AFTER'] = '4' }
+					$closingHost = Start-GameProcess $hostVars
+					Start-Sleep -Seconds 14
+					[void](Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'join'; 'S3AIR_LOBBY_CODE' = $closeCode; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_LOGNAME' = '_xfriend' })
+					$inLobby = Wait-Until { (Get-NetLog '_xfriend') -match 'lobby: you are slot 2' } 90
+					if (-not $case.Close -and $inLobby) { Start-Sleep -Seconds 3; Stop-Process -Id $closingHost.Id -Force -ErrorAction SilentlyContinue }
+					$closedTold = Wait-Until { (Get-NetLog '_xfriend') -match 'Netplay failure: HOST_CLOSED' } 90
+					Start-Sleep -Seconds 2
+					$closedText = Get-NetLog '_xfriend'
+					Save-ScreenPicture (Join-Path $lastLogs ('X-' + $case.Id + '-screen.png'))
+					Add-Result $case.Id ($case.Title + ': the friend in the lobby is told, with a Retry button') ($inLobby -and $closedTold -and $closedText -match 'showing the problem to the player \(HOST_CLOSED\) with a Retry button') ("in lobby: $inLobby, told: $closedTold")
+					Save-NetLog '_xfriend' ('host-closed-' + $case.Id.ToLower())
+					Stop-StartedProcesses
+				}
 			}
 
 			if (Wants 'M')
@@ -1327,6 +1528,7 @@ try
 		if (Test-Path $partyHarnessInstalled) { Remove-Item -LiteralPath $partyHarnessInstalled -Recurse -Force }
 		$netPartyHarnessInstalled = Join-Path $appdata 'mods\NetPartyHarness'
 		if (Test-Path $netPartyHarnessInstalled) { Remove-Item -LiteralPath $netPartyHarnessInstalled -Recurse -Force }
+		if (Test-Path -LiteralPath $testHooksMarker) { Remove-Item -LiteralPath $testHooksMarker -Force }
 		Write-Host ""
 		Write-Host "Your mod list, config and settings were put back." -ForegroundColor DarkGray
 	}

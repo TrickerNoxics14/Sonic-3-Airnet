@@ -29,6 +29,8 @@
 #include "oxygen/application/video/VideoOut.h"
 #include "oxygen/network/netplay/NetplayManager.h"
 #include "oxygen/network/netplay/NetplayCodes.h"
+#include "oxygen/network/netplay/NetplayAuth.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen/menu/imgui/ImGuiIntegration.h"
 #include "oxygen/helper/Logging.h"
 #include "oxygen/helper/Profiling.h"
@@ -547,13 +549,23 @@ void Application::update(float timeElapsed)
 		if (!handled && !mGameLoader->isLoading())
 		{
 			handled = true;
-			const char* env = getenv("S3AIR_NETPLAY");
+			const char* env = TestHooks::getEnv("S3AIR_NETPLAY");
 			if (nullptr != env)
 			{
 				const std::string mode = env;
 				NetplayManager& manager = NetplayManager::instance();
 				if (mode == "host")
 					manager.setupAsHost(false, NetplayManager::DEFAULT_HOST_PORT);
+				else if (mode.compare(0, 11, "hostdirect:") == 0)
+				{
+					// Developer test: a host that is joined by IP, with the given secret (8 hexadecimal digits)
+					manager.setupAsHostWithSecret(NetplayManager::DEFAULT_HOST_PORT, (uint32)(strtoul(mode.c_str() + 11, nullptr, 16) & 0x3fffffff));
+				}
+				else if (mode.compare(0, 11, "joindirect:") == 0)
+				{
+					// Developer test: join 127.0.0.1 with the given secret (8 hexadecimal digits)
+					manager.startJoinDirect("127.0.0.1", NetplayManager::DEFAULT_HOST_PORT, (uint32)(strtoul(mode.c_str() + 11, nullptr, 16) & 0x3fffffff));
+				}
 				else if (mode.size() >= 8 && (mode.compare(0, 8, "hostlan:") == 0 || mode.compare(0, 8, "joinlan:") == 0))
 				{
 					uint64 sessionID = 0;
@@ -577,7 +589,7 @@ void Application::update(float timeElapsed)
 					manager.startJoinViaServer();
 				}
 				else if (mode.compare(0, 5, "join:") == 0)
-					manager.startJoinDirect(mode.substr(5), NetplayManager::DEFAULT_HOST_PORT);
+					manager.startJoinDirect(mode.substr(5), NetplayManager::DEFAULT_HOST_PORT, NetplayAuth::secretFromSession(manager.mSessionID));
 			}
 		}
 	}

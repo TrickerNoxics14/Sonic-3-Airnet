@@ -9,23 +9,25 @@
 #include "oxygen/pch.h"
 #include "oxygen/network/netplay/NetplayHost.h"
 #include "oxygen/network/netplay/NetplayManager.h"
+#include "oxygen/network/netplay/NetplayAuth.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/input/ControlsIn.h"
 #include "oxygen/application/video/VideoOut.h"
 #include "oxygen/simulation/Simulation.h"
 #include "oxygen/simulation/SimulationState.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include <algorithm>
 
 namespace
 {
-	// True if any player connection is established (slot 0 may have left while others are still waiting)
+	// True if any friend is connected and authenticated (the first one may have left while others are still waiting)
 	template<typename T>
 	bool anyPlayerConnected(const std::vector<T*>& connections)
 	{
 		for (const T* connection : connections)
 		{
-			if (nullptr != connection && connection->getState() == NetConnection::State::CONNECTED)
+			if (nullptr != connection && connection->isActive())
 				return true;
 		}
 		return false;
@@ -37,6 +39,9 @@ NetplayHost::NetplayHost(ConnectionManager& connectionManager, NetplayManager& n
 	mConnectionManager(connectionManager),
 	mNetplayManager(netplayManager)
 {
+	// Developer test: fewer free slots, to see what a friend gets told when the lobby is full
+	if (const char* maxClients = TestHooks::getEnv("S3AIR_NETPLAY_MAXCLIENTS"))
+		mMaxClients = std::max(0, std::min(MAX_PLAYERS - 1, atoi(maxClients)));
 }
 
 NetplayHost::~NetplayHost()
@@ -47,11 +52,14 @@ NetplayHost::~NetplayHost()
 	// Destroy all connections to clients
 	for (size_t k = 0; k < mPlayerConnections.size(); ++k)
 	{
-		// TODO: This just destroys the connection, but doesn't tell the client about it
-		mPlayerConnections[k]->clear();
+		// Tell the friend that the host is gone (so the lobby can say so right away instead of waiting for a timeout)
+		mPlayerConnections[k]->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 		delete mPlayerConnections[k];
 	}
 	mPlayerConnections.clear();
+	for (PlayerConnection* connection : mRetiredConnections)
+		delete connection;
+	mRetiredConnections.clear();
 }
 
 void NetplayHost::registerAtServer()
@@ -80,22 +88,16 @@ NetConnection* NetplayHost::createNetConnection(const SocketAddress& senderAddre
 			mKnownPeerIPs.push_back(senderAddress.getIP());
 	}
 
-	// A dropped friend's slot must be free even while simulation is paused.
+	// Connections that ended are removed right away (a dropped friend's slot must be free even while the simulation is paused)
 	const auto oldConnections = mPlayerConnections;
 	for (PlayerConnection* connection : oldConnections)
 		if (connection->getState() == NetConnection::State::DISCONNECTED || connection->getState() == NetConnection::State::EMPTY)
-			destroyNetConnection(*connection);
-	uint8 freeIndex = 1;
-	for (; freeIndex < MAX_PLAYERS; ++freeIndex)
-	{
-		bool used = false;
-		for (const PlayerConnection* connection : mPlayerConnections)
-			used |= connection->mPlayerIndex == freeIndex;
-		if (!used)
-			break;
-	}
-	if (freeIndex == MAX_PLAYERS)
+			retireConnection(connection);
+
+	// Strangers who never prove anything must not be able to pile up connections (the player slot is only assigned after the proof)
+	if (mPlayerConnections.size() >= (size_t)(MAX_PLAYERS * 2))
 		return nullptr;
+
 	// Remove from connecting players
 	for (size_t k = 0; k < mConnectingPlayers.size(); ++k)
 	{
@@ -110,8 +112,7 @@ NetConnection* NetplayHost::createNetConnection(const SocketAddress& senderAddre
 	// Create new connection
 	PlayerConnection* connection = new PlayerConnection();
 	connection->mReadyForGame = false;		// Gets set once the player received the current game, see "startGame" and "updateJoinTransfer"
-
-	connection->mPlayerIndex = freeIndex;
+	connection->mAuthenticated = false;		// A player slot is assigned once the friend proved that it knows the code, see "handleJoinAuth"
 
 	mPlayerConnections.push_back(connection);
 	return connection;
@@ -127,9 +128,168 @@ void NetplayHost::destroyNetConnection(NetConnection& connection)
 	vectorRemoveAll(mPlayerConnections, &connection);
 }
 
+void NetplayHost::retireConnection(PlayerConnection* connection)
+{
+	if (nullptr == connection || std::find(mPlayerConnections.begin(), mPlayerConnections.end(), connection) == mPlayerConnections.end())
+		return;
+	if (mJoiningConnection == connection)
+	{
+		mJoiningConnection = nullptr;
+		mJoinPhase = JoinPhase::NONE;
+	}
+	connection->clear();
+	vectorRemoveAll(mPlayerConnections, connection);
+	mRetiredConnections.push_back(connection);		// Deleted in the next update: packets that are still queued may refer to it
+}
+
+int NetplayHost::getAuthenticatedCount() const
+{
+	int count = 0;
+	for (const PlayerConnection* connection : mPlayerConnections)
+		count += (nullptr != connection && connection->isActive()) ? 1 : 0;
+	return count;
+}
+
+void NetplayHost::refuseConnection(PlayerConnection& connection, uint8 result)
+{
+	JoinReplyPacket reply;
+	reply.mResult = result;
+	connection.sendPacket(reply, NetConnection::SendFlags::NONE);
+	connection.mRefuseTimer = 0.0f;		// Disconnected a moment later, so that the answer can arrive
+}
+
+void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPacket& packet)
+{
+	if (connection.mAuthenticated || !connection.mChallengeSent || connection.mRefuseTimer >= 0.0f)
+		return;
+
+	const std::string ip = connection.getRemoteAddress().getIP();
+	int& failures = mFailedAuthByIP[ip];
+	if (failures >= 8)
+	{
+		// Somebody keeps guessing: no more answers
+		connection.mRefuseTimer = 1000.0f;
+		return;
+	}
+
+	if (!NetplayAuth::verifyFriendProof(mNetplayManager.getHostSecret(), connection.mHostNonce, packet.mClientNonce, packet.mProof))
+	{
+		++failures;
+		RMX_LOG_INFO("Netplay host: refused a friend, the code was wrong (" << failures << ". wrong attempt from " << ip << ")");
+		refuseConnection(connection, (uint8)NetplayAuth::JoinResult::WRONG_CODE);
+		return;
+	}
+
+	// Pick the player slot: the one the friend had before a connection loss if that is free (or still held by the old connection of the same address), else the lowest free one
+	auto holderOf = [this, &connection](int slot) -> PlayerConnection*
+	{
+		for (PlayerConnection* other : mPlayerConnections)
+			if (other != &connection && other->mAuthenticated && other->mPlayerIndex == slot && other->getState() != NetConnection::State::DISCONNECTED && other->getState() != NetConnection::State::EMPTY)
+				return other;		// (a connection that already ended does not hold its slot any more)
+		return nullptr;
+	};
+	int slot = 0;
+	if (packet.mPreferredSlot >= 1 && packet.mPreferredSlot <= mMaxClients)
+	{
+		PlayerConnection* holder = holderOf(packet.mPreferredSlot);
+		if (nullptr == holder)
+		{
+			slot = packet.mPreferredSlot;
+		}
+		else if (holder->getRemoteAddress().getIP() == ip)
+		{
+			// The old connection of this friend has not timed out yet: it is the same friend coming back
+			RMX_LOG_INFO("Netplay host: friend came back, taking over its old player slot " << (int)(packet.mPreferredSlot + 1));
+			holder->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			retireConnection(holder);
+			slot = packet.mPreferredSlot;
+		}
+	}
+	for (int candidate = 1; slot == 0 && candidate <= mMaxClients; ++candidate)
+		if (nullptr == holderOf(candidate))
+			slot = candidate;
+
+	if (slot == 0)
+	{
+		RMX_LOG_INFO("Netplay host: refused a friend, the lobby is full");
+		refuseConnection(connection, (uint8)NetplayAuth::JoinResult::LOBBY_FULL);
+		return;
+	}
+
+	connection.mAuthenticated = true;
+	connection.mPlayerIndex = (uint8)slot;
+	JoinReplyPacket reply;
+	reply.mResult = (uint8)NetplayAuth::JoinResult::ACCEPTED;
+	reply.mSlot = (uint8)slot;
+	reply.mProof = NetplayAuth::computeProof('H', mNetplayManager.getHostSecret(), connection.mHostNonce, packet.mClientNonce);
+	connection.sendPacket(reply, NetConnection::SendFlags::NONE);
+	RMX_LOG_INFO("Netplay host: a friend proved the code and is player " << (slot + 1));
+}
+
+void NetplayHost::updateHandshakes(float deltaSeconds)
+{
+	const std::vector<PlayerConnection*> connections = mPlayerConnections;
+	for (PlayerConnection* connection : connections)
+	{
+		const NetConnection::State state = connection->getState();
+		if (state == NetConnection::State::DISCONNECTED || state == NetConnection::State::EMPTY)
+		{
+			retireConnection(connection);
+			continue;
+		}
+		if (connection->mAuthenticated)
+			continue;
+
+		connection->mPendingSeconds += deltaSeconds;
+		if (connection->mRefuseTimer >= 0.0f)
+		{
+			connection->mRefuseTimer += deltaSeconds;
+			if (connection->mRefuseTimer > 1.5f)
+			{
+				connection->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+				retireConnection(connection);
+			}
+			continue;
+		}
+
+		if (state == NetConnection::State::CONNECTED && !connection->mChallengeSent)
+		{
+			JoinChallengePacket challenge;
+			connection->mHostNonce = NetplayAuth::randomNonce();
+			challenge.mHostNonce = connection->mHostNonce;
+			connection->sendPacket(challenge, NetConnection::SendFlags::NONE);
+			connection->mChallengeSent = true;
+		}
+		if (connection->mPendingSeconds > 10.0f)
+		{
+			RMX_LOG_INFO("Netplay host: dropped a connection that did not prove the code in time");
+			connection->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			retireConnection(connection);
+		}
+	}
+}
+
 void NetplayHost::updateConnection(float deltaSeconds)
 {
 	EngineServerClient& engineServerClient = EngineServerClient::instance();
+
+	for (PlayerConnection* connection : mRetiredConnections)
+		delete connection;
+	mRetiredConnections.clear();
+	updateHandshakes(deltaSeconds);
+
+	// Do not wait forever for the matchmaking server
+	if (mHostState != mTimedHostState)
+	{
+		mTimedHostState = mHostState;
+		mHostStateTimer = 0.0f;
+	}
+	mHostStateTimer += deltaSeconds;
+	if ((mHostState == HostState::CONNECT_TO_SERVER || (mHostState == HostState::REGISTERED && !mRegistrationRequest.hasResponse())) && mHostStateTimer > 25.0f)
+	{
+		mHostState = HostState::FAILED;
+		mNetplayManager.reportFailure(NetplayFailure::Reason::SERVER_UNREACHABLE);
+	}
 
 	switch (mHostState)
 	{
@@ -187,6 +347,7 @@ void NetplayHost::updateConnection(float deltaSeconds)
 				if (!mRegistrationRequest.mResponse.mSuccess)
 				{
 					mHostState = HostState::FAILED;
+					mNetplayManager.reportFailure(NetplayFailure::Reason::SERVER_UNREACHABLE, "The server did not accept this lobby code. Create a new lobby.");
 					break;
 				}
 			}
@@ -208,7 +369,7 @@ void NetplayHost::updateConnection(float deltaSeconds)
 	{
 		for (PlayerConnection* connection : mPlayerConnections)
 		{
-			if (connection->getState() == NetConnection::State::CONNECTED && !connection->mReadyForGame)
+			if (connection->isActive() && !connection->mReadyForGame)
 			{
 				RMX_LOG_INFO("Netplay host: another player joins the running game");
 				mJoiningConnection = connection;
@@ -284,10 +445,19 @@ void NetplayHost::startGame()
 	RMX_LOG_INFO("Netplay host: starting game");
 
 	// Is a game already running? Then the client joins that game, which needs the current game state to be sent over
-	if (Application::instance().getSimulation().isRunning() && !mPlayerConnections.empty())
+	PlayerConnection* firstActive = nullptr;
+	for (PlayerConnection* connection : mPlayerConnections)
+	{
+		if (connection->isActive())
+		{
+			firstActive = connection;
+			break;
+		}
+	}
+	if (Application::instance().getSimulation().isRunning() && nullptr != firstActive)
 	{
 		RMX_LOG_INFO("Netplay host: a game is already running, the client will join it");
-		mJoiningConnection = mPlayerConnections[0];
+		mJoiningConnection = firstActive;
 		mJoiningConnection->mReadyForGame = false;
 		mJoinPhase = JoinPhase::WAITING_FOR_FRAME_BOUNDARY;
 		mJoinTimer = 0.0f;
@@ -322,6 +492,8 @@ void NetplayHost::startGame()
 	// Send to players
 	for (PlayerConnection* connection : mPlayerConnections)
 	{
+		if (!connection->mAuthenticated)
+			continue;
 		connection->mReadyForGame = true;
 		packet.mPlayerIndex = connection->mPlayerIndex;
 		connection->sendPacket(packet, NetConnection::SendFlags::NONE, &connection->mStartGamePacketID);
@@ -344,7 +516,7 @@ bool NetplayHost::canBeginNextFrame(uint32 frameNumber)
 	{
 		for (PlayerConnection* connection : mPlayerConnections)
 		{
-			if (connection->getState() == NetConnection::State::CONNECTED && connection->mReadyForGame && mJoinPhase == JoinPhase::NONE)
+			if (connection->isActive() && connection->mReadyForGame && mJoinPhase == JoinPhase::NONE)
 			{
 				RMX_LOG_INFO("Netplay host: a new game was started, sending it to the client");
 				connection->mReadyForGame = false;
@@ -373,7 +545,7 @@ bool NetplayHost::canBeginNextFrame(uint32 frameNumber)
 	bool mustWait = false;
 	for (const PlayerConnection* connection : mPlayerConnections)
 	{
-		if (connection->getState() == NetConnection::State::CONNECTED && connection->mReadyForGame && frameNumber > connection->mLastReceivedFrameNumber + MAX_LEAD)
+		if (connection->isActive() && connection->mReadyForGame && (uint64)frameNumber > (uint64)connection->mLastReceivedFrameNumber + MAX_LEAD)
 			mustWait = true;
 	}
 	if (!mustWait)
@@ -493,19 +665,19 @@ void NetplayHost::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 		std::vector<PlayerConnection*> connectionsToRemove;
 		for (PlayerConnection* playerConnection : mPlayerConnections)
 		{
-			if (playerConnection->getState() == NetConnection::State::CONNECTED && playerConnection->mReadyForGame)
-			{
-				activeConnections.push_back(playerConnection);
-			}
+			if (playerConnection->isActive() && playerConnection->mReadyForGame)
+				{
+					activeConnections.push_back(playerConnection);
+				}
 			else if (playerConnection->getState() == NetConnection::State::DISCONNECTED || playerConnection->getState() == NetConnection::State::EMPTY)
 			{
 				connectionsToRemove.push_back(playerConnection);
 			}
 		}
 		for (PlayerConnection* connection : connectionsToRemove)
-		{
-			destroyNetConnection(*connection);
-		}
+			{
+				retireConnection(connection);
+			}
 	}
 
 	// Add new frame to the history
@@ -602,7 +774,7 @@ void NetplayHost::getLobbySlots(uint8 outStates[MAX_PLAYERS]) const
 	outStates[0] = 1;
 	for (const PlayerConnection* connection : mPlayerConnections)
 	{
-		if (nullptr == connection || connection->getState() != NetConnection::State::CONNECTED)
+		if (nullptr == connection || !connection->isActive())
 			continue;
 		if (connection->mPlayerIndex >= 1 && connection->mPlayerIndex < MAX_PLAYERS)
 			outStates[connection->mPlayerIndex] = connection->mLobbyReady ? 3 : 2;
@@ -612,9 +784,7 @@ void NetplayHost::getLobbySlots(uint8 outStates[MAX_PLAYERS]) const
 int NetplayHost::getConnectedClientCount() const
 {
 	int count = 0;
-	for (const PlayerConnection* connection : mPlayerConnections)
-		count += (nullptr != connection && connection->getState() == NetConnection::State::CONNECTED) ? 1 : 0;
-	return count;
+	return getAuthenticatedCount();
 }
 
 bool NetplayHost::areAllClientsReady() const
@@ -622,7 +792,7 @@ bool NetplayHost::areAllClientsReady() const
 	int count = 0;
 	for (const PlayerConnection* connection : mPlayerConnections)
 	{
-		if (nullptr == connection || connection->getState() != NetConnection::State::CONNECTED)
+		if (nullptr == connection || !connection->isActive())
 			continue;
 		if (!connection->mLobbyReady)
 			return false;
@@ -666,7 +836,7 @@ void NetplayHost::updateLobby(float deltaSeconds)
 
 	for (PlayerConnection* connection : mPlayerConnections)
 	{
-		if (nullptr == connection || connection->getState() != NetConnection::State::CONNECTED)
+		if (nullptr == connection || !connection->isActive())
 			continue;
 		LobbyStatePacket packet;
 		packet.mYourSlot = connection->mPlayerIndex;
@@ -679,6 +849,18 @@ void NetplayHost::updateLobby(float deltaSeconds)
 
 bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 {
+	// Nobody gets any further than the handshake before proving that they know the code
+	if (evaluation.mPacketType == JoinAuthPacket::PACKET_TYPE)
+	{
+		JoinAuthPacket packet;
+		if (!evaluation.readPacket(packet))
+			return false;
+		handleJoinAuth(static_cast<PlayerConnection&>(evaluation.mConnection), packet);
+		return true;
+	}
+	if (!static_cast<PlayerConnection&>(evaluation.mConnection).mAuthenticated)
+		return true;
+
 	switch (evaluation.mPacketType)
 	{
 		case LobbyReadyPacket::PACKET_TYPE:
@@ -700,12 +882,20 @@ bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 
 			// The client's game drifted away: send it the game state again (handled like a player that joins a running game)
 			PlayerConnection& connection = static_cast<PlayerConnection&>(evaluation.mConnection);
-			if (connection.mReadyForGame && mJoinPhase == JoinPhase::NONE)
-			{
-				RMX_LOG_INFO("Netplay host: client's game drifted away at frame " << packet.mFrameNumber << ", sending the game state again");
-				connection.mReadyForGame = false;
-				++mResyncCount;
-			}
+			// A repair freezes the game for everybody, so one friend cannot ask again and again: at most one repair per ten seconds each
+				const uint32 now = std::max<uint32>(SDL_GetTicks(), 1);
+				const bool tooSoon = (connection.mLastResyncTicks != 0 && now - connection.mLastResyncTicks < 10000);
+				if (connection.mReadyForGame && mJoinPhase == JoinPhase::NONE && !tooSoon)
+				{
+					RMX_LOG_INFO("Netplay host: client's game drifted away at frame " << packet.mFrameNumber << ", sending the game state again");
+					connection.mReadyForGame = false;
+					connection.mLastResyncTicks = now;
+					++mResyncCount;
+				}
+				else if (tooSoon)
+				{
+					RMX_LOG_INFO("Netplay host: ignored a repair request that came too soon after the last one");
+				}
 			return true;
 		}
 
@@ -743,10 +933,12 @@ bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			{
 				PlayerConnection& connection = static_cast<PlayerConnection&>(evaluation.mConnection);
 
-				if (packet.mFrameNumber > connection.mLastReceivedFrameNumber)		// Ignore out-dated packets
-				{
+				// A friend cannot be ahead of the host's own frame (by more than a little): a frame number far in the future would freeze that slot's input
+					const bool plausible = ((uint64)packet.mFrameNumber <= (uint64)mLastSeenFrameNumber + 300);
+					if (packet.mFrameNumber > connection.mLastReceivedFrameNumber && plausible)		// Ignore out-dated packets
+					{
 					connection.mLastReceivedFrameNumber = packet.mFrameNumber;
-					if (connection.mLastReceivedInput != packet.mInputs.back() && nullptr != getenv("S3AIR_NETPLAY_DEBUG"))
+					if (connection.mLastReceivedInput != packet.mInputs.back() && nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DEBUG"))
 						RMX_LOG_INFO("Netplay host: player " << (int)(connection.mPlayerIndex + 1) << " input changed to " << rmx::hexString(packet.mInputs.back(), 4) << " at frame " << packet.mFrameNumber);
 					connection.mLastReceivedInput = packet.mInputs.back();
 				}

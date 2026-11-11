@@ -7,6 +7,7 @@
 */
 
 #include "oxygen/pch.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen/application/EngineMain.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/ArgumentsReader.h"
@@ -264,12 +265,13 @@ bool EngineMain::startupEngine()
 
 	// Startup logging
 	{
-		const char* logSuffix = getenv("S3AIR_LOGNAME");
+		const char* logSuffix = TestHooks::getEnv("S3AIR_LOGNAME");
 		std::wstring logFilePath = config.mAppDataPath + L"logfile";
 		if (nullptr != logSuffix)
 		{
 			for (const char* character = logSuffix; '\0' != *character; ++character)
-				logFilePath += (wchar_t)*character;
+				if (isalnum((unsigned char)*character) || *character == '_' || *character == '-')
+					logFilePath += (wchar_t)*character;
 		}
 		logFilePath += L".txt";
 		oxygen::Logging::startup(logFilePath);

@@ -65,12 +65,18 @@
     <ClInclude Include="..\..\source\oxygen_netcore\base\HandleProvider.h">
       <Filter>base</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\source\oxygen_netcore\base\TestHooks.h">
+      <Filter>base</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\source\oxygen_netcore\serverclient\NetplaySetupPackets.h">
       <Filter>serverclient</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\source\oxygen_netcore\pch.cpp" />
+    <ClCompile Include="..\..\source\oxygen_netcore\base\TestHooks.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\oxygen_netcore\network\Sockets.cpp">
       <Filter>network</Filter>
     </ClCompile>

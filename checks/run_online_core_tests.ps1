@@ -19,7 +19,7 @@ New-Item -ItemType Directory -Path $testDir -Force | Out-Null
 
 $batch = @"
 @echo off
-call "$vsDevCmd" -arch=x64 -host_arch=x64 >nul
+call "$vsDevCmd" -arch=x64 -host_arch=x64 >nul 2>&1
 if errorlevel 1 exit /b 1
 cl.exe /nologo /EHsc /std:c++17 /I"$engineInclude" /I"$rmxInclude" "$testSource" /Fe:"$testExe" /link /LTCG /LIBPATH:"$netcoreLib" /LIBPATH:"$rmxLib" /LIBPATH:"$zlibLib" oxygen_netcore.lib rmxbase.lib zlib.lib ws2_32.lib user32.lib
 if errorlevel 1 exit /b %errorlevel%

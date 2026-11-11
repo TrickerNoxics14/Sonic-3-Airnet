@@ -7,6 +7,7 @@
 */
 
 #include "sonic3air/pch.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "sonic3air/menu/LobbyMenu.h"
 #include "sonic3air/menu/MenuBackground.h"
 #include "sonic3air/menu/SharedResources.h"
@@ -33,6 +34,7 @@ namespace
 		JOIN_NOW,
 		READY,
 		START_GAME,
+		RETRY,
 		COPY_CODE,
 		LEAVE,
 		BACK
@@ -96,7 +98,7 @@ void LobbyMenu::onFadeIn()
 	static bool testHookDone = false;
 	if (!testHookDone)
 	{
-		const char* mode = getenv("S3AIR_LOBBY_OPEN");
+		const char* mode = TestHooks::getEnv("S3AIR_LOBBY_OPEN");
 		if (nullptr != mode)
 		{
 			testHookDone = true;
@@ -104,8 +106,8 @@ void LobbyMenu::onFadeIn()
 				createLobby();
 			else if (strcmp(mode, "hostlan") == 0)
 				createLobby(false);
-			else if (strcmp(mode, "join") == 0 && nullptr != getenv("S3AIR_LOBBY_CODE"))
-				joinWithCode(getenv("S3AIR_LOBBY_CODE"));
+			else if (strcmp(mode, "join") == 0 && nullptr != TestHooks::getEnv("S3AIR_LOBBY_CODE"))
+				joinWithCode(TestHooks::getEnv("S3AIR_LOBBY_CODE"));
 		}
 	}
 }
@@ -153,6 +155,8 @@ void LobbyMenu::rebuildEntries()
 	switch (mScreen)
 	{
 		case Screen::START:
+			if (mFailure != NetplayFailure::Reason::NONE && NetplayFailure::isRetryable(mFailure) && (mLastWasHosting || !mLastJoinCode.empty()))
+				mMenuEntries.addEntry("RETRY", RETRY);
 			mMenuEntries.addEntry("CREATE LOBBY", CREATE_LOBBY);
 			mMenuEntries.addEntry("JOIN WITH CODE", JOIN_LOBBY);
 			mMenuEntries.addEntry("BACK", BACK);
@@ -183,15 +187,18 @@ void LobbyMenu::rebuildEntries()
 void LobbyMenu::createLobby(bool viaServer)
 {
 	NetplayManager& manager = netplay();
-	manager.mLastErrorMessage.clear();
+	manager.clearFailure();
 	mMessage.clear();
+	mFailure = NetplayFailure::Reason::NONE;
+	mLastWasHosting = true;
+	mLastHostViaServer = viaServer;
 
 	// A fresh session code, which the friends use to find this lobby through the game server
 	std::random_device randomDevice;
 	uint64 sessionID = (((uint64)randomDevice() << 32) | randomDevice()) & 0xffffffffffull;
 	if (sessionID < 0x10000000ull)
 		sessionID += 0x10000000ull;
-	if (const char* fixedCode = getenv("S3AIR_LOBBY_CODE"))
+	if (const char* fixedCode = TestHooks::getEnv("S3AIR_LOBBY_CODE"))
 	{
 		uint64 fixedID = 0;
 		if (NetplayCodes::readSessionCode(fixedCode, fixedID))
@@ -206,7 +213,9 @@ void LobbyMenu::createLobby(bool viaServer)
 	}
 	else
 	{
-		mMessage = manager.mLastErrorMessage.empty() ? "Could not create the lobby." : manager.mLastErrorMessage;
+		mMessage = manager.mLastErrorMessage.empty() ? std::string("Could not open the lobby.\nThe network port (UDP 28840) may be in use by another copy of the game.") : manager.mLastErrorMessage;
+		mFailure = NetplayFailure::Reason::BLOCKED_OR_TIMEOUT;
+		rebuildEntries();
 	}
 }
 
@@ -220,23 +229,33 @@ void LobbyMenu::joinLobby()
 bool LobbyMenu::joinWithCode(const std::string& code)
 {
 	NetplayManager& manager = netplay();
-	manager.mLastErrorMessage.clear();
+	manager.clearFailure();
 	mMessage.clear();
+	mFailure = NetplayFailure::Reason::NONE;
+	mLastWasHosting = false;
+	mLastJoinCode = code;
 	uint64 sessionID = 0;
 	std::string ip;
 	uint16 port = NetplayManager::DEFAULT_HOST_PORT;
+	uint32 secret = 0;
 	if (NetplayCodes::readSessionCode(code.c_str(), sessionID))
 	{
 		manager.mSessionID = sessionID;
 		manager.startJoinViaServer();
 	}
-	else if (NetplayCodes::readJoinCode(code.c_str(), ip, port))
+	else if (NetplayCodes::readJoinCode(code.c_str(), ip, port, secret))
 	{
-		manager.startJoinDirect(ip, port);
+		manager.startJoinDirect(ip, port, secret);
 	}
 	else if (!code.empty())
 	{
-		manager.startJoinDirect(code, NetplayManager::DEFAULT_HOST_PORT);	// An address typed in directly works as well
+		// Typing mistakes are noticed by the code's check character, before anything is sent
+		manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, "This does not look like a lobby code. Check for typing mistakes.");
+		mMessage = manager.mLastErrorMessage;
+		mFailure = manager.mLastFailure;
+		mScreen = Screen::START;
+		rebuildEntries();
+		return false;
 	}
 	else
 	{
@@ -248,9 +267,40 @@ bool LobbyMenu::joinWithCode(const std::string& code)
 	return true;
 }
 
+void LobbyMenu::showFailureAndReturnToStart()
+{
+	NetplayManager& manager = netplay();
+	mMessage = manager.mLastErrorMessage.empty() ? "Could not connect to the lobby." : manager.mLastErrorMessage;
+	mFailure = (manager.mLastFailure != NetplayFailure::Reason::NONE) ? manager.mLastFailure : NetplayFailure::Reason::BLOCKED_OR_TIMEOUT;
+	manager.closeConnections();
+	mScreen = Screen::START;
+	rebuildEntries();
+	RMX_LOG_INFO("Lobby: showing the problem to the player (" << NetplayFailure::getName(mFailure) << ") with a Retry button");
+}
+
+void LobbyMenu::retry()
+{
+	RMX_LOG_INFO("Lobby: the player pressed Retry");
+	const bool wasHosting = mLastWasHosting;
+	const bool viaServer = mLastHostViaServer;
+	const std::string code = mLastJoinCode;
+	netplay().closeConnections();
+	if (wasHosting)
+	{
+		createLobby(viaServer);
+	}
+	else if (joinWithCode(code))
+	{
+		mScreen = Screen::JOINED;
+		rebuildEntries();
+	}
+}
+
 void LobbyMenu::leaveLobby()
 {
 	netplay().closeConnections();
+	netplay().clearFailure();
+	mFailure = NetplayFailure::Reason::NONE;
 	mMessage.clear();
 	mScreen = Screen::START;
 	rebuildEntries();
@@ -308,24 +358,35 @@ void LobbyMenu::update(float timeElapsed)
 			chooseScreen();
 		}
 		else if (mScreen == Screen::JOINED && !joined)
-		{
-			if (!manager.mLastErrorMessage.empty())
-				mMessage = manager.mLastErrorMessage;
-			chooseScreen();
-		}
+			{
+				if (!manager.mLastErrorMessage.empty())
+				{
+					mMessage = manager.mLastErrorMessage;
+					mFailure = manager.mLastFailure;
+				}
+				chooseScreen();
+			}
 		else if ((mScreen == Screen::START || mScreen == Screen::JOIN) && (hosting || joined))
 		{
 			chooseScreen();
 		}
 	}
 
-	// A friend whose connection failed
+	// A friend whose connection failed, or a host whose lobby could not be opened: say why, and offer to try again
 	if (mState == State::SHOW && mScreen == Screen::JOINED && nullptr != manager.getNetplayClient() && manager.getNetplayClient()->getState() == NetplayClient::State::FAILED)
+		showFailureAndReturnToStart();
+	else if (mState == State::SHOW && mScreen == Screen::HOSTING && nullptr != manager.getNetplayHost() && manager.getNetplayHost()->getHostState() == NetplayHost::HostState::FAILED)
+		showFailureAndReturnToStart();
+
+	// Developer test switch: press Retry by itself, eight seconds after a failure was shown (only with the test hooks enabled)
+	if (mState == State::SHOW && mScreen == Screen::START && mFailure != NetplayFailure::Reason::NONE && nullptr != TestHooks::getEnv("S3AIR_LOBBY_AUTORETRY"))
 	{
-		mMessage = manager.mLastErrorMessage.empty() ? "Could not connect to the lobby." : manager.mLastErrorMessage;
-		manager.closeConnections();
-		mScreen = Screen::START;
-		rebuildEntries();
+		mAutoRetryTimer += timeElapsed;
+		if (mAutoRetryTimer > 8.0f)
+		{
+			mAutoRetryTimer = 0.0f;
+			retry();
+		}
 	}
 
 	// The label of the Ready button shows what pressing it does
@@ -359,9 +420,14 @@ void LobbyMenu::update(float timeElapsed)
 					break;
 
 				case JOIN_LOBBY:
-					playMenuSound(0x63);
-					joinLobby();
-					break;
+						playMenuSound(0x63);
+						joinLobby();
+						break;
+
+					case RETRY:
+						playMenuSound(0x63);
+						retry();
+						break;
 
 				case JOIN_NOW:
 				{
@@ -597,5 +663,21 @@ void LobbyMenu::render()
 		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, 208), hint, 5, grey);
 	}
 	if (!mMessage.empty())
-		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, 208), mMessage, 5, orange);
+	{
+		// The message can have several lines (the first ones say what happened and what to do)
+		int lineY = 188;
+		size_t begin = 0;
+		for (int line = 0; line < 3 && begin <= mMessage.size(); ++line)
+		{
+			size_t end = mMessage.find('\n', begin);
+			if (end == std::string::npos)
+				end = mMessage.size();
+			std::string text = mMessage.substr(begin, end - begin);
+			if (text.size() > 58)
+				text = text.substr(0, 55) + "...";
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, lineY), text, 5, orange);
+			lineY += 11;
+			begin = end + 1;
+		}
+	}
 }

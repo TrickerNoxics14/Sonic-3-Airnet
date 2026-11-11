@@ -307,10 +307,16 @@ void ConnectionManager::receivedPacketInternal(const std::vector<uint8>& buffer,
 				connection = *ptr;
 		}
 
-		if (nullptr == connection)
-		{
-			// Unknown connection
-			if (lowLevelSignature == lowlevel::ErrorPacket::SIGNATURE)
+		// A UDP packet only counts if it comes from the address of the connection (an off-path sender who guesses a connection ID must not be able to disconnect somebody)
+			if (nullptr != connection && connection->mSocketType == NetConnection::SocketType::UDP_SOCKET && connection->getRemoteAddress() != senderAddress)
+			{
+				return;
+			}
+
+			if (nullptr == connection)
+			{
+				// Unknown connection
+				if (lowLevelSignature == lowlevel::ErrorPacket::SIGNATURE)
 			{
 				// It's an error packet, don't send anything back
 			}
@@ -380,6 +386,7 @@ bool ConnectionManager::updateReceivePacketsInternal()
 	// Update UDP
 	if (nullptr != mUDPSocket)
 	{
+		int lanPacketsSkipped = 0;
 		for (int runs = 0; runs < 10; ++runs)
 		{
 			// Receive next packet
@@ -393,7 +400,12 @@ bool ConnectionManager::updateReceivePacketsInternal()
 
 			if (received.mBuffer.empty())
 			{
-				// Nothing to do at the moment
+				// Nothing to do at the moment, unless this was a LAN discovery packet that got handled inside the socket (more may follow)
+				if (mUDPSocket->consumedLanPacket() && ++lanPacketsSkipped < 256)
+				{
+					--runs;		// Handled inside the socket: that does not count as one of the packets this update reads
+					continue;
+				}
 				break;
 			}
 

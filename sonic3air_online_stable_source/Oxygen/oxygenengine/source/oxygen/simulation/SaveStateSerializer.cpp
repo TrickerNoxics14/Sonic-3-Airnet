@@ -45,6 +45,10 @@ bool SaveStateSerializer::loadState(const std::vector<uint8>& input, StateType* 
 	if (!serializeState(serializer, stateType))
 		return false;
 
+	// A state that ended too early (or has impossible sizes) is not a valid state; this matters for states that arrive over the network
+	if (serializer.hasError())
+		return false;
+
 	// Success
 	if (nullptr != outStateType)
 		*outStateType = stateType;

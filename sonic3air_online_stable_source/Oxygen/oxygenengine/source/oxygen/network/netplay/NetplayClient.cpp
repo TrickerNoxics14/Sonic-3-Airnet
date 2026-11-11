@@ -10,6 +10,8 @@
 #include "oxygen/network/netplay/NetplayClient.h"
 #include "oxygen/network/netplay/NetplayManager.h"
 #include "oxygen/network/netplay/NetplayPackets.h"
+#include "oxygen/network/netplay/NetplayAuth.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/input/ControlsIn.h"
@@ -46,14 +48,30 @@ void NetplayClient::joinViaServer()
 
 void NetplayClient::connectDirectlyToHost(std::string_view ip, uint16 port)
 {
-	mHostConnection.startConnectTo(mConnectionManager, SocketAddress(ip, port));
+	beginConnectTo(SocketAddress(ip, port));
 	mState = State::CONNECT_TO_HOST;
+}
+
+void NetplayClient::beginConnectTo(const SocketAddress& address)
+{
+	// Every new connection starts with the code check
+	mHostVerified = false;
+	mAuthSent = false;
+	mHeartbeatTimer = 0.0f;
+	mHostConnection.startConnectTo(mConnectionManager, address);
+}
+
+void NetplayClient::fail(NetplayFailure::Reason reason, const std::string& detail)
+{
+	RMX_LOG_INFO("Netplay client: giving up, " << NetplayFailure::getName(reason) << (detail.empty() ? "" : ": ") << detail);
+	mNetplayManager.reportFailure(reason, detail);
+	mState = State::FAILED;
 }
 
 void NetplayClient::updateConnection(float deltaSeconds)
 {
 	EngineServerClient& engineServerClient = EngineServerClient::instance();
-	if (!mReconnectTestTriggered && nullptr != getenv("S3AIR_NETPLAY_RECONNECT_TEST") && mState == State::GAME_RUNNING && !mReceivingJoinState && mStateTimer > 12.0f)
+	if (!mReconnectTestTriggered && nullptr != TestHooks::getEnv("S3AIR_NETPLAY_RECONNECT_TEST") && mState == State::GAME_RUNNING && !mReceivingJoinState && mStateTimer > 12.0f)
 	{
 		mReconnectTestTriggered = true;
 		RMX_LOG_INFO("Netplay client: automated check disconnecting the transport");
@@ -70,9 +88,9 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mNextFrameNumber = 0;
 		mReceivedFrames.clear();
 		mHostConnection.clear();
-		mHostConnection.startConnectTo(mConnectionManager, mReconnectAddress);
-		mState = State::CONNECT_TO_HOST;
-		mTimedState = State::NONE;
+			beginConnectTo(mReconnectAddress);
+			mState = State::CONNECT_TO_HOST;
+			mTimedState = State::NONE;
 		mStateTimer = 0.0f;
 		mNetplayManager.mLastErrorMessage = "Connection lost. Reconnecting to your game...";
 		RMX_LOG_INFO("Netplay client: reconnecting to the existing session");
@@ -84,16 +102,14 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		{
 			mReconnectRemaining = 0.0f;
 			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
-			mState = State::FAILED;
-			mNetplayManager.mLastErrorMessage = "Could not reconnect within 90 seconds. Join again with the host's code.";
-			RMX_LOG_INFO("Netplay client: reconnect timed out");
+			fail(NetplayFailure::Reason::CONNECTION_LOST, "Could not reconnect within 90 seconds.");
 			return;
 		}
 		if (mState == State::CONNECT_TO_HOST && (mStateTimer > 5.0f || mHostConnection.getState() == NetConnection::State::DISCONNECTED))
 		{
 			mHostConnection.clear();
-			mHostConnection.startConnectTo(mConnectionManager, mReconnectAddress);
-			mStateTimer = 0.0f;
+				beginConnectTo(mReconnectAddress);
+				mStateTimer = 0.0f;
 		}
 	}
 
@@ -104,18 +120,31 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mStateTimer = 0.0f;
 	}
 	mStateTimer += deltaSeconds;
-	const char* timeoutError = nullptr;
 	if (mState == State::CONNECT_TO_SERVER && mStateTimer > 15.0f)
-		timeoutError = "Could not reach the matchmaking server.\nCheck your internet connection, or use the VPN option.";
-	else if (mState == State::REGISTERED && mStateTimer > 30.0f)
-		timeoutError = "Nobody is hosting with this code.\nCheck the code, and that the host pressed Host.";
-	else if (mState == State::CONNECT_TO_HOST && mStateTimer > 20.0f && mReconnectRemaining == 0.0f)
-		timeoutError = "Found the host, but could not connect.\nOne of your networks blocks direct connections: try the VPN option.";
-	if (nullptr != timeoutError)
 	{
-		RMX_LOG_INFO("Netplay client: giving up, " << timeoutError);
-		mNetplayManager.mLastErrorMessage = timeoutError;
-		mState = State::FAILED;
+		fail(NetplayFailure::Reason::SERVER_UNREACHABLE);
+		return;
+	}
+	else if (mState == State::REGISTERED && mStateTimer > 30.0f)
+	{
+		fail(NetplayFailure::Reason::WRONG_CODE);
+		return;
+	}
+	else if (mState == State::CONNECT_TO_HOST && mStateTimer > 20.0f && mReconnectRemaining == 0.0f)
+	{
+		fail(NetplayFailure::Reason::BLOCKED_OR_TIMEOUT);
+		return;
+	}
+	else if (mState == State::CONNECTED && !mHostVerified && mStateTimer > 10.0f)
+	{
+		// Connected, but the host never started the code check: it runs a different version of the game
+		fail(NetplayFailure::Reason::VERSION_MISMATCH, "The host did not answer the code check.");
+		return;
+	}
+	else if (mState == State::CONNECTED && mHostConnection.getState() == NetConnection::State::DISCONNECTED)
+	{
+		// The host left before the game started (or stopped answering)
+		fail(NetplayFailure::Reason::HOST_CLOSED);
 		return;
 	}
 
@@ -150,12 +179,10 @@ void NetplayClient::updateConnection(float deltaSeconds)
 			if (mRegistrationRequest.hasResponse())
 			{
 				if (!mRegistrationRequest.mResponse.mSuccess)
-				{
-					RMX_LOG_INFO("Netplay client: giving up, nobody is hosting with this code (the game server does not know the session)");
-					mNetplayManager.mLastErrorMessage = "Nobody is hosting with this code.\nCheck the code, and that the host pressed Host.";
-					mState = State::FAILED;
-					break;
-				}
+					{
+						fail(NetplayFailure::Reason::WRONG_CODE, "The game server does not know this code.");
+						break;
+					}
 			}
 			break;
 		}
@@ -175,12 +202,25 @@ void NetplayClient::updateConnection(float deltaSeconds)
 				helloPacket.mInputs.push_back(0);
 				mHostConnection.sendPacket(helloPacket, NetConnection::SendFlags::NONE);
 
-				// Test hook: press Ready right away
-				if (nullptr != getenv("S3AIR_LOBBY_AUTOREADY"))
-					sendLobbyReady(true);
+				}
+				break;
 			}
-			break;
-		}
+
+			case State::CONNECTED:
+			{
+				// While waiting in the lobby the host hears from us every two seconds (a silent connection would be dropped as stale, and a lost "Ready" gets repeated).
+				//  -> These packets are also how we notice that the host is gone: they would stay unanswered.
+				if (mHostVerified && mHostConnection.getState() == NetConnection::State::CONNECTED)
+				{
+					mHeartbeatTimer += deltaSeconds;
+					if (mHeartbeatTimer >= 2.0f)
+					{
+						mHeartbeatTimer = 0.0f;
+						sendLobbyReady(mLobbyMyReady);
+					}
+				}
+				break;
+			}
 
 		default:
 			break;
@@ -201,7 +241,7 @@ bool NetplayClient::onReceivedGameServerPacket(ReceivedPacketEvaluation& evaluat
 				return true;	// Already connecting (e.g. found the host in the same network)
 
 			// Connect to the given address
-			mHostConnection.startConnectTo(mConnectionManager, SocketAddress(packet.mConnectToIP, packet.mConnectToPort));
+				beginConnectTo(SocketAddress(packet.mConnectToIP, packet.mConnectToPort));
 			mState = State::CONNECT_TO_HOST;
 			return true;
 		}
@@ -221,7 +261,7 @@ bool NetplayClient::canBeginNextFrame(uint32 frameNumber)
 
 void NetplayClient::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 {
-	if (mHostConnection.getState() != NetConnection::State::CONNECTED)
+	if (mHostConnection.getState() != NetConnection::State::CONNECTED || !mHostVerified)
 		return;
 
 	// Compare our game state with what the host reported for the same frame
@@ -229,7 +269,7 @@ void NetplayClient::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 	{
 		const uint32 ownHash = NetplayManager::computeStateHash(frameNumber);
 
-		static const bool corruptForTest = (nullptr != getenv("S3AIR_NETPLAY_CORRUPT"));
+		static const bool corruptForTest = (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_CORRUPT"));
 		static bool corrupted = false;
 		if (corruptForTest && !corrupted && frameNumber >= mJoinFrameNumber + 300 && mJoinFrameNumber != 0)
 		{
@@ -239,9 +279,9 @@ void NetplayClient::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 			RMX_LOG_INFO("Netplay client: (test) changed the game state on purpose at frame " << frameNumber);
 		}
 
-		if (nullptr != getenv("S3AIR_NETPLAY_DUMP"))
+		if (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DUMP"))
 		{
-			FILE* f = fopen((std::string(getenv("APPDATA")) + "/Sonic3AIR/client_compare.txt").c_str(), "a");
+			FILE* f = fopen((std::string(getenv("APPDATA") ? getenv("APPDATA") : ".") + "/Sonic3AIR/client_compare.txt").c_str(), "a");
 			if (nullptr != f)
 			{
 				const auto hostIt = mHostStateHashes.find(frameNumber);
@@ -279,13 +319,13 @@ void NetplayClient::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 		packet.mFrameNumber = frameNumber;
 		packet.mNumFrames = 1;
 		uint16 input = controlsIn.getInputFromController(0);
-		if (nullptr != getenv("S3AIR_CHECKS"))
-			if (const char* testInput = getenv("S3AIR_NETPLAY_TEST_INPUT"))
+		if (nullptr != TestHooks::getEnv("S3AIR_CHECKS"))
+			if (const char* testInput = TestHooks::getEnv("S3AIR_NETPLAY_TEST_INPUT"))
 				input = (uint16)strtoul(testInput, nullptr, 0);
 		packet.mInputs.push_back(input);
 		{
 			static uint16 lastSent = 0;
-			if (packet.mInputs.back() != lastSent && nullptr != getenv("S3AIR_NETPLAY_DEBUG"))
+			if (packet.mInputs.back() != lastSent && nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DEBUG"))
 				RMX_LOG_INFO("Netplay client: sending input " << rmx::hexString(packet.mInputs.back(), 4) << " at frame " << frameNumber);
 			lastSent = packet.mInputs.back();
 		}
@@ -320,6 +360,27 @@ void NetplayClient::sendLobbyReady(bool ready)
 
 bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 {
+	// The code check comes first: until the host proved that it knows the code, nothing it sends is believed
+	//  -> This is what stops a fake host on the same network (it saw the broadcast, but does not know the code) from sending us a game
+	if (evaluation.mPacketType == JoinChallengePacket::PACKET_TYPE)
+	{
+		JoinChallengePacket packet;
+		if (!evaluation.readPacket(packet))
+			return false;
+		handleJoinChallenge(packet.mHostNonce);
+		return true;
+	}
+	if (evaluation.mPacketType == JoinReplyPacket::PACKET_TYPE)
+	{
+		JoinReplyPacket packet;
+		if (!evaluation.readPacket(packet))
+			return false;
+		handleJoinReply(packet);
+		return true;
+	}
+	if (!mHostVerified)
+		return true;
+
 	switch (evaluation.mPacketType)
 	{
 		case LobbyStatePacket::PACKET_TYPE:
@@ -377,6 +438,10 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			if (packet.mFrameNumber < mNextFrameNumber)
 				return true;
 
+			// Refuse nonsense: no players, no frames, or a jump of many minutes into the future would make every real packet look out of date
+			if (packet.mNumPlayers == 0 || packet.mNumFrames == 0 || packet.mInputs.size() != (size_t)packet.mNumPlayers * packet.mNumFrames || packet.mFrameNumber > mNextFrameNumber + 36000)
+				return true;
+
 			// Evaluate the packet and store its input history for all players
 			const size_t currentFramesGap = packet.mFrameNumber - mNextFrameNumber + 1;
 			const size_t numFramesToCopy = std::min<size_t>(currentFramesGap, packet.mNumFrames);
@@ -410,6 +475,10 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			}
 
 			mNextFrameNumber = packet.mFrameNumber + 1;
+
+			// Only the newest frames are ever needed (the game runs at most a few dozen frames behind the host)
+			while (mReceivedFrames.size() > 600)
+				mReceivedFrames.pop_front();
 
 			// Update latency
 			mCurrentLatency = packet.mFrameNumber - packet.mLastClientReceivedFrame;
@@ -445,13 +514,63 @@ uint32 NetplayClient::getRegularInputChecksum(int& outFrameNumber) const
 	return mRegularInputChecksum;
 }
 
+void NetplayClient::handleJoinChallenge(uint32 hostNonce)
+{
+	if (mAuthSent || mHostVerified)
+		return;		// One answer per connection
+
+	mHostNonce = hostNonce;
+	mClientNonce = NetplayAuth::randomNonce();
+	JoinAuthPacket answer;
+	answer.mClientNonce = mClientNonce;
+	answer.mProof = NetplayAuth::computeProof('C', mAuthSecret, mHostNonce, mClientNonce);
+	answer.mPreferredSlot = mResumeSession ? mPlayerIndex : 0;		// After a connection loss, ask for the same player slot again
+	mHostConnection.sendPacket(answer, NetConnection::SendFlags::NONE);
+	mAuthSent = true;
+}
+
+void NetplayClient::handleJoinReply(const JoinReplyPacket& packet)
+{
+	if (!mAuthSent || mHostVerified)
+		return;
+
+	switch ((NetplayAuth::JoinResult)packet.mResult)
+	{
+		case NetplayAuth::JoinResult::ACCEPTED:
+		{
+			if (!NetplayAuth::verifyHostProof(mAuthSecret, mHostNonce, mClientNonce, packet.mProof))
+			{
+				// Somebody answered who does not know the code
+				mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+				fail(NetplayFailure::Reason::WRONG_CODE, "The other side does not know your code.");
+				return;
+			}
+			mHostVerified = true;
+			RMX_LOG_INFO("Netplay client: the host proved the code, player slot " << (int)(packet.mSlot + 1));
+			// Test hook: press Ready right away
+			if (nullptr != TestHooks::getEnv("S3AIR_LOBBY_AUTOREADY"))
+				sendLobbyReady(true);
+			return;
+		}
+
+		case NetplayAuth::JoinResult::LOBBY_FULL:
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(NetplayFailure::Reason::LOBBY_FULL);
+			return;
+
+		default:
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(NetplayFailure::Reason::WRONG_CODE);
+			return;
+	}
+}
+
 void NetplayClient::startGame(const StartGamePacket& packet)
 {
 	RMX_LOG_INFO("Netplay client: received start game packet");
 	if (packet.mPlayerIndex == 0 || packet.mPlayerIndex >= MAX_PLAYERS)
 	{
-		mState = State::FAILED;
-		mNetplayManager.mLastErrorMessage = "The host assigned an invalid player slot.";
+		fail(NetplayFailure::Reason::BAD_GAME_DATA, "The host assigned an invalid player slot.");
 		return;
 	}
 	mPlayerIndex = packet.mPlayerIndex;
@@ -461,18 +580,26 @@ void NetplayClient::startGame(const StartGamePacket& packet)
 	{
 		const std::string hostMods(packet.mActiveModsInfo.begin(), packet.mActiveModsInfo.end());
 		const std::string ownMods = NetplayManager::getActiveModsInfo();
-		std::string error;
-		if (packet.mGameBuildVersion != EngineMain::getDelegate().getAppMetaData().mBuildVersionNumber)
-			error = "The host uses a different game version.";
-		else if (hostMods != ownMods)
-			error = "The host uses different mods, a different mod order, or a different build of the game.\nHost: " + (hostMods.empty() ? std::string("none") : hostMods) + "\nYou: " + (ownMods.empty() ? std::string("none") : ownMods);
+		// Developer test switches that make this friend look like a different version or mod setup
+		const uint32 ownBuild = EngineMain::getDelegate().getAppMetaData().mBuildVersionNumber + ((nullptr != TestHooks::getEnv("S3AIR_NETPLAY_FAKE_BUILD")) ? 1 : 0);
+		const std::string ownModsChecked = ownMods + ((nullptr != TestHooks::getEnv("S3AIR_NETPLAY_FAKE_MODS")) ? "+fake" : "");
 
-		if (!error.empty())
+		NetplayFailure::Reason reason = NetplayFailure::Reason::NONE;
+		std::string detail;
+		if (packet.mGameBuildVersion != ownBuild)
 		{
-			RMX_LOG_INFO("Netplay client: cannot join, " << error);
-			mNetplayManager.mLastErrorMessage = error;
-			mState = State::FAILED;
+			reason = NetplayFailure::Reason::VERSION_MISMATCH;
+		}
+		else if (hostMods != ownModsChecked)
+		{
+			reason = NetplayFailure::Reason::MOD_MISMATCH;
+			detail = "Host: " + (hostMods.empty() ? std::string("none") : hostMods) + "\nYou: " + (ownModsChecked.empty() ? std::string("none") : ownModsChecked);
+		}
+
+		if (reason != NetplayFailure::Reason::NONE)
+		{
 			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(reason, detail);
 			return;
 		}
 	}
@@ -523,7 +650,7 @@ void NetplayClient::onReceivedJoinStateChunk(const JoinStateChunkPacket& packet)
 	if (mJoinCompressedState.empty())
 	{
 		// A save state is a few megabytes at most; refuse sizes that would make us allocate gigabytes
-		if (packet.mCompressedSize == 0 || packet.mCompressedSize > 32 * 1024 * 1024 || packet.mUncompressedSize > 128 * 1024 * 1024)
+		if (packet.mCompressedSize == 0 || packet.mUncompressedSize == 0 || packet.mCompressedSize > 32 * 1024 * 1024 || packet.mUncompressedSize > 128 * 1024 * 1024)
 		{
 			RMX_LOG_INFO("Netplay client: ignoring a game state with an implausible size");
 			return;
@@ -551,18 +678,23 @@ void NetplayClient::onReceivedJoinStateChunk(const JoinStateChunkPacket& packet)
 void NetplayClient::finishJoinTransfer()
 {
 	std::vector<uint8> state;
-	if (!ZlibDeflate::decode(state, mJoinCompressedState.data(), mJoinCompressedState.size()) || state.size() != mJoinUncompressedSize)
+	// The output size is known in advance: a damaged or malicious stream must not be able to expand into gigabytes
+	if (!ZlibDeflate::decode(state, mJoinCompressedState.data(), mJoinCompressedState.size(), mJoinUncompressedSize) || state.size() != mJoinUncompressedSize)
 	{
-		RMX_ERROR("Netplay client: received game state is invalid", );
+		RMX_LOG_INFO("Netplay client: received game state is invalid");
 		mReceivingJoinState = false;
+		mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+		fail(NetplayFailure::Reason::BAD_GAME_DATA);
 		return;
 	}
 
 	Simulation& simulation = Application::instance().getSimulation();
 	if (!simulation.loadStateFromBuffer(state, mJoinFrameNumber))
 	{
-		RMX_ERROR("Netplay client: failed to load the game state from the host", );
+		RMX_LOG_INFO("Netplay client: failed to load the game state from the host");
 		mReceivingJoinState = false;
+		mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+		fail(NetplayFailure::Reason::BAD_GAME_DATA);
 		return;
 	}
 

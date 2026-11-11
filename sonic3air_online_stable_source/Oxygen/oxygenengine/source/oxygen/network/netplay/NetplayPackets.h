@@ -16,7 +16,8 @@ struct StartGamePacket : public highlevel::PacketBase
 {
 	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("StartGamePacket");
 
-	static const uint8 PACKET_VERSION = 3;
+	static const uint8 PACKET_VERSION = 4;
+	static const size_t MAX_BLOB_SIZE = 0x100000;		// Reading refuses larger sizes before anything gets allocated
 
 	uint8 mPacketVersion = PACKET_VERSION;
 	uint32 mGameBuildVersion = 0;
@@ -48,8 +49,8 @@ struct StartGamePacket : public highlevel::PacketBase
 		for (int k = 0; k < 4; ++k)
 			serializer.serialize(mRNGState[k]);
 
-		serializer.serializeData(mSerializedGameSettings);
-		serializer.serializeData(mActiveModsInfo);
+		serializer.serializeData(mSerializedGameSettings, MAX_BLOB_SIZE);
+		serializer.serializeData(mActiveModsInfo, MAX_BLOB_SIZE);
 	}
 };
 
@@ -66,6 +67,7 @@ struct JoinStateChunkPacket : public highlevel::PacketBase
 	uint16 mLastInputs[4] = { 0 };	// Input state of the last frame, as the game compares it to the next frame's input
 	uint16 mScreenWidth = 0;		// Render resolution of the host (the game scripts depend on it)
 	uint16 mScreenHeight = 0;
+	static const size_t MAX_CHUNK_SIZE = 0xffff;		// A chunk carries 1000 bytes; larger sizes are refused before anything gets allocated
 	std::vector<uint8> mData;
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
@@ -78,7 +80,7 @@ struct JoinStateChunkPacket : public highlevel::PacketBase
 			serializer.serialize(mLastInputs[k]);
 		serializer.serialize(mScreenWidth);
 		serializer.serialize(mScreenHeight);
-		serializer.serializeData(mData);
+		serializer.serializeData(mData, MAX_CHUNK_SIZE);
 	}
 };
 
@@ -209,5 +211,55 @@ struct PlayerInputIncrementPacket : public highlevel::PacketBase
 
 		for (uint16& inputs : mInputs)
 			serializer.serialize(inputs);
+	}
+};
+
+
+// Join handshake (see NetplayAuth.h). Sent from the host to a newly connected friend: "prove that you know the code"
+struct JoinChallengePacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("JoinChallengePacket");
+
+	uint32 mHostNonce = 0;
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mHostNonce);
+	}
+};
+
+
+// The friend's answer: a proof (not the secret itself) that is only correct for this host nonce
+struct JoinAuthPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("JoinAuthPacket");
+
+	uint32 mClientNonce = 0;
+	uint64 mProof = 0;
+	uint8 mPreferredSlot = 0;	// The player slot (1 to 3) this friend had before a connection loss, or 0
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mClientNonce);
+		serializer.serialize(mProof);
+		serializer.serialize(mPreferredSlot);
+	}
+};
+
+
+// The host's verdict. If it accepted the friend, it proves with its own proof that it knows the code as well
+struct JoinReplyPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("JoinReplyPacket");
+
+	uint8 mResult = 0;			// A NetplayAuth::JoinResult
+	uint8 mSlot = 0;
+	uint64 mProof = 0;
+
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mResult);
+		serializer.serialize(mSlot);
+		serializer.serialize(mProof);
 	}
 };

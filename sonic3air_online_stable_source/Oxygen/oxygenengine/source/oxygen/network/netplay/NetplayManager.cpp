@@ -11,12 +11,14 @@
 #include "oxygen/network/netplay/NetplayClient.h"
 #include "oxygen/network/netplay/NetplayHost.h"
 #include "oxygen/network/netplay/NetplayModFingerprint.h"
+#include "oxygen/network/netplay/NetplayAuth.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/modding/ModManager.h"
 #include "oxygen/simulation/EmulatorInterface.h"
 #include "oxygen/simulation/Simulation.h"
 
+#include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/serverclient/Packets.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 
@@ -44,13 +46,20 @@ NetplayManager::~NetplayManager()
 	closeConnections();
 }
 
-bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port)
+bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool directSecret)
 {
 	if (!restartConnection(true, port) || nullptr == mNetplayHost)
 		return false;
+	clearFailure();
+	mTestCloseTimer = 0.0f;
+
+	// Everybody who connects has to prove that they know the code: the secret comes either from the join code (direct IP connections) or from the session code
+	mHostSecret = directSecret ? NetplayAuth::makeRandomSecret() : NetplayAuth::secretFromSession(mSessionID);
 
 	// A friend in the same network finds us directly with the code, without the game server
-	mUDPSocket.setLanHostSession(mSessionID);
+	//  -> Only a one way hash of the session ID goes over the network, so that somebody who merely listens to the broadcast does not learn the code
+	if (!directSecret)
+		mUDPSocket.setLanHostSession(NetplayAuth::lanTagFromSession(mSessionID));
 
 	if (registerSessionAtServer)
 	{
@@ -59,22 +68,49 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port)
 	return true;
 }
 
+bool NetplayManager::setupAsHostWithSecret(uint16 port, uint32 secret)
+{
+	if (!setupAsHost(false, port, true))
+		return false;
+	mHostSecret = secret;
+	return true;
+}
+
 void NetplayManager::startJoinViaServer()
 {
 	if (!restartConnection(false) || nullptr == mNetplayClient)
 		return;
+	clearFailure();
 
-	mUDPSocket.setLanSearchSession(mSessionID);
+	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
+	mUDPSocket.setLanSearchSession(NetplayAuth::lanTagFromSession(mSessionID));
 	mLanSearchTimer = 0.0f;
 	mNetplayClient->joinViaServer();
 }
 
-void NetplayManager::startJoinDirect(std::string_view ip, uint16 port)
+void NetplayManager::startJoinDirect(std::string_view ip, uint16 port, uint32 secret)
 {
 	if (!restartConnection(false) || nullptr == mNetplayClient)
 		return;
+	clearFailure();
 
+	mNetplayClient->setAuthSecret(secret);
 	mNetplayClient->connectDirectlyToHost(ip, port);
+}
+
+void NetplayManager::reportFailure(NetplayFailure::Reason reason, const std::string& detail)
+{
+	mLastFailure = reason;
+	mLastErrorMessage = NetplayFailure::getMessage(reason);
+	if (!detail.empty())
+		mLastErrorMessage += std::string("\n") + detail;
+	RMX_LOG_INFO("Netplay failure: " << NetplayFailure::getName(reason) << (detail.empty() ? "" : " (") << detail << (detail.empty() ? "" : ")"));
+}
+
+void NetplayManager::clearFailure()
+{
+	mLastFailure = NetplayFailure::Reason::NONE;
+	mLastErrorMessage.clear();
 }
 
 void NetplayManager::closeConnections()
@@ -103,8 +139,15 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 	// Same-PC tests run two processes. Give them the same role suffix already
 	// used by their main logs; otherwise each process truncates/overwrites the
 	// other process's buffered stdio writes. Normal players keep online_log.txt.
-	const char* logName = getenv("S3AIR_LOGNAME");
-	const std::string path = std::string(appdata ? appdata : ".") + "/Sonic3AIR/online_log" + (logName ? logName : "") + ".txt";
+	// (The suffix is a test switch: only honoured when the test hooks are enabled, and only plain file name characters.)
+	std::string logName;
+	if (const char* suffix = TestHooks::getEnv("S3AIR_LOGNAME"))
+	{
+		for (const char* p = suffix; *p != 0; ++p)
+			if (isalnum((unsigned char)*p) || *p == '_' || *p == '-')
+				logName += *p;
+	}
+	const std::string path = std::string(appdata ? appdata : ".") + "/Sonic3AIR/online_log" + logName + ".txt";
 	FILE* file = fopen(path.c_str(), mOnlineLogStarted ? "a" : "w");
 	if (nullptr == file)
 		return;
@@ -151,6 +194,21 @@ void NetplayManager::updateConnections(float deltaSeconds)
 	if (nullptr != mNetplayHost)
 	{
 		mNetplayHost->updateConnection(deltaSeconds);
+
+		// Developer test: the host closes its lobby a few seconds after the first friend got in, to see how the friend reacts
+		if (const char* closeAfter = TestHooks::getEnv("S3AIR_NETPLAY_CLOSE_AFTER"))
+		{
+			if (mNetplayHost->getAuthenticatedCount() > 0)
+			{
+				mTestCloseTimer += deltaSeconds;
+				if (mTestCloseTimer > (float)atoi(closeAfter))
+				{
+					RMX_LOG_INFO("Netplay host: (test) closing the lobby on purpose");
+					closeConnections();
+					return;
+				}
+			}
+		}
 	}
 	// Joining with a code: first look for the host in the same network (that is the one case where the game server cannot help)
 	if (nullptr != mNetplayClient && (mNetplayClient->getState() == NetplayClient::State::CONNECT_TO_SERVER || mNetplayClient->getState() == NetplayClient::State::REGISTERED))
@@ -212,7 +270,7 @@ namespace
 	//  -> Comparing the files of the host and the client shows whether (and when) their games stopped being identical
 	void writeDebugFingerprint(bool isHost, uint32 frameNumber)
 	{
-		static const bool enabled = (nullptr != getenv("S3AIR_NETPLAY_DEBUG"));
+		static const bool enabled = (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DEBUG"));
 		if (!enabled || (frameNumber % 30) != 0)
 			return;
 
@@ -220,9 +278,9 @@ namespace
 		uint32 hash = rmx::startFNV1a_32();
 		hash = rmx::addToFNV1a_32(hash, ram, 0x10000);
 
-		if (nullptr != getenv("S3AIR_NETPLAY_DUMP"))
+		if (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DUMP"))
 		{
-			const std::string dumpPath = std::string(getenv("APPDATA")) + "/Sonic3AIR/dbg_" + (isHost ? "host_" : "client_") + std::to_string(frameNumber) + ".bin";
+			const std::string dumpPath = std::string(getenv("APPDATA") ? getenv("APPDATA") : ".") + "/Sonic3AIR/dbg_" + (isHost ? "host_" : "client_") + std::to_string(frameNumber) + ".bin";
 			FILE* dumpFile = fopen(dumpPath.c_str(), "wb");
 			if (nullptr != dumpFile) { fwrite(ram, 1, 0x10000, dumpFile); fclose(dumpFile); }
 		}
@@ -233,7 +291,7 @@ namespace
 		{
 			if (nullptr != file)
 				fclose(file);
-			const std::string path = std::string(getenv("APPDATA")) + (isHost ? "\\Sonic3AIR\\netsync_host.txt" : "\\Sonic3AIR\\netsync_client.txt");
+			const std::string path = std::string(getenv("APPDATA") ? getenv("APPDATA") : ".") + (isHost ? "\\Sonic3AIR\\netsync_host.txt" : "\\Sonic3AIR\\netsync_client.txt");
 			file = fopen(path.c_str(), "a");
 			fileIsHost = isHost;
 		}
@@ -256,7 +314,7 @@ void NetplayManager::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 		else if (nullptr != mNetplayHost && mNetplayHost->getHostState() == NetplayHost::HostState::GAME_RUNNING)
 			role = 1;
 		// Developer test switch: pretend to be online with a certain role
-		static const char* forced = getenv("S3AIR_FORCE_ROLE");
+		static const char* forced = TestHooks::getEnv("S3AIR_FORCE_ROLE");
 		if (nullptr != forced)
 			role = (uint8)atoi(forced);
 		Application::instance().getSimulation().getEmulatorInterface().writeMemory8(ROLE_ADDRESS, role);
@@ -412,18 +470,18 @@ std::string NetplayManager::getActiveModsInfo()
 uint32 NetplayManager::computeStateHash(uint32 frameNumber)
 {
 	const uint8* ram = Application::instance().getSimulation().getEmulatorInterface().getRam();
-	static const bool dump = (nullptr != getenv("S3AIR_NETPLAY_DUMP"));
+	static const bool dump = (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_DUMP"));
 	if (dump && frameNumber != 0)
 	{
 		// Developer debugging: write the game memory to a file, to find out which memory differs between host and client
 		const char* appdata = getenv("APPDATA");
-		const std::string path = std::string(appdata ? appdata : ".") + "/Sonic3AIR/ram_" + ((getenv("S3AIR_NETPLAY") && 0 == strncmp(getenv("S3AIR_NETPLAY"), "join", 4)) ? "client_" : "host_") + std::to_string(frameNumber) + ".bin";
+		const std::string path = std::string(appdata ? appdata : ".") + "/Sonic3AIR/ram_" + ((TestHooks::getEnv("S3AIR_NETPLAY") && 0 == strncmp(TestHooks::getEnv("S3AIR_NETPLAY"), "join", 4)) ? "client_" : "host_") + std::to_string(frameNumber) + ".bin";
 		FILE* f = fopen(path.c_str(), "wb");
 		if (nullptr != f) { fwrite(ram, 1, 0x10000, f); fclose(f); }
 		uint32 nz = 0;
 		for (int i = 0; i < 0x10000; ++i) nz += (ram[i] != 0);
 		uint32 h2 = rmx::addToFNV1a_32(rmx::startFNV1a_32(), ram, 0x10000);
-		FILE* g = fopen((std::string(appdata ? appdata : ".") + "/Sonic3AIR/hashlog_" + (getenv("S3AIR_NETPLAY") && 0 == strncmp(getenv("S3AIR_NETPLAY"), "join", 4) ? "client" : "host") + ".txt").c_str(), "a");
+		FILE* g = fopen((std::string(appdata ? appdata : ".") + "/Sonic3AIR/hashlog_" + (TestHooks::getEnv("S3AIR_NETPLAY") && 0 == strncmp(TestHooks::getEnv("S3AIR_NETPLAY"), "join", 4) ? "client" : "host") + ".txt").c_str(), "a");
 		if (nullptr != g) { fprintf(g, "frame %u nz %u hash %08x\n", frameNumber, nz, h2); fclose(g); }
 	}
 	uint32 hash = rmx::startFNV1a_32();

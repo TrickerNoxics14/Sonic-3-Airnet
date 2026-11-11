@@ -9,6 +9,7 @@
 #pragma once
 
 #include "oxygen/network/netplay/ExternalAddressQuery.h"
+#include "oxygen/network/netplay/NetplayFailure.h"
 
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
@@ -43,12 +44,20 @@ public:
 
 	uint64 mSessionID = 0x12345;		// Identifies the game at the game server (hosts and friends who use the same ID get connected)
 	std::string mLastErrorMessage;		// Shown to the player, e.g. when joining failed because of different mods
+	NetplayFailure::Reason mLastFailure = NetplayFailure::Reason::NONE;		// The reason behind "mLastErrorMessage", so the menu can offer the right way to continue
 
-	bool setupAsHost(bool registerSessionAtServer, uint16 port = DEFAULT_HOST_PORT);
+	// Hosting: with "directSecret" the host is joined by an IP join code that contains a fresh random secret (see "getHostSecret"), otherwise by the session code
+	bool setupAsHost(bool registerSessionAtServer, uint16 port = DEFAULT_HOST_PORT, bool directSecret = false);
+	bool setupAsHostWithSecret(uint16 port, uint32 secret);		// Developer test: a host with a given secret
+	inline uint32 getHostSecret() const  { return mHostSecret; }
 	inline bool isLanRequester(const std::string& ip) const  { return mUDPSocket.hasLanRequester(ip); }
 	void startJoinViaServer();
-	void startJoinDirect(std::string_view ip, uint16 port);
+	void startJoinDirect(std::string_view ip, uint16 port, uint32 secret);
 	void closeConnections();
+
+	// Remembers why something failed, shows it in plain language and writes it to the online log
+	void reportFailure(NetplayFailure::Reason reason, const std::string& detail = std::string());
+	void clearFailure();
 
 	void updateConnections(float deltaSeconds);
 	bool onReceivedGameServerPacket(ReceivedPacketEvaluation& evaluation);
@@ -69,6 +78,8 @@ private:
 private:
 	UDPSocket mUDPSocket;
 	float mLanSearchTimer = 0.0f;
+	uint32 mHostSecret = 0;
+	float mTestCloseTimer = 0.0f;
 	float mOnlineLogTimer = 0.0f;
 	bool mOnlineLogStarted = false;
 	uint32 mOnlineLogLastFrame = 0;

@@ -7,6 +7,7 @@
 */
 
 #include "sonic3air/pch.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "sonic3air/menu/MainMenu.h"
 #include "sonic3air/menu/GameApp.h"
 #include "sonic3air/menu/MenuBackground.h"
@@ -135,7 +136,7 @@ void MainMenu::update(float timeElapsed)
 	GameMenuBase::update(timeElapsed);
 
 	// Test hook: open the online lobby right away (used by the automated screenshot check)
-	if (mState == State::SHOW && nullptr != getenv("S3AIR_LOBBY_OPEN"))
+	if (mState == State::SHOW && nullptr != TestHooks::getEnv("S3AIR_LOBBY_OPEN"))
 	{
 		static bool opened = false;
 		if (!opened)

@@ -8,13 +8,17 @@
 
 #include "oxygen_netcore/pch.h"
 #include "oxygen_netcore/network/Sockets.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include <chrono>
 
 #ifdef _WIN32
 	#define WIN32_LEAN_AND_MEAN
 	#include <winsock2.h>
 	#include <Ws2tcpip.h>
+	#include <iphlpapi.h>
 	#undef ERROR
+
+	#pragma comment (lib, "Iphlpapi.lib")
 
 	#pragma comment (lib, "Ws2_32.lib")
 	#pragma comment (lib, "Mswsock.lib")
@@ -640,6 +644,9 @@ void UDPSocket::close()
 
 	// Reset to defaults
 	*mInternal = Internal();
+
+	// Packets that were only waiting for their simulated delay must not leave through a later socket
+	mDelayedPackets.clear();
 }
 
 bool UDPSocket::bindToPort(uint16 port, Sockets::ProtocolFamily protocolFamily)
@@ -763,8 +770,9 @@ bool UDPSocket::sendDataNow(const uint8* data, size_t length, const SocketAddres
 
 bool UDPSocket::sendData(const uint8* data, size_t length, const SocketAddress& destinationAddress)
 {
-	static const int lagMs = (nullptr != getenv("S3AIR_NET_LAG")) ? atoi(getenv("S3AIR_NET_LAG")) : 0;
-	static const int lossPercent = (nullptr != getenv("S3AIR_NET_LOSS")) ? atoi(getenv("S3AIR_NET_LOSS")) : 0;
+	// Developer test switches (only honoured with the test hooks enabled): the delay is applied to each packet in each direction on its way out, so the round trip is the full value only if both sides use it
+	static const int lagMs = (nullptr != TestHooks::getEnv("S3AIR_NET_LAG")) ? atoi(TestHooks::getEnv("S3AIR_NET_LAG")) : 0;
+	static const int lossPercent = (nullptr != TestHooks::getEnv("S3AIR_NET_LOSS")) ? atoi(TestHooks::getEnv("S3AIR_NET_LOSS")) : 0;
 	if (lagMs <= 0 && lossPercent <= 0)
 		return sendDataNow(data, length, destinationAddress);
 
@@ -900,6 +908,10 @@ bool UDPSocket::sendLanSearchRequest(uint16 port)
 	writeSession(buffer, LAN_FIND_MAGIC, mLanSearchSession);
 	sendData(buffer, SocketAddress("255.255.255.255", port));
 	sendData(buffer, SocketAddress("127.0.0.1", port));
+
+	// The limited broadcast above only leaves through one network adapter. A VPN adapter (Hamachi, Radmin, ...) needs the broadcast address of its own network.
+	for (const std::string& address : getSubnetBroadcastAddresses())
+		sendData(buffer, SocketAddress(address, port));
 	return true;
 }
 
@@ -915,6 +927,43 @@ bool UDPSocket::takeLanFoundAddress(SocketAddress& outAddress)
 bool UDPSocket::hasLanRequester(const std::string& ip) const
 {
 	return std::find(mLanRequesterIPs.begin(), mLanRequesterIPs.end(), ip) != mLanRequesterIPs.end();
+}
+
+std::vector<std::string> UDPSocket::getSubnetBroadcastAddresses()
+{
+	std::vector<std::string> result;
+#ifdef _WIN32
+	ULONG size = 16384;
+	std::vector<uint8> buffer(size);
+	ULONG error = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, (PIP_ADAPTER_ADDRESSES)buffer.data(), &size);
+	if (error == ERROR_BUFFER_OVERFLOW)
+	{
+		buffer.resize(size);
+		error = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, (PIP_ADAPTER_ADDRESSES)buffer.data(), &size);
+	}
+	if (error != NO_ERROR)
+		return result;
+
+	for (PIP_ADAPTER_ADDRESSES adapter = (PIP_ADAPTER_ADDRESSES)buffer.data(); nullptr != adapter; adapter = adapter->Next)
+	{
+		if (adapter->OperStatus != IfOperStatusUp || adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+			continue;
+		for (PIP_ADAPTER_UNICAST_ADDRESS unicast = adapter->FirstUnicastAddress; nullptr != unicast; unicast = unicast->Next)
+		{
+			if (nullptr == unicast->Address.lpSockaddr || unicast->Address.lpSockaddr->sa_family != AF_INET)
+				continue;
+			const uint32 address = ntohl(((const sockaddr_in*)unicast->Address.lpSockaddr)->sin_addr.s_addr);
+			const uint32 prefix = unicast->OnLinkPrefixLength;
+			if (prefix == 0 || prefix >= 31)
+				continue;
+			const uint32 broadcast = address | (0xffffffffu >> prefix);
+			const std::string text = std::to_string((broadcast >> 24) & 0xff) + "." + std::to_string((broadcast >> 16) & 0xff) + "." + std::to_string((broadcast >> 8) & 0xff) + "." + std::to_string(broadcast & 0xff);
+			if (std::find(result.begin(), result.end(), text) == result.end() && result.size() < 16)
+				result.push_back(text);
+		}
+	}
+#endif
+	return result;
 }
 
 bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
@@ -934,6 +983,16 @@ bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
 
 	if (isFind && mLanHostSession != 0 && sessionID == mLanHostSession)
 	{
+		// Answer at most 20 requests per second: a flood of requests must not make this host send a flood of answers
+		const double nowSeconds = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+		if (nowSeconds - mLanReplyWindowStart >= 1.0)
+		{
+			mLanReplyWindowStart = nowSeconds;
+			mLanRepliesInWindow = 0;
+		}
+		if (++mLanRepliesInWindow > 20)
+			return true;
+
 		std::vector<uint8> answer;
 		writeSession(answer, LAN_HERE_MAGIC, sessionID);
 		sendData(answer, outReceiveResult.mSenderAddress);
@@ -997,7 +1056,10 @@ bool UDPSocket::receiveInternal(ReceiveResult& outReceiveResult)
 		// Done
 		outReceiveResult.mBuffer.resize(bytesRead);
 		if (handleLanPacket(outReceiveResult))
+		{
 			outReceiveResult.mBuffer.clear();
+			mConsumedLanPacket = true;
+		}
 		return true;
 	}
 }

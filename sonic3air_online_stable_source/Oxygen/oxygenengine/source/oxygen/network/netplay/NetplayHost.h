@@ -51,7 +51,14 @@ public:
 	{
 		bool mReadyForGame = true;	// False while a client is still receiving the game state of an already running game
 		bool mLobbyReady = false;	// The player pressed Ready in the lobby
-		uint8 mPlayerIndex = 0;
+		bool mAuthenticated = false;	// The friend proved that it knows the code (see NetplayAuth.h); until then it is not a player and all its packets are ignored
+		bool mChallengeSent = false;
+		uint32 mHostNonce = 0;
+		float mPendingSeconds = 0.0f;	// Time spent without being authenticated
+		float mRefuseTimer = -1.0f;		// 0 or more: the friend got a refusal and gets disconnected soon
+		uint32 mLastResyncTicks = 0;
+		uint8 mPlayerIndex = 0xff;		// Assigned once the friend is authenticated
+		inline bool isActive() const  { return mAuthenticated && getState() == NetConnection::State::CONNECTED; }
 		uint32 mStartGamePacketID = 0;
 		uint32 mLastReceivedFrameNumber = 0;
 		uint16 mLastReceivedInput = 0;
@@ -69,6 +76,7 @@ public:
 
 	inline HostState getHostState() const  { return mHostState; }
 	inline const std::vector<PlayerConnection*>& getPlayerConnections() const  { return mPlayerConnections; }
+	int getAuthenticatedCount() const;		// Friends who are connected and proved that they know the code
 
 	void registerAtServer();
 
@@ -97,6 +105,10 @@ public:
 
 private:
 	void sendPunchthroughPacket(ConnectingPlayer& player);
+	void handleJoinAuth(PlayerConnection& connection, const JoinAuthPacket& packet);
+	void updateHandshakes(float deltaSeconds);
+	void retireConnection(PlayerConnection* connection);	// Takes it out of the list; it gets deleted a bit later, when no queued packet can refer to it any more
+	void refuseConnection(PlayerConnection& connection, uint8 result);
 	void beginJoinTransfer(uint32 frameNumber);
 	void updateJoinTransfer(float deltaSeconds);
 	void updateLobby(float deltaSeconds);
@@ -116,6 +128,11 @@ private:
 	bool mRestrictToKnownPeers = false;
 	std::vector<std::string> mKnownPeerIPs;
 	std::vector<PlayerConnection*> mPlayerConnections;
+	std::vector<PlayerConnection*> mRetiredConnections;
+	std::map<std::string, int> mFailedAuthByIP;		// Wrong codes per address: after a few, that address gets ignored
+	int mMaxClients = MAX_PLAYERS - 1;
+	float mHostStateTimer = 0.0f;
+	HostState mTimedHostState = HostState::NONE;
 	float mLobbyBroadcastTimer = 0.0f;
 	uint32 mLobbyLastSignature = 0xffffffff;
 	bool mLobbyHostStarting = false;

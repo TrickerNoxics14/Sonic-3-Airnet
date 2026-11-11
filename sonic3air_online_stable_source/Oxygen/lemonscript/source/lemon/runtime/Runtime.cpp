@@ -766,6 +766,14 @@ namespace lemon
 			serializer.serializeAs<uint32>(controlFlow.mCallStack.count);
 			if (serializer.isReading())
 			{
+				// A save state may come from the network: refuse sizes that no real game state has, before anything gets allocated or written
+				if (controlFlow.mCallStack.count > 0x1000)
+				{
+					if (nullptr != outError)
+						*outError = "Invalid call stack size in the saved state";
+					controlFlow.mCallStack.clear();
+					return false;
+				}
 				controlFlow.mCallStack.resize(controlFlow.mCallStack.count);
 				for (uint16 i = 0; i < controlFlow.mCallStack.count; ++i)
 				{
@@ -797,6 +805,13 @@ namespace lemon
 
 					controlFlow.mCallStack[i].mLocalVariablesStart = controlFlow.mLocalVariablesSize;
 					const size_t numLocalVars = serializer.read<uint32>();
+					if (numLocalVars > ControlFlow::VAR_STACK_LIMIT || controlFlow.mLocalVariablesSize + numLocalVars > ControlFlow::VAR_STACK_LIMIT)
+					{
+						if (nullptr != outError)
+							*outError = "Invalid number of local variables in the saved state";
+						controlFlow.mCallStack.clear();
+						return false;
+					}
 					for (size_t k = controlFlow.mLocalVariablesSize; k < controlFlow.mLocalVariablesSize + numLocalVars; ++k)
 					{
 						controlFlow.mLocalVariablesBuffer[k] = serializer.read<int64>();
@@ -806,7 +821,7 @@ namespace lemon
 				}
 
 				// Make corrections to the program counters for the case that the call points changed
-				for (uint16 i = 0; i < controlFlow.mCallStack.count - 1; ++i)
+				for (uint16 i = 0; i + 1 < controlFlow.mCallStack.count; ++i)
 				{
 					const size_t opcodeIndex = (size_t)matchCallerProgramCounter(*mProgram, controlFlow.mCallStack[i], controlFlow.mCallStack[i + 1]);
 					controlFlow.mCallStack[i].mProgramCounter = controlFlow.mCallStack[i].mRuntimeFunction->translateToRuntimeProgramCounter(opcodeIndex);
@@ -834,6 +849,13 @@ namespace lemon
 			if (serializer.isReading())
 			{
 				const uint32 size = serializer.read<uint32>();
+				if (size > ControlFlow::VALUE_STACK_LAST_INDEX - ControlFlow::VALUE_STACK_FIRST_INDEX)
+				{
+					if (nullptr != outError)
+						*outError = "Invalid value stack size in the saved state";
+					controlFlow.mCallStack.clear();
+					return false;
+				}
 				controlFlow.mValueStackPtr = &controlFlow.mValueStackStart[size];
 				for (uint32 i = 0; i < size; ++i)
 				{

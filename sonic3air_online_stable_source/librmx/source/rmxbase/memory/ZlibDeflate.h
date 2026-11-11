@@ -11,6 +11,6 @@
 
 namespace ZlibDeflate
 {
-	FUNCTION_EXPORT bool decode(std::vector<uint8>& output, const void* inputData, size_t inputSize);
+	FUNCTION_EXPORT bool decode(std::vector<uint8>& output, const void* inputData, size_t inputSize, size_t maxOutputSize = 0);	// A "maxOutputSize" other than 0 makes decoding fail instead of expanding beyond that size (plus one internal chunk)
 	FUNCTION_EXPORT bool encode(std::vector<uint8>& output, const void* inputData, size_t inputSize, int compressionLevel = 5);
 }

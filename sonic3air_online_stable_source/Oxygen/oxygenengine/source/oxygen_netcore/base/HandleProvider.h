@@ -9,6 +9,7 @@
 #pragma once
 
 #include <vector>
+#include <random>
 
 
 template<typename HANDLE, typename CONTENT, size_t DEFAULT_SIZE = 32>
@@ -66,7 +67,9 @@ public:
 		}
 
 		// Get a new random handle candidate
-		HANDLE newHandle = (HANDLE)rand() + (HANDLE)rand() * RAND_MAX;
+		//  -> Seeded from the operating system (rand() starts with the same sequence in every run, which makes connection IDs guessable)
+		static std::mt19937 randomGenerator { std::random_device()() };
+		HANDLE newHandle = (HANDLE)randomGenerator();
 		for (size_t tries = 0; tries < mEntries.size(); ++tries)
 		{
 			if (isValidHandle(newHandle))

@@ -15,7 +15,7 @@
 #endif
 
 
-bool ZlibDeflate::decode(std::vector<uint8>& output, const void* inputData, size_t inputSize)
+bool ZlibDeflate::decode(std::vector<uint8>& output, const void* inputData, size_t inputSize, size_t maxOutputSize)
 {
 	// Setup inflate
 	z_stream strm;
@@ -34,6 +34,11 @@ bool ZlibDeflate::decode(std::vector<uint8>& output, const void* inputData, size
 	do
 	{
 		const size_t outputOffset = output.size();
+		if (maxOutputSize != 0 && outputOffset > maxOutputSize)
+		{
+			inflateEnd(&strm);
+			return false;
+		}
 		output.resize(outputOffset + CHUNK_SIZE);
 		strm.avail_out = CHUNK_SIZE;
 		strm.next_out = &output[outputOffset];

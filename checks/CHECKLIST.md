@@ -157,3 +157,17 @@ Four-view rendering requires the extended engine build. The official stock execu
 ## Party mode coverage limits
 
 Three/four-player mode remains experimental. The extended engine supports four-way views in validated scrolling scenes; stock builds and unsupported scene segments use a shared camera with grounded-leader regrouping. Ordinary terrain movement, jumping, representative solid-platform contacts, counters, damage, respawn and sampled four-quadrant images are checked. Full routes, every boss/special sequence with all four players, every interactable, and all advanced ability/shield/super combinations remain unverified.
+
+
+## Netplay hardening (2026-11-11)
+
+Offline core tests (checksun_online_core_tests.ps1, part of run_online_backend_checks.ps1): join code with secret (CRC-12, every single typo noticed), session code with check character, challenge-response (right and wrong secret, replay, role swap, LAN tag), failure reason messages, absurd blob size, zip bomb, two connection managers over loopback (spoofed end-of-connection ignored, junk LAN packets, control case), test hooks off without marker.
+
+| Stage | What it proves |
+| --- | --- |
+| S1-S3 | Host with a secret: a friend with a wrong secret is refused and told WRONG_CODE, gets no slot or game; the right secret gets in and both sides log the proof |
+| X1-X10 | Reasons: server unreachable (friend and host), wrong code, blocked/timeout, version, mods, lobby full, Retry gets in after a slot became free, host closed (graceful and killed) |
+| U4/U5 | The unzipped package ignores S3AIR_* variables; with the marker file next to it the same variables work |
+| A12 | No testhooks.enabled in the zip |
+
+Limits: all on one computer (loopback/LAN fallback); the Retry button press itself is simulated by a test switch; a stranger who skips the handshake is covered by unit tests of the proof, not by a raw-packet runtime test.

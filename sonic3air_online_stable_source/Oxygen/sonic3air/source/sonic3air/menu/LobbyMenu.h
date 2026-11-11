@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sonic3air/menu/GameMenuBase.h"
+#include "oxygen/network/netplay/NetplayFailure.h"
 
 class MenuBackground;
 
@@ -60,6 +61,8 @@ private:
 	void startGame();
 	void goBack();
 	void getSlotStates(uint8 outStates[4], bool& outConnected) const;
+	void showFailureAndReturnToStart();
+	void retry();
 
 private:
 	MenuBackground* mMenuBackground = nullptr;
@@ -68,4 +71,11 @@ private:
 	GameMenuEntries mMenuEntries;
 	std::string mMessage;		// Shown to the player, e.g. why joining failed
 	bool mShowCopied = false;
+
+	// What the player tried last, so that "Retry" can do the same again after a failure
+	std::string mLastJoinCode;
+	bool mLastWasHosting = false;
+	float mAutoRetryTimer = 0.0f;		// Developer test switch S3AIR_LOBBY_AUTORETRY
+	bool mLastHostViaServer = true;
+	NetplayFailure::Reason mFailure = NetplayFailure::Reason::NONE;
 };

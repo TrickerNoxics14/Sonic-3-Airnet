@@ -17,6 +17,7 @@
 #include "oxygen/network/netplay/NetplayManager.h"
 #include "oxygen/network/netplay/NetplayHost.h"
 #include "oxygen/network/netplay/NetplayCodes.h"
+#include "oxygen/network/netplay/NetplayAuth.h"
 #include <random>
 
 
@@ -164,7 +165,7 @@ void NetworkingWindow::buildContent()
 			ImGui::SameLine();
 			if (ImGui::Button("Join directly"))
 			{
-				netplayManager.startJoinDirect(ipBuffer, port);
+				netplayManager.startJoinDirect(ipBuffer, port, NetplayAuth::secretFromSession(netplayManager.mSessionID));		// Developer window: the secret comes from the session ID field
 			}
 
 			ImGui::SameLine();
@@ -379,7 +380,7 @@ void OnlineCoopWindow::buildImGuiContent()
 		}
 		else
 		{
-			const std::string code = makeJoinCode(addresses[mSelectedAddress], NetplayManager::DEFAULT_HOST_PORT);
+			const std::string code = makeJoinCode(addresses[mSelectedAddress], NetplayManager::DEFAULT_HOST_PORT, netplayManager.getHostSecret());
 			ImGui::Text("Give your friend this code:");
 			ImGui::SetWindowFontScale(2.4f);
 			ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.3f, 1.0f), "%s", code.c_str());
@@ -454,7 +455,8 @@ void OnlineCoopWindow::buildImGuiContent()
 		{
 			netplayManager.mLastErrorMessage.clear();
 			mHostedViaServer = false;
-			netplayManager.setupAsHost(false, NetplayManager::DEFAULT_HOST_PORT);
+			// The join code contains a fresh random secret: only friends who got the code can get in
+			netplayManager.setupAsHost(false, NetplayManager::DEFAULT_HOST_PORT, true);
 		}
 
 		ImGui::Separator();
@@ -467,15 +469,16 @@ void OnlineCoopWindow::buildImGuiContent()
 			uint64 sessionID = 0;
 			std::string ip;
 			uint16 port = NetplayManager::DEFAULT_HOST_PORT;
+			uint32 secret = 0;
 			if (readSessionCode(mIpBuffer, sessionID))
 			{
 				netplayManager.mSessionID = sessionID;
 				netplayManager.startJoinViaServer();
 			}
-			else if (readJoinCode(mIpBuffer, ip, port))
-				netplayManager.startJoinDirect(ip, port);
+			else if (readJoinCode(mIpBuffer, ip, port, secret))
+				netplayManager.startJoinDirect(ip, port, secret);
 			else
-				netplayManager.startJoinDirect(mIpBuffer, NetplayManager::DEFAULT_HOST_PORT);	// An address typed in directly works as well
+				netplayManager.reportFailure(NetplayFailure::Reason::WRONG_CODE, "Type the code exactly as your friend sees it (an IP address alone is not enough).");
 		}
 	}
 

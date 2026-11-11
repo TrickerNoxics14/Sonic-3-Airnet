@@ -83,66 +83,100 @@ namespace NetplayCodes
 		return true;
 	}
 
-	// 12 bit checksum over address and port, so that most typing mistakes get noticed
-	inline uint32 joinCodeChecksum(uint64 data)
+	// 12 bit checksum (CRC-12, polynomial 0x80F) over the data bits of a join code.
+	// A single mistyped character changes at most five neighbouring bits, and a CRC-12 notices every error burst of up to 12 bits.
+	inline uint32 joinCodeChecksum(const uint8* bits, int numBits)
 	{
-		uint32 check = 0x5a5;
-		for (int i = 5; i >= 0; --i)
-			check = (check * 31 + (uint32)((data >> (8 * i)) & 0xff)) & 0xfff;
-		return check;
+		uint32 crc = 0x5a5;
+		for (int i = 0; i < numBits; ++i)
+		{
+			const uint32 top = ((crc >> 11) & 1) ^ bits[i];
+			crc = (crc << 1) & 0xfff;
+			if (top)
+				crc ^= 0x80f;
+		}
+		return crc;
 	}
 
-	// Join code: the host's address and port (48 bits) plus a checksum (12 bits), in 12 characters, written as "XXXX-XXXX-XXXX"
-	inline std::string makeJoinCode(const std::string& ip, uint16 port)
+	// Join code: the host's address and port (48 bits), a random secret (30 bits) and a checksum (12 bits), in 18 characters, written as "XXXXXX-XXXXXX-XXXXXX".
+	// The secret is what keeps strangers out: the host only lets in friends who prove that they know it (see NetplayAuth.h).
+	static const int JOIN_CODE_DATA_BITS = 78;
+	static const int JOIN_CODE_CHARS = 18;
+
+	inline std::string makeJoinCode(const std::string& ip, uint16 port, uint32 secret)
 	{
 		uint32 address = 0;
-		if (!parseIPv4(ip, address))
+		if (!parseIPv4(ip, address) || secret > 0x3fffffffu)
 			return std::string();
 
-		const uint64 data = ((uint64)address << 16) | (uint64)port;
-		uint64 value = (data << 12) | joinCodeChecksum(data);
-		char chars[12] = { 0 };
-		for (int i = 11; i >= 0; --i)
+		uint8 bits[JOIN_CODE_CHARS * 5] = { 0 };
+		int count = 0;
+		auto put = [&](uint64 value, int numBits)
 		{
-			chars[i] = ALPHABET[value & 31];
-			value >>= 5;
-		}
+			for (int i = numBits - 1; i >= 0; --i)
+				bits[count++] = (uint8)((value >> i) & 1);
+		};
+		put(address, 32);
+		put(port, 16);
+		put(secret, 30);
+		put(joinCodeChecksum(bits, JOIN_CODE_DATA_BITS), 12);
 
 		std::string result;
-		for (int i = 0; i < 12; ++i)
+		for (int c = 0; c < JOIN_CODE_CHARS; ++c)
 		{
-			if (i == 4 || i == 8)
+			if (c > 0 && (c % 6) == 0)
 				result += '-';
-			result += chars[i];
+			int index = 0;
+			for (int b = 0; b < 5; ++b)
+				index = (index << 1) | bits[c * 5 + b];
+			result += ALPHABET[index];
 		}
 		return result;
 	}
 
-	inline bool readJoinCode(const char* text, std::string& outIp, uint16& outPort)
+	inline bool readJoinCode(const char* text, std::string& outIp, uint16& outPort, uint32& outSecret)
 	{
 		const std::string clean = cleanCode(text);
-		if (clean.size() != 12)
+		if ((int)clean.size() != JOIN_CODE_CHARS)
 			return false;
 
-		uint64 value = 0;
-		for (char ch : clean)
+		uint8 bits[JOIN_CODE_CHARS * 5] = { 0 };
+		for (int c = 0; c < JOIN_CODE_CHARS; ++c)
 		{
-			const int index = alphabetIndex(ch);
+			const int index = alphabetIndex(clean[c]);
 			if (index < 0)
 				return false;
-			value = (value << 5) | (uint64)index;
+			for (int b = 0; b < 5; ++b)
+				bits[c * 5 + b] = (uint8)((index >> (4 - b)) & 1);
 		}
 
-		const uint64 data = value >> 12;
-		if ((uint32)(value & 0xfff) != joinCodeChecksum(data))
+		auto get = [&](int offset, int numBits)
+		{
+			uint64 value = 0;
+			for (int i = 0; i < numBits; ++i)
+				value = (value << 1) | bits[offset + i];
+			return value;
+		};
+		if ((uint32)get(JOIN_CODE_DATA_BITS, 12) != joinCodeChecksum(bits, JOIN_CODE_DATA_BITS))
 			return false;
 
-		outIp = std::to_string((data >> 40) & 0xff) + "." + std::to_string((data >> 32) & 0xff) + "." + std::to_string((data >> 24) & 0xff) + "." + std::to_string((data >> 16) & 0xff);
-		outPort = (uint16)(data & 0xffff);
+		const uint32 address = (uint32)get(0, 32);
+		outIp = std::to_string((address >> 24) & 0xff) + "." + std::to_string((address >> 16) & 0xff) + "." + std::to_string((address >> 8) & 0xff) + "." + std::to_string(address & 0xff);
+		outPort = (uint16)get(32, 16);
+		outSecret = (uint32)get(48, 30);
 		return true;
 	}
 
-	// Session code: a random 40 bit number that identifies a game at the game server, written as "XXXX-XXXX"
+	// Session code: a random 40 bit number that identifies a game at the game server, plus one check character, written as "XXXX-XXXXX".
+	// The check character notices every single mistyped character. The session ID also derives the secret that is checked when connecting.
+	inline int sessionCodeCheckIndex(uint64 sessionID)
+	{
+		int sum = 7;
+		for (int i = 0; i < 8; ++i)
+			sum += (2 * i + 1) * (int)((sessionID >> ((7 - i) * 5)) & 31);
+		return sum & 31;
+	}
+
 	inline std::string makeSessionCode(uint64 sessionID)
 	{
 		std::string result;
@@ -152,23 +186,28 @@ namespace NetplayCodes
 			if (i == 4)
 				result += '-';
 		}
+		result += ALPHABET[sessionCodeCheckIndex(sessionID)];
 		return result;
 	}
 
+	// Session IDs below 0x10000000 are never generated (and an empty or mistyped field looks like "0000-00000")
 	inline bool readSessionCode(const char* text, uint64& outSessionID)
 	{
 		const std::string clean = cleanCode(text);
-		if (clean.size() != 8)
+		if (clean.size() != 9)
 			return false;
 
 		uint64 value = 0;
-		for (char ch : clean)
+		for (int i = 0; i < 8; ++i)
 		{
-			const int index = alphabetIndex(ch);
+			const int index = alphabetIndex(clean[i]);
 			if (index < 0)
 				return false;
 			value = (value << 5) | (uint64)index;
 		}
+		const int check = alphabetIndex(clean[8]);
+		if (check < 0 || check != sessionCodeCheckIndex(value) || value < 0x10000000ull)
+			return false;
 		outSessionID = value;
 		return true;
 	}
@@ -182,7 +221,7 @@ namespace NetplayCodes
 			results.push_back(std::string(passed ? "PASS " : "FAIL ") + name + (detail.empty() ? std::string() : ": " + detail));
 		};
 
-		const uint64 sessionSamples[] = { 0x10000000ull, 0xffffffffffull, 0x123456789aull, 0x1000000001ull, 0x1ull, 0x8000000000ull };
+		const uint64 sessionSamples[] = { 0x10000000ull, 0xffffffffffull, 0x123456789aull, 0x1000000001ull, 0x8000000000ull };
 		{
 			bool passed = true;
 			std::string failures;
@@ -190,7 +229,7 @@ namespace NetplayCodes
 			{
 				const std::string code = makeSessionCode(sample);
 				uint64 back = 0;
-				if (code.size() != 9 || !readSessionCode(code.c_str(), back) || back != sample)
+				if (code.size() != 10 || !readSessionCode(code.c_str(), back) || back != sample)
 				{
 					passed = false;
 					failures += code + " ";
@@ -207,45 +246,70 @@ namespace NetplayCodes
 					lowerNoDash += (char)((ch >= 'A' && ch <= 'Z') ? ch + 32 : ch);
 			report("session code accepts lower case without dash", readSessionCode(lowerNoDash.c_str(), back) && back == 0x123456789aull, "");
 		}
+		{
+			// Every single mistyped character of a session code is noticed
+			int accepted = 0;
+			const std::string code = makeSessionCode(0x123456789aull);
+			for (size_t i = 0; i < code.size(); ++i)
+			{
+				if (code[i] == '-')
+					continue;
+				for (const char* alternative = ALPHABET; *alternative != 0; ++alternative)
+				{
+					if (*alternative == code[i])
+						continue;
+					std::string mutated = code;
+					mutated[i] = *alternative;
+					uint64 back = 0;
+					if (readSessionCode(mutated.c_str(), back))
+						++accepted;
+				}
+			}
+			report("session code notices every single typing mistake", accepted == 0, std::to_string(accepted) + " accepted");
+			uint64 back = 0;
+			report("session code rejects the empty id and short input", !readSessionCode("0000-00000", back) && !readSessionCode("ABCD-123", back), "");
+		}
 
-		struct Sample { std::string ip; uint16 port; };
-		const std::vector<Sample> joinSamples = { { "26.12.200.7", 28840 }, { "100.64.1.2", 28840 }, { "192.168.0.5", 28840 }, { "255.255.255.255", 65535 }, { "5.193.152.226", 28840 }, { "0.0.0.1", 1 } };
+		struct Sample { std::string ip; uint16 port; uint32 secret; };
+		const std::vector<Sample> joinSamples = { { "26.12.200.7", 28840, 0x12345678u & 0x3fffffffu }, { "100.64.1.2", 28840, 1 }, { "192.168.0.5", 28840, 0x3fffffffu }, { "255.255.255.255", 65535, 0x2aaaaaaau }, { "5.193.152.226", 28840, 0x15555555u }, { "0.0.0.1", 1, 0x00ff00ffu } };
 		{
 			bool passed = true;
 			std::string failures;
 			for (const Sample& sample : joinSamples)
 			{
-				const std::string code = makeJoinCode(sample.ip, sample.port);
+				const std::string code = makeJoinCode(sample.ip, sample.port, sample.secret);
 				std::string ip;
 				uint16 port = 0;
-				if (code.size() != 14 || !readJoinCode(code.c_str(), ip, port) || ip != sample.ip || port != sample.port)
+				uint32 secret = 0;
+				if (code.size() != 20 || !readJoinCode(code.c_str(), ip, port, secret) || ip != sample.ip || port != sample.port || secret != sample.secret)
 				{
 					passed = false;
 					failures += sample.ip + " ";
 				}
 			}
-			report("join code round trip", passed, failures);
+			report("join code round trip (address, port and secret)", passed, failures);
 		}
-		report("join code rejects an invalid address", makeJoinCode("999.1.1.1", 28840).empty() && makeJoinCode("1.2.3", 28840).empty(), "");
+		report("join code rejects an invalid address or secret", makeJoinCode("999.1.1.1", 28840, 5).empty() && makeJoinCode("1.2.3", 28840, 5).empty() && makeJoinCode("1.2.3.4", 28840, 0x40000000u).empty(), "");
 		{
-			const std::string code = makeJoinCode("26.12.200.7", 28840);
+			const std::string code = makeJoinCode("26.12.200.7", 28840, 0x2468aceu);
 			std::string ip;
 			uint16 port = 0;
+			uint32 secret = 0;
 			const std::string shorter = code.substr(0, code.size() - 1);
 			const std::string longer = code + "7";
-			report("join code rejects wrong length", !readJoinCode(shorter.c_str(), ip, port) && !readJoinCode(longer.c_str(), ip, port), "");
+			report("join code rejects wrong length", !readJoinCode(shorter.c_str(), ip, port, secret) && !readJoinCode(longer.c_str(), ip, port, secret), "");
 
 			std::string invalidChar = code;
 			invalidChar[0] = 'U';
-			report("join code rejects invalid characters", !readJoinCode(invalidChar.c_str(), ip, port), "");
+			report("join code rejects invalid characters", !readJoinCode(invalidChar.c_str(), ip, port, secret), "");
 		}
 		{
-			// Every single character typo in a code must be noticed, except for rare checksum coincidences
+			// Every single character typo in a code must be noticed (CRC-12 detects all bursts of up to 12 bits)
 			int total = 0;
 			int accepted = 0;
 			for (const Sample& sample : joinSamples)
 			{
-				const std::string code = makeJoinCode(sample.ip, sample.port);
+				const std::string code = makeJoinCode(sample.ip, sample.port, sample.secret);
 				for (size_t i = 0; i < code.size(); ++i)
 				{
 					if (code[i] == '-')
@@ -258,13 +322,14 @@ namespace NetplayCodes
 						mutated[i] = *alternative;
 						std::string ip;
 						uint16 port = 0;
+						uint32 secret = 0;
 						++total;
-						if (readJoinCode(mutated.c_str(), ip, port))
+						if (readJoinCode(mutated.c_str(), ip, port, secret))
 							++accepted;
 					}
 				}
 			}
-			report("join code notices typing mistakes", accepted * 1000 <= total * 5, std::to_string(accepted) + " of " + std::to_string(total) + " single character typos accepted (limit 0.5 percent)");
+			report("join code notices every single typing mistake", accepted == 0, std::to_string(accepted) + " of " + std::to_string(total) + " single character typos accepted");
 		}
 
 		return results;

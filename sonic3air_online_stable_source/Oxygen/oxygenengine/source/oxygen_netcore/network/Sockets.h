@@ -191,7 +191,9 @@ public:
 	void clearLan();
 	bool sendLanSearchRequest(uint16 port);
 	bool takeLanFoundAddress(SocketAddress& outAddress);
-	bool hasLanRequester(const std::string& ip) const;		// Somebody on the network asked for this host's session code (and got an answer)
+	bool hasLanRequester(const std::string& ip) const;
+	inline bool consumedLanPacket()  { const bool result = mConsumedLanPacket;  mConsumedLanPacket = false;  return result; }	// The last receive only handled a LAN discovery packet inside the socket
+	static std::vector<std::string> getSubnetBroadcastAddresses();		// Broadcast addresses of the network adapters (empty on platforms where this is not implemented)		// Somebody on the network asked for this host's session code (and got an answer)
 
 	// Developer test: pretend to have a bad connection (environment variables S3AIR_NET_LAG in ms and S3AIR_NET_LOSS in percent)
 	void flushDelayedPackets();
@@ -209,6 +211,9 @@ private:
 	std::vector<std::string> mLanRequesterIPs;
 	uint64 mLanSearchSession = 0;
 	bool mLanFound = false;
+	bool mConsumedLanPacket = false;
+	double mLanReplyWindowStart = 0.0;
+	int mLanRepliesInWindow = 0;
 	SocketAddress mLanFoundAddress;
 
 	struct DelayedPacket

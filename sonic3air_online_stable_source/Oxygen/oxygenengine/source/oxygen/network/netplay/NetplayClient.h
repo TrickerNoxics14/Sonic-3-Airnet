@@ -11,6 +11,7 @@
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/NetConnection.h"
 #include "oxygen_netcore/serverclient/NetplaySetupPackets.h"
+#include "oxygen/network/netplay/NetplayFailure.h"
 
 class ControlsIn;
 class NetplayManager;
@@ -52,6 +53,10 @@ public:
 	inline uint32 getLastSyncOkFrame() const								{ return mLastSyncOkFrame; }
 	inline bool isReceivingGameState() const								{ return mReceivingJoinState; }
 
+	// The secret from the code that the player typed (see NetplayAuth.h): without it the host does not let us in, and without the host's proof we do not trust it
+	inline void setAuthSecret(uint32 secret)  { mAuthSecret = secret; }
+	inline bool isHostVerified() const  { return mHostVerified; }
+
 	void joinViaServer();
 	void connectDirectlyToHost(std::string_view ip, uint16 port);
 
@@ -81,6 +86,10 @@ private:
 
 private:
 	void startGame(const StartGamePacket& packet);
+	void beginConnectTo(const SocketAddress& address);
+	void fail(NetplayFailure::Reason reason, const std::string& detail = std::string());
+	void handleJoinChallenge(uint32 hostNonce);
+	void handleJoinReply(const struct JoinReplyPacket& packet);
 	void onReceivedJoinStateChunk(const JoinStateChunkPacket& packet);
 	void finishJoinTransfer();
 
@@ -96,6 +105,14 @@ private:
 	bool mResumeSession = false;
 	bool mReconnectTestTriggered = false;
 	uint8 mPlayerIndex = 1;
+
+	// Handshake with the host
+	uint32 mAuthSecret = 0;
+	bool mHostVerified = false;		// The host answered the challenge correctly (and let us in): only then is anything it says believed
+	bool mAuthSent = false;
+	uint32 mHostNonce = 0;
+	uint32 mClientNonce = 0;
+	float mHeartbeatTimer = 0.0f;
 
 	network::RegisterForNetplayRequest mRegistrationRequest;
 	SocketAddress mReceivedPunchthroughPacketSender;

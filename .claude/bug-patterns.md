@@ -137,3 +137,37 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Siblings: split.lemon UpdateLevelDisplay fixed (copy of 0x280 bytes saved and restored)
 - Guard: G stage, all 24 acts
 - Lesson: A buffer sized exactly for today's maximum has a neighbour; guard it before raising the maximum.
+
+## 2026-11-11 · peer-trusted-by-reachability · cpp
+- Seed: NetplayHost::createNetConnection - anyone who could reach UDP 28840 got a player slot; the LAN broadcast carried the session ID in clear, a fake LAN host was believed
+- Broken assumption: being able to send a packet to the port (or to answer a broadcast) proves being a friend
+- Search: `grep -rn "createNetConnection\|onReceivedPacket" Oxygen/oxygenengine/source/oxygen/network`
+- Fix: secret in the join/session code, challenge-response in both directions (NetplayAuth.h); nothing but the handshake is processed before it; broadcast carries a one-way tag
+- Guard: core tests (auth, replay, codes); runtime stage S (wrong secret refused, right secret in)
+- Lesson: authenticate the peer before giving it any state, and let the peer authenticate the host too.
+
+## 2026-11-11 · test-switch-ships-in-release · cpp
+- Seed: getenv("S3AIR_...") in the release exe (hosting at startup, memory dumps, packet dropping)
+- Broken assumption: a developer environment variable never exists on a player's computer
+- Search: `grep -rn 'getenv("S3AIR\|getEnv("S3AIR' Oxygen --include=*.cpp` (everything must go through TestHooks::getEnv)
+- Guard: testhooks.enabled marker (made by run_checks.ps1 only), make_package.ps1 and A12 refuse it, U4/U5 run the unzipped exe with the variables, with and without marker
+- Lesson: a debug path needs a switch the shipped product cannot have.
+
+## 2026-11-11 · budget-counts-handled-packets · cpp
+- Seed: ConnectionManager::updateReceivePacketsInternal - a LAN discovery packet handled inside the socket returned an empty buffer, which ended the loop; 12 junk packets starved a real one
+- Broken assumption: an empty read means the socket is drained
+- Guard: core test "junk LAN discovery packets do not hold back a real packet" (failed before the fix with 12 packets)
+- Lesson: distinguish "nothing there" from "consumed internally".
+
+## 2026-11-11 · wire-size-used-for-allocation · cpp
+- Seed: VectorBinarySerializer blobs, zlib inflate, Lemon runtime save-state counts (call stack, locals, value stack) sized by numbers read from the network
+- Search: `grep -rn "serializeData(\|resize(.*read<" Oxygen`
+- Fix: per-field limits in the packets, bounded inflate (ZlibDeflate::decode maxOutputSize), bounds in Runtime::serializeState, loadState fails on serializer error
+- Guard: core tests (absurd blob size refused, zip bomb stopped)
+- Lesson: every length that came over the wire needs a ceiling before it is used.
+
+## 2026-11-11 · failure-without-reason · cpp
+- Seed: client ignored refusals (CONNECTION_INVALID) and a vanished host; host waited forever for the server; messages were free text
+- Fix: NetplayFailure reasons with plain messages, JoinReply refusal packet, heartbeat, timeouts on both sides, Retry in the lobby
+- Guard: runtime stage X (server unreachable, wrong code, blocked, version, mods, lobby full + retry, host closed, host killed, host cannot reach server)
+- Lesson: every wait needs a timeout and every timeout a reason the player can act on.

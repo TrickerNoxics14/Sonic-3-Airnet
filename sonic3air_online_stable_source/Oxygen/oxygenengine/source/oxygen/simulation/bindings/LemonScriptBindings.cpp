@@ -7,6 +7,7 @@
 */
 
 #include "oxygen/pch.h"
+#include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen/simulation/bindings/LemonScriptBindings.h"
 #include "oxygen/simulation/bindings/RendererBindings.h"
 #include "oxygen/simulation/CodeExec.h"
@@ -695,8 +696,8 @@ namespace
 
 	uint8 Checks_capture(lemon::StringRef label)
 	{
-		const char* directory = std::getenv("S3AIR_CHECK_CAPTURE_DIR");
-		const char* prefix = std::getenv("S3AIR_CHECK_CAPTURE_PREFIX");
+		const char* directory = TestHooks::getEnv("S3AIR_CHECK_CAPTURE_DIR");
+		const char* prefix = TestHooks::getEnv("S3AIR_CHECK_CAPTURE_PREFIX");
 		if (nullptr == directory || nullptr == prefix || !label.isValid())
 			return 0;
 		const std::string stem(label.getString());

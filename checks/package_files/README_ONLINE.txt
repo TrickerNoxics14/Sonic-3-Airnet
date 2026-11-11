@@ -23,7 +23,8 @@ SETUP (once, on each computer)
 ONLINE LOBBY (the easy way)
 ---------------------------
 Main menu -> ONLINE LOBBY.
-HOST:   CREATE LOBBY. A code appears (like  ABCD-EFGH ); send it to your friends. COPY CODE puts it on the clipboard.
+HOST:   CREATE LOBBY. A code appears (like  ABCD-EFGH7 ); send it to your friends. COPY CODE puts it on the clipboard.
+        Only people who have the code can join: it is also the password of your lobby. Do not post it publicly.
 FRIENDS: JOIN WITH CODE, paste or type the code (Ctrl+V), press Start/Enter. Then press READY.
 The lobby shows the four players and who is ready. When everybody is ready, the host presses START GAME,
 picks Normal Game (or Act Select) and a save as usual, and everybody joins in as soon as the game starts.
@@ -34,7 +35,7 @@ The F9 window below still works the same way (it is also the way to host on a VP
 PLAY WITH A CODE (works anywhere, free, no router setup)
 --------------------------------------------------------
 HOST:   Main menu -> press F9 -> "Host (works anywhere)".
-        A code like  K7Q2-9XMA  appears. Send it to your friend (Copy code button).
+        A code like  K7Q2-9XMAB  appears. Send it to your friend (Copy code button).
         Then start your game as usual (Normal Game, pick a save).
 
 FRIENDS: Each player presses F9, pastes the same code (Ctrl+V), and chooses "Join".
@@ -51,13 +52,19 @@ PLAY WITH A VPN OR ON THE SAME NETWORK
 --------------------------------------
 HOST:   Press F9 -> "Host (VPN or same network)". Pick the address type shown
         (a VPN such as Hamachi, Radmin VPN, ZeroTier or Tailscale keeps your real address private).
-        A join code for that address appears. Send it to your friend.
-FRIEND: Paste the join code (Ctrl+V) and press Join.
+        A join code for that address appears (longer than the lobby code, like  ABCDEF-GHJKMN-PQRSTV ).
+        It contains your address and a secret, so only a friend who has the code can get in. Send it to your friend.
+FRIEND: Paste the join code (Ctrl+V) and press Join. An address typed alone, without the code, does not work.
+On a network you do not trust (a hotel, a school), prefer the lobby code or a VPN.
+Everybody who joins has to prove that they know the code, and the host has to prove it to them too, so a stranger
+on the same network cannot take a player slot, and cannot pose as your host.
 
 
 IF SOMETHING GOES WRONG
 -----------------------
-- The F9 window says why it stopped (for example "Nobody is hosting with this code").
+- The lobby (and the F9 window) says in plain words why it stopped, and the lobby offers RETRY:
+  the server could not be reached, the code was wrong, the lobby is full, the game version or the mods differ,
+  a router or firewall blocks the connection, or the host closed the lobby.
 - Both of you: send the file  %APPDATA%\Sonic3AIR\online_log.txt
   (Win+R, paste that path, Enter) and tell us what happened and where in the level.
   The log shows the ping (delay), the speed (fps) and how often the games had to be repaired.
@@ -69,8 +76,10 @@ NOTES
 -----
 - Each player has their own rings and score. Getting hit only takes away your own rings.
   Both players can open monitors.
-- The game checks every second that both games are identical and repairs the friend's game
-  automatically if they drift apart (F9 window: "repairs so far").
+- The game compares a fingerprint of the main game memory (the 64 KB of work RAM) every second and repairs
+  the friend's game automatically if they drift apart (F9 window: "repairs so far"). Graphics memory, extra
+  memory pages and the variables of the game scripts are not part of that fingerprint, so a difference there
+  is only noticed if it also shows up in the main memory. One repair per ten seconds is allowed for each friend.
 - The friend's view follows Tails in the regular parts of every zone. In cutscenes, bosses and
   special scrolling parts both of you see the host's view.
 - Water colours on the friend's screen can be wrong when only one of you is under water.
