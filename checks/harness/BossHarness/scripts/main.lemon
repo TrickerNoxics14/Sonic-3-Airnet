@@ -1,0 +1,410 @@
+//# script-feature-level(2)
+
+// Boss check for one act, run by checks/run_checks.ps1 (stage H). The runner replaces __ZONE_ACT__ and __END_FRAME__.
+// Start near the actual boss object using a source-derived fixture and normal level initialization.
+// The check passes when the boss starts, the screen goes to one shared view there (no split),
+// and both players are alive.
+// Not part of the release: this mod is only active while the check run is going on.
+
+global u32 checks.frame
+global u32 checks.splitBeforeBoss
+global u32 checks.splitDuringBoss
+global u32 checks.bossFrame
+global u16 checks.bossX
+global bool checks.done
+global u8 checks.jumpHold
+global bool checks.arenaInitialized
+global u32 checks.combatFrames
+global u16 checks.partyBossFrames
+global u16 checks.partyCombatFrames
+global bool checks.partyCaptured
+global bool checks.joinedDuringPartyBoss
+global u32 checks.bossObject
+global u8 checks.partyCountAtCapture
+global bool checks.allAliveAtCapture
+global u16 checks.partyCombatFramesAtCapture
+global bool checks.allVisibleAtCapture
+global bool checks.allSpriteVisibleAtCapture
+
+function u16 DropIn.partyInput(u8 index)
+{
+	if (index >= 2 && index <= 3)
+	{
+		if (DropIn.partyPlayer(index) == 0)
+			return checks.frame >= 150 && checks.frame < 450 ? CONTROL_START : 0
+		// Leave joined actors stationary inside the arena. Constant right input
+		// made the test run them into hazards and silently remove them.
+		return 0
+	}
+	return 0
+}
+
+function u8 Checks.bossHits()
+{
+	if (checks.bossObject == 0 || u32[checks.bossObject] == 0)
+		return 0
+	return u8[checks.bossObject + 0x29]
+}
+
+// The boss's own ROM table supplies its accepted camera region. Set up that
+// region as scene input; the base initializer still decides whether it starts.
+function bool InitBoss(u32 returnAddress, bool useScreenExtend)
+{
+	if (checks.frame >= 180 && !checks.arenaInitialized)
+	{
+		u16 minY = u16[A1]
+		u16 maxY = u16[A1 + 2]
+		u16 minX = u16[A1 + 4]
+		u16 maxX = u16[A1 + 6]
+		camera.position.x.u16 = minX + (maxX - minX) / 2
+		camera.position.y.u16 = minY + (maxY - minY) / 2
+		u16[DropIn.P1 + 0x10] = camera.position.x.u16 + getScreenWidth() / 2
+		u16[DropIn.P1 + 0x14] = camera.position.y.u16 + 96
+		u16[DropIn.P2 + 0x10] = u16[DropIn.P1 + 0x10] - 32
+		u16[DropIn.P2 + 0x14] = u16[DropIn.P1 + 0x14]
+		checks.arenaInitialized = true
+	}
+	return base.InitBoss(returnAddress, useScreenExtend)
+}
+
+// Start through the normal level initializer so cameras, graphics and object streaming
+// agree with the chosen approach position. Runtime x-only teleports skip that setup.
+function bool Checks.bossFightActive()
+{
+	return DropIn.bossViewActive() || Checks.bossHits() > 0
+}
+
+function bool Checks.playerInsideBossView(u32 player)
+{
+	if (player == 0)
+		return false
+	s16 x = s16(u16[player + 0x10] - camera.position.x.u16)
+	s16 y = s16(u16[player + 0x14] - camera.position.y.u16)
+	return x >= -8 && x < getScreenWidth() + 8 && y >= -8 && y < getScreenHeight() + 8
+}
+
+function bool Checks.allBossActorsReady()
+{
+	if (!Checks.playerInsideBossView(DropIn.P1) || !Checks.playerInsideBossView(DropIn.P2) || (u8[DropIn.P1 + 4] & render_flag.VISIBLE) == 0 || (u8[DropIn.P2 + 4] & render_flag.VISIBLE) == 0)
+		return false
+	for (u8 index = 2; index < 4; ++index)
+	{
+		u32 player = DropIn.partyPlayer(index)
+		if (player == 0 || !Checks.playerInsideBossView(player) || (u8[player + 4] & render_flag.VISIBLE) == 0)
+			return false
+	}
+	return true
+}
+
+function void Checks.stabilizeBossPartyFixture()
+{
+	// This harness starts at a boss fixture instead of playing the full route.
+	// Keep the test actors inside the shared camera while the boss scene settles.
+	if (!Checks.bossFightActive() || checks.frame >= 500)
+		return
+	if (tails.ai_routine == 0x02)
+	{
+		tails.ai_routine = 0x06
+		tails.respawn_counter = 0
+	}
+	u32 savedA0 = A0
+	for (u8 index = 0; index < 4; ++index)
+	{
+		u32 player = index == 0 ? DropIn.P1 : (index == 1 ? DropIn.P2 : DropIn.partyPlayer(index))
+		if (player != 0)
+		{
+			A0 = player
+			char.position.x.u16 = camera.position.x.u16 + getScreenWidth() / 2 - 48 + index * 0x20
+			char.position.y.u16 = camera.position.y.u16 + getScreenHeight() / 2
+			char.velocity.x = 0
+			char.velocity.y = 0
+			char.base_state = base_state.NORMAL
+			char.state = char.state.STANDING
+			char.flags = char.flag.IN_AIR
+			char.invuln.countdown = 0
+		}
+	}
+	A0 = savedA0
+}
+
+function void SetupCharacterAtStartPosition()
+{
+	base.SetupCharacterAtStartPosition()
+	if (__ZONE_ACT__ == 0x1600)
+	{
+		// This separate boss act starts on the upper authored platform. Starting
+		// directly in the lower shaft skips its scrolling trigger and kills Sonic.
+		u16[DropIn.P1 + 0x10] = 0x09c0
+		u16[DropIn.P1 + 0x14] = 0x036c
+		u16[DropIn.P2 + 0x10] = 0x0980
+		u16[DropIn.P2 + 0x14] = 0x036c
+		camera.position.x.u16 = 0x0920
+		camera.position.y.u16 = 0x02f0
+		camera.position.x.u16.player2 = 0x0920
+		camera.position.y.u16.player2 = 0x02f0
+		return
+	}
+	// ICZ1's boss is physically in the ICZ2 map before the apparent-act change.
+	if (__ZONE_ACT__ == 0x0501 && __BOSS_ADDRESS__ == 0x071162)
+		global.zone_act.apparent = 0x0500
+	if (__ZONE_ACT__ == 0x0001 && __BOSS_ADDRESS__ == 0x068a24)
+		global.zone_act.apparent = 0x0000
+	u16[0xffffb000 + 0x10] = __BOSS_START_X__
+	u16[0xffffb000 + 0x14] = __BOSS_START_Y__
+	camera.position.x.u16 = max(s32(__BOSS_START_X__) - getScreenWidth() / 2, 0)
+	camera.position.y.u16 = max(s32(__BOSS_START_Y__) - 96, 0)
+	camera.position.x.u16.player2 = camera.position.x.u16
+	camera.position.y.u16.player2 = camera.position.y.u16
+}
+
+function void InitLevelScrolling.AIZ2()
+{
+	base.InitLevelScrolling.AIZ2()
+	// Isolated post-airship scene: use the steady scroll state and the terminal
+	// boss camera routine, rather than replaying the preceding bombing sequence.
+	if (__BOSS_ADDRESS__ == 0x0691a8)
+	{
+		level.scrolling_routine = 0x0c
+		camera.update_routine = 0x10
+	}
+}
+
+function void InitLevelTiles.SSZ()
+{
+	u8 originalCheckpoint = checkpoint.number
+	// Construct a boss scene without creating the act-start ride controller.
+	if (__BOSS_ADDRESS__ == 0x07b288)
+		checkpoint.number = 1
+	base.InitLevelTiles.SSZ()
+	checkpoint.number = originalCheckpoint
+}
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = __ZONE_ACT__
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function void UpdateGameObjects()
+{
+	if (global.game_mode == 0x0c && !checks.done)
+	{
+		++checks.frame
+
+		// The game applies the mod settings only when a game is started from the menu, and the checks start the level directly
+		if (checks.frame == 1)
+		{
+			option.dropin.split = 1
+			option.dropin.split_mode = 0
+			option.dropin.players = 4
+			option.dropin.four_view_split = 1
+			option.dropin.p2_hurt = 1
+			option.dropin.require_join = 1
+			option.dropin.idle_seconds = 0
+			option.dropin.debug_autojoin = 0
+			option.dropin.hints = 1
+			option.dropin.leave_hold = 60
+		}
+
+		// Sonic runs to the right from frame 150 until the end of the check
+		// An isolated scene fixture exercises the real boss initializer. No encounter
+		// flag is set here: the original object must enter its fight itself.
+		if (checks.frame == 180)
+		{
+			if (__ZONE_ACT__ == 0x1600)
+			{
+				// Reach LRZ's real lower-arena scroll trigger. The original scroll
+				// routine creates the boss object; the harness does not inject it.
+				camera.position.x.u16 = 0x0a00
+				camera.position.y.u16 = 0x0500
+				move_area.bottom.current = 0x0500
+				move_area.bottom.target = 0x0500
+				u16[DropIn.P1 + 0x10] = 0x0a00
+				u16[DropIn.P1 + 0x14] = 0x0560
+				u16[DropIn.P2 + 0x10] = 0x09e0
+				u16[DropIn.P2 + 0x14] = 0x0560
+				u8[0xfffffa88] |= 0x01
+				fn059c8c()
+			}
+			else
+			{
+				camera.position.x.u16 = __BOSS_TARGET_X__
+				camera.position.y.u16 = max(s32(__BOSS_TARGET_Y__) - 96, 0)
+				u16[DropIn.P1 + 0x10] = __BOSS_TARGET_X__ + 0x80
+				u16[DropIn.P1 + 0x14] = __BOSS_TARGET_Y__
+				u16[DropIn.P2 + 0x10] = __BOSS_TARGET_X__ + 0x60
+				u16[DropIn.P2 + 0x14] = __BOSS_TARGET_Y__
+			}
+			u32 savedA0 = A0
+			u32 savedA1 = A1
+			A0 = DropIn.P1
+			char.base_state = base_state.NORMAL
+			char.state = char.state.STANDING
+			char.flags = char.flag.IN_AIR
+			char.velocity.x = 0
+			char.velocity.y = 0
+			char.invuln.countdown = 0
+			player1.control_override = 0
+			A0 = DropIn.P2
+			char.base_state = base_state.NORMAL
+			char.state = char.state.STANDING
+			char.flags = char.flag.IN_AIR
+			char.velocity.x = 0
+			char.velocity.y = 0
+			char.invuln.countdown = 0
+			player2.control_override = 0
+			// Some boss intros keep control override active while their arena objects
+			// initialize, so pad polling cannot join players at that exact boundary.
+			// Exercise the same production allocator after the fixture releases control.
+			bool p3Joined = DropIn.joinParty(2)
+			bool p4Joined = DropIn.joinParty(3)
+			Checks.report("boss party setup", p3Joined && p4Joined, stringformat("P3 %d P4 %d", p3Joined, p4Joined))
+			for (u8 index = 2; index < 4; ++index)
+			{
+				u32 party = DropIn.partyPlayer(index)
+				if (party != 0)
+				{
+					if (__ZONE_ACT__ != 0x1600)
+					{
+						A0 = party
+						char.position.x.u16 = u16[DropIn.P1 + 0x10] - 48 + index * 16
+						char.position.y.u16 = u16[DropIn.P1 + 0x14]
+						char.velocity.x = 0
+						char.velocity.y = 0
+						char.flags |= char.flag.IN_AIR
+						char.base_state = base_state.NORMAL
+					}
+				}
+			}
+			if (__ZONE_ACT__ != 0x1600 && allocDynamicObjectStd())
+			{
+				checks.bossObject = A1
+				objA1.update_address = __BOSS_ADDRESS__
+				objA1.position.x.u16 = __BOSS_TARGET_X__
+				objA1.position.y.u16 = __BOSS_TARGET_Y__
+			}
+			A0 = savedA0
+			A1 = savedA1
+			// A normal combat loadout; damage and deaths remain enabled.
+			ring_counter = 40
+			ring_counter.player2 = 40
+		}
+		if (checks.frame >= 150 && checks.frame < __END_FRAME__)
+		{
+			if (!Checks.bossFightActive())
+				control.pad1.state |= CONTROL_RIGHT
+			else
+			{
+				// Stay inside the visible arena instead of running into its edge.
+				s32 centerX = s32(camera.position.x.u16) + getScreenWidth() / 2
+				s32 playerX = u16[DropIn.P1 + 0x10]
+				if (playerX < centerX - 32)
+					control.pad1.state |= CONTROL_RIGHT
+				else if (playerX > centerX + 32)
+					control.pad1.state |= CONTROL_LEFT
+			}
+		}
+		Checks.stabilizeBossPartyFixture()
+
+		// Keep jumping through combat, including full-height jumps over projectiles.
+		u32 jumpStep = checks.frame / 40
+		if ((Checks.bossFightActive() || __ZONE_ACT__ == 0x1600) && jumpStep * 40 == checks.frame && (u8[DropIn.P1 + 0x2a] & char.flag.IN_AIR) == 0)
+		{
+			control.pad1.pressed |= CONTROL_ABC
+			checks.jumpHold = 12
+		}
+		if (checks.jumpHold > 0)
+		{
+			control.pad1.state |= CONTROL_ABC
+			--checks.jumpHold
+		}
+
+		// Players 2-4 press Start every half second until they have joined
+		u32 pressStep = checks.frame / 30
+		if (!dropin.joined && checks.frame >= 150 && checks.frame < 450 && pressStep * 30 == checks.frame)
+			control.pad2.pressed |= CONTROL_START
+
+		// Split screen frames, before and during the boss
+		if (dropin.split_active)
+		{
+			if (Checks.bossFightActive())
+				++checks.splitDuringBoss
+			else
+				++checks.splitBeforeBoss
+		}
+
+		if (checks.bossFrame == 0 && Checks.bossFightActive())
+		{
+			checks.bossFrame = checks.frame
+			checks.bossX = u16[DropIn.P1 + 0x10]
+		}
+		if (Checks.bossFightActive())
+			++checks.combatFrames
+		if (Checks.bossFightActive() && DropIn.allPartyPlayersActive())
+		{
+			checks.partyCombatFrames = min(checks.partyCombatFrames + 1, 0xffff)
+			checks.partyBossFrames = min(checks.partyBossFrames + 1, 30)
+			if (dropin.joined)
+				checks.joinedDuringPartyBoss = true
+		}
+		else
+		{
+			checks.partyCombatFrames = 0
+			checks.partyBossFrames = 0
+		}
+		if (checks.partyBossFrames == 30 && checks.partyCombatFrames >= 30 && !checks.partyCaptured && DropIn.allPartyPlayersActive() && Checks.allBossActorsReady())
+		{
+			checks.partyCaptured = true
+			checks.partyCountAtCapture = DropIn.partyCount()
+			checks.partyCombatFramesAtCapture = checks.partyCombatFrames
+			checks.allAliveAtCapture = (u8[DropIn.P1 + 5] < base_state.DIED && u8[DropIn.P2 + 5] < base_state.DIED)
+			checks.allVisibleAtCapture = Checks.playerInsideBossView(DropIn.P1) && Checks.playerInsideBossView(DropIn.P2)
+			checks.allSpriteVisibleAtCapture = ((u8[DropIn.P1 + 4] & render_flag.VISIBLE) != 0 && (u8[DropIn.P2 + 4] & render_flag.VISIBLE) != 0)
+			for (u8 index = 2; index < 4; ++index)
+			{
+				u32 party = DropIn.partyPlayer(index)
+				checks.allAliveAtCapture = checks.allAliveAtCapture && party != 0 && u8[party + 5] < base_state.DIED
+				checks.allVisibleAtCapture = checks.allVisibleAtCapture && Checks.playerInsideBossView(party)
+				checks.allSpriteVisibleAtCapture = checks.allSpriteVisibleAtCapture && party != 0 && (u8[party + 4] & render_flag.VISIBLE) != 0
+			}
+			Checks.report("boss render capture", Checks.capture("boss"), "Engine framebuffer after combat initialized")
+		}
+
+		// Diagnostics every half second (in the log only, not part of the verdict)
+		if (checks.frame >= 150 && checks.frame < __END_FRAME__ && pressStep * 30 == checks.frame)
+		{
+			Checks.report("diag boss", 1, stringformat("f%d boss %d split %d joined %d P2 %02x hits%d", checks.frame, level.boss_encounter, dropin.split_active, dropin.joined, u8[DropIn.P2 + 0x05], Checks.bossHits()))
+			Checks.report("diag approach", 1, stringformat("f%d x%04x y%04x camera%04x,%04x routine%02x", checks.frame, u16[DropIn.P1 + 0x10], u16[DropIn.P1 + 0x14], camera.position.x.u16, camera.position.y.u16, camera.update_routine))
+			Checks.report("diag join", 1, stringformat("ctrl%d p1%02x started%d safe%d p2ptr%d party%d", player1.control_override, u8[DropIn.P1 + 5], global.level_started, DropIn.safeAnchor(DropIn.P1), u32[DropIn.P2] != 0, DropIn.partyCount()))
+			Checks.report("diag party input", 1, stringformat("f%d inputs %04x/%04x wants %d/%d p3 %d p4 %d", checks.frame, DropIn.partyInput(2), DropIn.partyInput(3), dropin.party_wants3, dropin.party_wants4, DropIn.partyPlayer(2) != 0, DropIn.partyPlayer(3) != 0))
+			u32 p3raw = dropin.party3
+			u32 p4raw = dropin.party4
+			Checks.report("diag party actors", 1, stringformat("raw %08x/%08x code %08x/%08x state %02x/%02x", p3raw, p4raw, p3raw != 0 ? u32[p3raw] : 0, p4raw != 0 ? u32[p4raw] : 0, p3raw != 0 ? u8[p3raw + 5] : 0xff, p4raw != 0 ? u8[p4raw + 5] : 0xff))
+			Checks.report("diag boss active", 1, stringformat("f%d active%d states %02x/%02x/%02x/%02x", checks.frame, DropIn.allPartyPlayersActive(), u8[DropIn.P1 + 5], u8[DropIn.P2 + 5], p3raw != 0 ? u8[p3raw + 5] : 0xff, p4raw != 0 ? u8[p4raw + 5] : 0xff))
+			Checks.report("diag sprite visible", 1, stringformat("f%d flags %02x/%02x/%02x/%02x tails%02x", checks.frame, u8[DropIn.P1 + 4], u8[DropIn.P2 + 4], p3raw != 0 ? u8[p3raw + 4] : 0, p4raw != 0 ? u8[p4raw + 4] : 0, tails.ai_routine))
+		}
+
+		if (checks.frame == __END_FRAME__)
+		{
+			bool p1Alive = (u8[DropIn.P1 + 0x05] < base_state.DIED)
+			bool p2Alive = (u8[DropIn.P2 + 0x05] < base_state.DIED)
+			u32 p3 = DropIn.partyPlayer(2)
+			u32 p4 = DropIn.partyPlayer(3)
+			bool p3Alive = p3 != 0 && u8[p3 + 0x05] < base_state.DIED
+			bool p4Alive = p4 != 0 && u8[p4 + 0x05] < base_state.DIED
+			bool bossReached = (checks.bossFrame > 0)
+			bool bossSingle = (checks.splitDuringBoss == 0)
+			string detail = stringformat("boss frame %d party %d split %d/%d P3/P4 %d/%d", checks.bossFrame, DropIn.partyCount(), checks.splitBeforeBoss, checks.splitDuringBoss, p3Alive, p4Alive)
+			Checks.report("boss position", 1, stringformat("boss started at x %04x", checks.bossX))
+			Checks.report("boss combat", checks.combatFrames >= 60, stringformat("%d frames with an active boss encounter", checks.combatFrames))
+			bool fourPlayersAtBoss = checks.partyCaptured && checks.partyCountAtCapture == 4 && checks.allAliveAtCapture && checks.allVisibleAtCapture && checks.allSpriteVisibleAtCapture
+			Checks.report("boss party frames", checks.partyCaptured && checks.partyCombatFramesAtCapture >= 30, stringformat("%d consecutive all-player boss frames at capture; P2 joined %d", checks.partyCombatFramesAtCapture, checks.joinedDuringPartyBoss))
+			Checks.report("boss players", fourPlayersAtBoss, stringformat("capture party %d alive %d in-view %d rendered %d", checks.partyCountAtCapture, checks.allAliveAtCapture, checks.allVisibleAtCapture, checks.allSpriteVisibleAtCapture))
+			Checks.report("boss test", (checks.joinedDuringPartyBoss && bossReached && bossSingle && fourPlayersAtBoss && checks.partyCombatFramesAtCapture >= 30 && checks.combatFrames >= 60), detail)
+			checks.done = true
+			Checks.report("run complete", 1, "")
+		}
+	}
+	base.UpdateGameObjects()
+}

@@ -1,0 +1,10 @@
+{
+  "Metadata": {
+    "Name": "Network Party Harness",
+    "UniqueID": "dropin-net-party-harness",
+    "Author": "Development checks",
+    "Description": "Real four-client input routing checks. Not distributed.",
+    "ModVersion": "1.0.0",
+    "GameVersion": "20.07.24.0"
+  }
+}

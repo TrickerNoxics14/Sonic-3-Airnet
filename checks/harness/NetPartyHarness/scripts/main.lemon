@@ -1,0 +1,221 @@
+//# script-feature-level(2)
+global u32 netparty.frame
+global bool netparty.monitorCloneTestDone
+global bool netparty.mechanicsTestDone
+
+// Lemon globals are module-local at compile time. Read DropInCoop state through
+// the runtime name lookup so this separate development harness stays loadable.
+function u8 NetParty.get8(string name)
+{
+	return u8(System.getGlobalVariableValueByName(name))
+}
+
+function u16 NetParty.get16(string name)
+{
+	return u16(System.getGlobalVariableValueByName(name))
+}
+
+function void NetParty.set8(string name, u8 value)
+{
+	System.setGlobalVariableValueByName(name, s64(value))
+}
+
+function void NetParty.set16(string name, u16 value)
+{
+	System.setGlobalVariableValueByName(name, s64(value))
+}
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = 0x0001
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function void NetParty.testSharedMonitorClones()
+{
+	pushAll()
+	u8 savedCard = NetParty.get8("dropin.team_card")
+	u16 savedCardTimer = NetParty.get16("dropin.team_card_timer")
+	bool sourceCreated = allocDynamicObjectStd()
+	u32 sourceEffect = sourceCreated ? A1 : 0
+	u8 cloneCount = 0
+	if (sourceCreated)
+	{
+		zeroMemory(sourceEffect, 0x4a)
+		u32[sourceEffect] = addressof(ItemEffect.BaseUpdate)
+		u8[sourceEffect + 0x20] = 3
+		u16[sourceEffect + 0x10] = 0x7a00
+		u16[sourceEffect + 0x14] = 0x7a00
+		u16[sourceEffect + 0x42] = u16(DropIn.P1)
+		A0 = sourceEffect
+		ItemEffect.Init()
+		for (u32 object = 0xffffb000; object < 0xffffcc00; object += 0x4a)
+		{
+			if (object != sourceEffect && u32[object] == addressof(ItemEffect.BaseUpdate) && u8[object + 0x20] == 3 && u16[object + 0x10] == u16[sourceEffect + 0x10] && u16[object + 0x14] == u16[sourceEffect + 0x14])
+			{
+				u16 owner = u16[object + 0x42]
+				if (owner == u16(DropIn.P2) || owner == u16(DropIn.partyPlayer(2)) || owner == u16(DropIn.partyPlayer(3)))
+					++cloneCount
+			}
+		}
+		for (u32 object = 0xffffb000; object < 0xffffcc00; object += 0x4a)
+		{
+			if (object != sourceEffect && u32[object] == addressof(ItemEffect.BaseUpdate) && u8[object + 0x20] == 3 && u16[object + 0x10] == u16[sourceEffect + 0x10] && u16[object + 0x14] == u16[sourceEffect + 0x14])
+			{
+				u16 owner = u16[object + 0x42]
+				if (owner == u16(DropIn.P2) || owner == u16(DropIn.partyPlayer(2)) || owner == u16(DropIn.partyPlayer(3)))
+					zeroMemory(object, 0x4a)
+			}
+		}
+		zeroMemory(sourceEffect, 0x4a)
+	}
+	u8 features = NetParty.get8("option.dropin.team_features")
+	bool passed = DropIn.net() && features != 0 && DropIn.partyCount() == 4 && sourceCreated && cloneCount == 3
+	Checks.report("network shared monitor", passed, stringformat("net %d features %d players %d allocated %d clones %d", DropIn.net(), features, DropIn.partyCount(), sourceCreated, cloneCount))
+	NetParty.set8("dropin.team_card", savedCard)
+	NetParty.set16("dropin.team_card_timer", savedCardTimer)
+	popAll()
+}
+
+function void NetParty.testOnlineTeamMove()
+{
+	pushAll()
+	u32 p1 = DropIn.P1
+	u32 p3 = DropIn.partyPlayer(2)
+	u16 savedX1 = u16[p1 + 0x10]
+	u16 savedY1 = u16[p1 + 0x14]
+	u16 savedX3 = u16[p3 + 0x10]
+	u16 savedY3 = u16[p3 + 0x14]
+	u8 savedState = u8[p1 + 5]
+	u8 savedFlags = u8[p1 + 0x2a]
+	u8 savedFlags2 = u8[p1 + 0x2d]
+	u8 savedControlFlags = u8[p1 + 0x2e]
+	u16 savedExtra = u16[p1 + 0x26]
+	s16 savedVelocityX = s16[p1 + 0x18]
+	s16 savedVelocityY = s16[p1 + 0x1a]
+	s16 savedGroundspeed = s16[p1 + 0x1c]
+	u8 savedLaunches = NetParty.get8("dropin.team_launches")
+	u16 savedCooldown = NetParty.get16("dropin.team_launch_cooldown")
+	u16 savedCombo = NetParty.get16("dropin.team_combo")
+	u16 savedComboTimer = NetParty.get16("dropin.team_combo_timer")
+	u8 savedCard = NetParty.get8("dropin.team_card")
+	u16 savedCardTimer = NetParty.get16("dropin.team_card_timer")
+	u8[p1 + 5] = base_state.NORMAL
+	u8[p1 + 0x2a] = 0
+	u8[p1 + 0x2d] = 0
+	u8[p1 + 0x2e] = 0
+	u16[p1 + 0x26] = 0
+	s16[p1 + 0x18] = 0
+	s16[p1 + 0x1a] = 0
+	u16[p3 + 0x10] = u16[p1 + 0x10] + 8
+	u16[p3 + 0x14] = u16[p1 + 0x14]
+	NetParty.set16("dropin.team_launch_cooldown", 0)
+	u8 sourceCharacter = u8[p3 + 0x38]
+	bool launched = DropIn.launchTeamPlayer(p3, p1, sourceCharacter)
+	bool velocityCorrect = s16[p1 + 0x1a] == DropIn.teamMoveSpeedY(sourceCharacter) && (u8[p1 + 0x2a] & char.flag.IN_AIR) != 0
+	u8 teamLaunches = NetParty.get8("dropin.team_launches")
+	u16 teamCooldown = NetParty.get16("dropin.team_launch_cooldown")
+	u16 teamCombo = NetParty.get16("dropin.team_combo")
+	u8 teamMoves = NetParty.get8("option.dropin.team_moves")
+	bool awardCorrect = teamLaunches == savedLaunches + 1 && teamCooldown == 45 && teamCombo > savedCombo
+	Checks.report("network team move", DropIn.net() && teamMoves != 0 && launched && velocityCorrect && awardCorrect, stringformat("net %d enabled %d launched %d velocity %d award %d", DropIn.net(), teamMoves, launched, velocityCorrect, awardCorrect))
+	u16[p1 + 0x10] = savedX1
+	u16[p1 + 0x14] = savedY1
+	u16[p3 + 0x10] = savedX3
+	u16[p3 + 0x14] = savedY3
+	u8[p1 + 5] = savedState
+	u8[p1 + 0x2a] = savedFlags
+	u8[p1 + 0x2d] = savedFlags2
+	u8[p1 + 0x2e] = savedControlFlags
+	u16[p1 + 0x26] = savedExtra
+	s16[p1 + 0x18] = savedVelocityX
+	s16[p1 + 0x1a] = savedVelocityY
+	s16[p1 + 0x1c] = savedGroundspeed
+	NetParty.set8("dropin.team_launches", savedLaunches)
+	NetParty.set16("dropin.team_launch_cooldown", savedCooldown)
+	NetParty.set16("dropin.team_combo", savedCombo)
+	NetParty.set16("dropin.team_combo_timer", savedComboTimer)
+	NetParty.set8("dropin.team_card", savedCard)
+	NetParty.set16("dropin.team_card_timer", savedCardTimer)
+	popAll()
+}
+
+function void NetParty.testOnlineBossPhase()
+{
+	pushAll()
+	bool allocated = allocDynamicObjectStd()
+	u32 boss = allocated ? A1 : 0
+	u8 oldEncounter = level.boss_encounter
+	u8 oldMask = NetParty.get8("dropin.team_boss_mask")
+	u16 oldWindow = NetParty.get16("dropin.team_boss_window")
+	u8 oldPhases = NetParty.get8("dropin.team_boss_phases")
+	u16 oldCombo = NetParty.get16("dropin.team_combo")
+	u16 oldComboTimer = NetParty.get16("dropin.team_combo_timer")
+	u8 oldCard = NetParty.get8("dropin.team_card")
+	u16 oldCardTimer = NetParty.get16("dropin.team_card_timer")
+	bool firstWaits = false
+	bool duplicateRejected = false
+	bool partnerCompletes = false
+	if (allocated)
+	{
+		zeroMemory(boss, 0x4a)
+		level.boss_encounter = 1
+		NetParty.set8("dropin.team_boss_mask", 0)
+		NetParty.set16("dropin.team_boss_window", 0)
+		u8[boss + 0x29] = 5
+		DropIn.checkBossTeamHit(DropIn.P1, boss, 6)
+		firstWaits = NetParty.get8("dropin.team_boss_mask") == 1 && NetParty.get8("dropin.team_boss_phases") == oldPhases
+		u8[boss + 0x29] = 4
+		DropIn.checkBossTeamHit(DropIn.P1, boss, 5)
+		duplicateRejected = NetParty.get8("dropin.team_boss_mask") == 1 && NetParty.get8("dropin.team_boss_phases") == oldPhases
+		u8[boss + 0x29] = 3
+		DropIn.checkBossTeamHit(DropIn.P2, boss, 4)
+		partnerCompletes = NetParty.get8("dropin.team_boss_phases") == oldPhases + 1 && NetParty.get8("dropin.team_boss_mask") == 0 && NetParty.get16("dropin.team_boss_window") == 0 && NetParty.get16("dropin.team_combo") > oldCombo && NetParty.get8("dropin.team_card") == 9
+		zeroMemory(boss, 0x4a)
+	}
+	Checks.report("network boss phase", DropIn.net() && NetParty.get8("option.dropin.team_features") != 0 && allocated && firstWaits && duplicateRejected && partnerCompletes, stringformat("net %d allocated %d first %d duplicate %d partner %d", DropIn.net(), allocated, firstWaits, duplicateRejected, partnerCompletes))
+	level.boss_encounter = oldEncounter
+	NetParty.set8("dropin.team_boss_mask", oldMask)
+	NetParty.set16("dropin.team_boss_window", oldWindow)
+	NetParty.set8("dropin.team_boss_phases", oldPhases)
+	NetParty.set16("dropin.team_combo", oldCombo)
+	NetParty.set16("dropin.team_combo_timer", oldComboTimer)
+	NetParty.set8("dropin.team_card", oldCard)
+	NetParty.set16("dropin.team_card_timer", oldCardTimer)
+	popAll()
+}
+
+function void UpdateGameObjects()
+{
+	++netparty.frame
+	if (netparty.frame == 1)
+	{
+		option.dropin.players = 4
+		option.dropin.require_join = 1
+		option.dropin.split = 1
+		option.dropin.p2_hurt = 1
+		option.dropin.idle_seconds = 0
+		NetParty.set8("option.dropin.team_features", 1)
+		NetParty.set8("option.dropin.team_moves", 1)
+	}
+	base.UpdateGameObjects()
+	if (!netparty.monitorCloneTestDone && DropIn.partyCount() == 4 && global.framecounter >= 600 && global.framecounter % 120 == 0)
+	{
+		netparty.monitorCloneTestDone = true
+		NetParty.testSharedMonitorClones()
+	}
+	if (!netparty.mechanicsTestDone && DropIn.partyCount() == 4 && global.framecounter >= 600 && global.framecounter % 120 == 0)
+	{
+		netparty.mechanicsTestDone = true
+		NetParty.testOnlineTeamMove()
+		NetParty.testOnlineBossPhase()
+	}
+	if (netparty.frame % 120 == 0)
+	{
+		bool ready = DropIn.partyCount() == 4 && dropin.joined && DropIn.partyPlayer(2) != 0 && DropIn.partyPlayer(3) != 0
+		Checks.report(ready ? "network party" : "network party waiting", 1, stringformat("players%d input2%04x input3%04x input4%04x", DropIn.partyCount(), Input.getController(1), Input.getController(2), Input.getController(3)))
+		if (ready && netparty.frame % 600 == 0)
+			Checks.capture("online-party")
+	}
+}

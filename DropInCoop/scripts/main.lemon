@@ -1,0 +1,304 @@
+//# script-feature-level(2)
+
+include common
+include split
+include planes2
+include render2
+include objects2
+include rings2
+include water2
+include hud2
+include hurt2
+include coop2
+include boss2
+include teamwork
+include party
+include party_platforms
+include screensize
+
+// Drop-In Co-op, milestone 2: single-screen drop-in / drop-out for the second player (Tails).
+//  - Controller 2 pressing Start during normal gameplay "joins": Tails becomes human-controlled.
+//  - Holding Back on controller 2 for a while "leaves": Tails goes back to the CPU follow AI.
+//  - Nothing here restarts the level or touches rings / lives / score.
+
+
+
+// Can player 2 join / is the co-op logic allowed to run right now?
+function bool DropIn.isActiveContext()
+{
+	if (global.game_mode != 0x0c || competition_mode.active != 0)
+		return false
+	if (u32[DropIn.P2] == 0)							// No second character object (e.g. Sonic alone)
+		return false
+	return true
+}
+
+function bool DropIn.canJoinNow()
+{
+	// Only while Tails is in his normal AI states (following or auto-spindashing), never in cutscenes / bosses / respawn scripts
+	if (tails.ai_routine != 0x06 && tails.ai_routine != 0x08)
+		return false
+	if (player1.control_override != 0 || player2.control_override != 0)
+		return false
+	if (u8[DropIn.P1 + 0x05] >= base_state.DIED || u8[DropIn.P2 + 0x05] >= base_state.DIED)
+		return false
+	return true
+}
+
+function void DropIn.join()
+{
+	dropin.joined = true
+	dropin.leave_timer = 0
+	dropin.idle_timer = 0
+	dropin.hint_timer = 300			// Show the "how to leave" hint for 5 seconds
+	ring_counter.player2 = 0
+	player2.score = 0
+	unused.extra_lives_granted.player2 = 0
+
+	// If Tails is currently off-screen, fly him in next to player 1; otherwise just hand over control
+	if ((u8[DropIn.P2 + 0x04] & render_flag.VISIBLE) == 0)
+	{
+		tails.respawn_counter = 0
+		tails.ai_routine = 0x02
+	}
+}
+
+function void DropIn.leave()
+{
+	dropin.joined = false
+	dropin.leave_timer = 0
+	dropin.idle_timer = 0
+	dropin.hint_timer = 0
+	tails.control_counter = 0		// The CPU follow AI takes over again right away
+}
+
+function void DropIn.drawHints()
+{
+	if (option.dropin.hints == 0 || DropIn.net())
+		return
+
+	s32 px = getScreenWidth() / 2
+	if (dropin.joined)
+	{
+		if (dropin.leave_timer > 0)
+		{
+			Renderer.drawText(DropIn.FONT, px, getScreenHeight() - 30, "P2 LEAVING...", 0xffd060ff, 5, 0, 0xe100, false)
+
+			// Progress bar
+			s32 barWidth = 80
+			s32 filled = (barWidth * dropin.leave_timer) / option.dropin.leave_hold
+			Renderer.drawRect(px - barWidth / 2, getScreenHeight() - 20, barWidth, 4, 0x000000c0, 0xe100, false)
+			Renderer.drawRect(px - barWidth / 2, getScreenHeight() - 20, filled, 4, 0xffd060ff, 0xe101, false)
+		}
+		else if (dropin.hint_timer > 0)
+		{
+			Renderer.drawText(DropIn.FONT, px, getScreenHeight() - 24, "P2: HOLD BACK TO LEAVE", 0xffffffff, 5, 0, 0xe100, false)
+		}
+		if (option.dropin.split != 0 && !dropin.split_active)
+		{
+			if (!DropIn.isZoneSupported())
+			{
+				if (dropin.hint_timer > 0)
+					Renderer.drawText(DropIn.FONT, px, getScreenHeight() - 36, "Split screen is not available in this zone yet", 0xffd060ff, 5, 0, 0xe100, false)
+			}
+			else if (global.zone_act == 0x0000 && camera.update_routine < 0x04)
+			{
+				Renderer.drawText(DropIn.FONT, px, getScreenHeight() - 36, "Split screen starts when P1 moves on", 0xffd060ff, 5, 0, 0xe100, false)
+			}
+		}
+	}
+	else if (option.dropin.require_join != 0 && level.framecounter < 300)
+	{
+		// Shown during the first five seconds of each act while player 2 is not playing
+		Renderer.drawText(DropIn.FONT, px, getScreenHeight() - 24, "P2: PRESS START TO JOIN", 0xffffffff, 5, 0, 0xe100, false)
+	}
+}
+
+
+// Frames a fly-in may take before Tails is put on his flight target (about five seconds)
+constant u16 DropIn.FLYIN_STALL_FRAMES = 300
+
+// Runs every frame for the second character when it is Tails, right before the original Tails AI update
+//# address-hook(0x0139cc)
+function void Character.TailsAI.Update()
+{
+	if (A0 == DropIn.P2 && DropIn.isActiveContext())
+	{
+		// A fresh game starts at the very beginning of Angel Island 1: forget any previous join
+		if (global.zone_act == 0x0000 && level.framecounter < 2 && checkpoint.number == 0)
+			DropIn.leave()
+
+		// Angel Island 1: Tails normally only shows up once the camera got past the burnt start of the level.
+		// A second player does not have to wait for that: Tails joins as soon as that player asks for it.
+		bool wantsToPlay = ((control.pad2.pressed & CONTROL_START) != 0 || (DropIn.net() && control.pad2.state != 0))
+		bool aizStart = (global.zone_act == 0x0000 && camera.update_routine < 0x04 && tails.ai_routine == 0x0a && isMainCharacter(CHARACTER_SONIC) && !dropin.joined)
+		// During the intro of the level, the game takes control away from Sonic and the level has not started yet: player 2 can join then anyway
+		bool playerFree = (u8[DropIn.P1 + 0x05] < base_state.DIED)
+		if (aizStart && playerFree && wantsToPlay)
+		{
+			// Same as a normal join, but Tails does not fly in: the intro has no ground under his flight path, so he rides along with Sonic instead (see below)
+			DropIn.join()
+			tails.ai_routine = 0x06
+		}
+
+		// Angel Island 1 intro: Tails rides along with Sonic, right behind him, until the camera gets past the burnt start of the level.
+		// Sonic rides the Tornado there and no ground lies under Tails' flight path, so without this he would fall out of the level and die.
+		// Afterwards Tails is under normal control again.
+		if (dropin.joined && global.zone_act == 0x0000 && camera.update_routine < 0x04 && tails.ai_routine == 0x06)
+		{
+			u16[DropIn.P2 + 0x10] = u16[DropIn.P1 + 0x10] - 0x20
+			u16[DropIn.P2 + 0x14] = u16[DropIn.P1 + 0x14]
+			s16[DropIn.P2 + 0x18] = 0
+			s16[DropIn.P2 + 0x1a] = 0
+			s16[DropIn.P2 + 0x1c] = 0
+		}
+
+		// Zones that disable Tails at the start (IceCap 1): player 2 brings him in, the same way as after a respawn
+		bool disabledTailsStart = (global.zone_act == 0x0500 && tails.ai_routine == 0x0a && isMainCharacter(CHARACTER_SONIC) && !dropin.joined)
+		if (disabledTailsStart && playerFree && wantsToPlay)
+		{
+			DropIn.join()
+			tails.respawn_counter = 0
+			tails.ai_routine = 0x02
+		}
+
+		// Fly-in stall: when Tails cannot catch up with his flight target for a long time (player 1 jumps around or runs fast),
+		// he is put on the target, so the fly-in ends and player 2 gets control. (The intro of Angel Island 1 has its own rule above.)
+		if (dropin.joined && tails.ai_routine == 0x04)
+		{
+			++dropin.flyin_timer
+			if (dropin.flyin_timer >= DropIn.FLYIN_STALL_FRAMES)
+			{
+				u8 targetIndex = u8(posbackup.offset.player1 - 0x44)
+				u32 targetAddress = 0xffffe500 + u32(targetIndex)
+				u16[DropIn.P2 + 0x10] = u16[targetAddress]
+				u16[DropIn.P2 + 0x14] = u16[targetAddress + 2]
+				// Take control here: the normal check for gaining control can keep failing (it reads the recorded flags of player 1's positions)
+				tails.ai_routine = 0x06
+				char.control_flags = 0
+				char.state = char.state.RUNNING
+				// The fly-in counted the frames Tails was off screen; without a reset he would respawn at once
+				tails.respawn_counter = 0
+				s16[DropIn.P2 + 0x18] = 0
+				s16[DropIn.P2 + 0x1a] = 0
+				dropin.flyin_timer = 0
+			}
+		}
+		else
+		{
+			dropin.flyin_timer = 0
+		}
+
+		if (option.dropin.require_join != 0)
+		{
+			// Joining
+			if (!dropin.joined)
+			{
+				if (((control.pad2.pressed & CONTROL_START) != 0 || (DropIn.net() && control.pad2.state != 0) || (option.dropin.debug_autojoin == 1 || option.dropin.debug_autojoin == 2)) && DropIn.canJoinNow())
+					DropIn.join()
+
+				// Until player 2 has joined, the CPU is in full control (ignore controller 2 completely)
+				if (!dropin.joined)
+					control.tails = 0
+			}
+
+			if (dropin.joined)
+			{
+				// Keep the CPU AI from taking over; a human is playing
+				tails.control_counter = 600
+
+				// In split screen, Tails is on screen in his own view even when he is outside of player 1's view
+				if (dropin.split_active || DropIn.net())
+					tails.respawn_counter = 0
+
+				// Respawn / fly-in: the original code would wait for a button; Start counts as one
+				if (tails.ai_routine == 0x02)
+					control.tails.state |= CONTROL_START
+
+				// Dropping out by holding Back on controller 2
+				if (!DropIn.net() && Input.buttonDown(BUTTON_BACK | BUTTON_PAD2))
+				{
+					++dropin.leave_timer
+					if (dropin.leave_timer >= option.dropin.leave_hold)
+						DropIn.leave()
+				}
+				else
+				{
+					dropin.leave_timer = 0
+				}
+
+				// Optional: treat a long-idle controller 2 as a disconnect
+				if (dropin.joined && option.dropin.idle_seconds != 0)
+				{
+					if (control.pad2.state != 0)
+						dropin.idle_timer = 0
+					else
+						++dropin.idle_timer
+					if (dropin.idle_timer >= option.dropin.idle_seconds * 60)
+						DropIn.leave()
+				}
+			}
+		}
+
+		if (dropin.hint_timer > 0)
+			--dropin.hint_timer
+		DropIn.drawHints()
+	}
+
+	base.Character.TailsAI.Update()
+}
+
+
+// Reset the join state on script load
+function void Init()
+{
+	base.Init()
+	dropin.joined = false
+	dropin.leave_timer = 0
+	dropin.idle_timer = 0
+	dropin.hint_timer = 0
+	dropin.team_checkpoint_valid = false
+	dropin.team_boss = false
+	dropin.regroup_pending = 0
+	dropin.team_combo = 0
+	dropin.team_combo_timer = 0
+	dropin.team_card_timer = 0
+	dropin.team_card = 0
+	dropin.team_rescues = 0
+	dropin.team_launches = 0
+	dropin.team_insurance_saves = 0
+	dropin.team_insurance_charges = 0
+	dropin.team_insurance_progress = 0
+	dropin.team_last_rings = 0
+	dropin.team_launch_cooldown = 0
+	dropin.team_was_boss = false
+	dropin.team_was_results = false
+	dropin.team_boss_pose_timer = 0
+	dropin.team_pose_mask = 0
+	dropin.team_boss_mask = 0
+	dropin.team_boss_window = 0
+	dropin.team_boss_phases = 0
+	dropin.team_feature_zone = 0xffff
+	dropin.rescue_hold1 = 0
+	dropin.rescue_hold2 = 0
+	dropin.rescue_cooldown = 0
+	dropin.party_wants3 = false
+	dropin.party_wants4 = false
+}
+
+
+// Angel Island 1: the level graphics of the burnt start get replaced by the regular ones once player 1's camera passes x = 0x1400.
+// With a second player, that must also happen when player 2's camera gets there first.
+//# address-hook(0x01c4d0)
+function void fn01c4d0()
+{
+	if (dropin.joined && camera.position.x.u16 < 0x1400 && camera.position.x.u16.player2 >= 0x1400)
+	{
+		u16 backupCameraX = camera.position.x.u16
+		camera.position.x.u16 = 0x1400
+		base.fn01c4d0()
+		camera.position.x.u16 = backupCameraX
+		return
+	}
+	base.fn01c4d0()
+}

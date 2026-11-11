@@ -1,0 +1,261 @@
+//# script-feature-level(2)
+constant bool PARTY_QUAD_TEST = false
+global u32 partycheck.frame
+global u32 partycheck.joinedAt
+global u16 partycheck.p1x
+global u16 partycheck.p2x
+global u16 partycheck.p3x
+global u16 partycheck.p4x
+global bool partycheck.jump3
+global bool partycheck.jump4
+global bool partycheck.done
+global u32 partycheck.score1
+global u32 partycheck.score2
+
+//# address-hook(0x3f1004)
+function void PartyCheck.platformUpdate()
+{
+}
+
+
+
+
+
+function void PartyCheck.platforms()
+{
+	pushAll()
+	bool created = allocDynamicObjectStd()
+	bool contacts = created
+	if (created)
+	{
+		u32 platform = A1
+		zeroMemory(platform, 0x4a)
+		u32[platform] = addressof(PartyCheck.platformUpdate)
+		u8[platform + 4] = render_flag.WORLD | render_flag.VISIBLE
+		u8[platform + 7] = 24
+		u16[platform + 0x10] = 0x1200
+		u16[platform + 0x14] = 0x550
+		for (u8 index = 2; index < __PLAYER_COUNT__; ++index)
+		{
+			u32 player = DropIn.partyPlayer(index)
+			copyMemory(0x8fd000 + index * 0x100, player, 0x4a)
+			u16[player + 0x10] = 0x1200
+			u16[player + 0x14] = 0x536
+			u8[player + 0x2a] = char.flag.IN_AIR
+			u16[player + 0x1a] = 0x100
+		}
+		A0 = platform
+		DropIn.partyPlatforms(0, 24, 8, 8, 0x1200, 0)
+		for (u8 index = 2; index < __PLAYER_COUNT__; ++index)
+		{
+			u32 player = DropIn.partyPlayer(index)
+			contacts = contacts && (u8[player + 0x2a] & char.flag.ON_OBJECT) != 0 && u16[player + 0x42] == u16(platform)
+			copyMemory(player, 0x8fd000 + index * 0x100, 0x4a)
+		}
+		contacts = contacts && (u8[platform + 0x2a] & 0x50) == 0
+		zeroMemory(platform, 0x4a)
+	}
+	popAll()
+	Checks.report("party platforms", contacts, "Separate standing pointers, shared helper, original contact bits restored")
+}
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = PARTY_QUAD_TEST ? 0x0200 : 0x0100
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function u16 PartyCheck.input(u8 index, u32 frame)
+{
+	if (index >= __PLAYER_COUNT__)
+		return 0
+	if (partycheck.joinedAt == 0)
+		return CONTROL_START
+	u32 phase = frame - partycheck.joinedAt
+	if (index == 2 && phase >= 60 && phase < (PARTY_QUAD_TEST ? 110 : 90))
+		return CONTROL_RIGHT
+	if (index == 3 && phase >= 120 && phase < (PARTY_QUAD_TEST ? 240 : 150))
+		return CONTROL_LEFT
+	if ((index == 2 && phase >= 160 && phase < 172) || (index == 3 && phase >= 190 && phase < 202))
+		return CONTROL_ABC
+	return 0
+}
+
+function u16 PartyCheck.countPlaneCells(u16 vramBase, u8 band)
+{
+	u16 count = 0
+	u8 firstRow = (band >> 1) * 8
+	u8 firstColumn = (band & 1) * 0x10
+	for (u8 row = 0; row < 8; ++row)
+		for (u8 column = 0; column < 0x10; ++column)
+			if (getVRAM(vramBase + (firstRow + row) * 0x100 + (firstColumn + column) * 8) != 0)
+				++count
+	return count
+}
+
+function u16 DropIn.partyInput(u8 index)
+{
+	return PartyCheck.input(index, partycheck.frame)
+}
+
+function u16 DropIn.partyPreviousInput(u8 index)
+{
+	return PartyCheck.input(index, partycheck.frame > 0 ? partycheck.frame - 1 : 0)
+}
+
+function void UpdateGameObjects()
+{
+	++partycheck.frame
+	if (partycheck.frame == 1)
+	{
+		option.dropin.players = __PLAYER_COUNT__
+		option.dropin.require_join = 1
+		option.dropin.split = 1
+		option.dropin.split_mode = 0
+		option.dropin.p2_hurt = 1
+		option.dropin.idle_seconds = 0
+		option.dropin.four_view_split = PARTY_QUAD_TEST ? 1 : 0
+	}
+	if (!dropin.joined && partycheck.frame >= 120 && partycheck.frame % 30 == 0)
+		control.pad2.pressed |= CONTROL_START
+	if (PARTY_QUAD_TEST && partycheck.joinedAt != 0)
+	{
+		u32 phase = partycheck.frame - partycheck.joinedAt
+		if (phase >= 30 && phase < 90)
+		{
+			control.pad1.state |= CONTROL_RIGHT
+			control.pad2.state |= CONTROL_LEFT
+		}
+	}
+	base.UpdateGameObjects()
+	if (partycheck.done)
+		return
+	u32 p3 = DropIn.partyPlayer(2)
+	u32 p4 = DropIn.partyPlayer(3)
+	if (partycheck.joinedAt == 0 && p3 != 0 && (__PLAYER_COUNT__ == 3 || p4 != 0) && tails.ai_routine == 0x06 && DropIn.safeAnchor(DropIn.P1))
+	{
+		partycheck.joinedAt = partycheck.frame
+		Checks.report("party actors", DropIn.partyCount() == __PLAYER_COUNT__ && u8[DropIn.P1 + 0x38] == CHARACTER_SONIC && u8[DropIn.P2 + 0x38] == CHARACTER_TAILS && u8[p3 + 0x38] == CHARACTER_KNUCKLES && (__PLAYER_COUNT__ == 3 || u8[p4 + 0x38] == CHARACTER_SONIC), stringformat("players %d P3 %08x P4 %08x", DropIn.partyCount(), p3, p4))
+	}
+	if (partycheck.joinedAt != 0)
+	{
+		u32 phase = partycheck.frame - partycheck.joinedAt
+		if (phase == 59)
+		{
+			partycheck.p1x = u16[DropIn.P1 + 0x10]
+			partycheck.p2x = u16[DropIn.P2 + 0x10]
+			partycheck.p3x = u16[p3 + 0x10]
+			partycheck.p4x = p4 != 0 ? u16[p4 + 0x10] : 0
+		}
+		if (phase == 90)
+			Checks.report("party control3", s16(u16[p3 + 0x10] - partycheck.p3x) > 4 && abs(s16(u16[DropIn.P1 + 0x10] - partycheck.p1x)) <= 2 && abs(s16(u16[DropIn.P2 + 0x10] - partycheck.p2x)) <= 2 && (p4 == 0 || abs(s16(u16[p4 + 0x10] - partycheck.p4x)) <= 2), stringformat("dx P1 %d P2 %d P3 %d P4 %d", s16(u16[DropIn.P1 + 0x10] - partycheck.p1x), s16(u16[DropIn.P2 + 0x10] - partycheck.p2x), s16(u16[p3 + 0x10] - partycheck.p3x), p4 == 0 ? 0 : s16(u16[p4 + 0x10] - partycheck.p4x)))
+		if (phase == 119 && p4 != 0)
+			partycheck.p4x = u16[p4 + 0x10]
+		if (phase == 150)
+			Checks.report("party control4", __PLAYER_COUNT__ == 3 ? p4 == 0 : p4 != 0 && s16(u16[p4 + 0x10] - partycheck.p4x) < -4 && abs(s16(u16[DropIn.P1 + 0x10] - partycheck.p1x)) <= 2, stringformat("P4 %08x dx %d", p4, p4 == 0 ? 0 : s16(u16[p4 + 0x10] - partycheck.p4x)))
+		if (phase >= 160 && phase < 185 && (u8[p3 + 0x2a] & char.flag.IN_AIR))
+			partycheck.jump3 = true
+		if (p4 != 0 && phase >= 190 && phase < 215 && (u8[p4 + 0x2a] & char.flag.IN_AIR))
+			partycheck.jump4 = true
+		if (phase == 240)
+		{
+			Checks.report("party jumping", partycheck.jump3 && (__PLAYER_COUNT__ == 3 || partycheck.jump4), stringformat("P3 jump %d P4 jump %d", partycheck.jump3, partycheck.jump4))
+			if (PARTY_QUAD_TEST)
+			{
+				Checks.report("party camera", dropin.split_active && DropIn.fourViewRequested() && DropIn.partyCount() == 4, stringformat("split %d req %d engine %d scene %d water %d", dropin.split_active, option.dropin.four_view_split, DropIn.fourViewEngineAvailable(), DropIn.fourViewSceneSupported(), level.water_present))
+				bool camerasValid = dropin.camera3.valid && dropin.camera4.valid && DropIn.partyViewCameraX(2) != DropIn.partyViewCameraX(3)
+				Checks.report("four independent cameras", camerasValid, stringformat("P3 %04x,%04x P4 %04x,%04x", DropIn.partyViewCameraX(2), DropIn.partyViewCameraY(2), DropIn.partyViewCameraX(3), DropIn.partyViewCameraY(3)))
+				bool spaced = abs(s16(u16[DropIn.P2 + 0x10] - u16[DropIn.P1 + 0x10])) >= 0x40 && abs(s16(u16[p3 + 0x10] - u16[DropIn.P2 + 0x10])) >= 0x40 && abs(s16(u16[p4 + 0x10] - u16[p3 + 0x10])) >= 0x40
+				Checks.report("party players spaced", spaced, stringformat("P1 %04x P2 %04x P3 %04x P4 %04x", u16[DropIn.P1 + 0x10], u16[DropIn.P2 + 0x10], u16[p3 + 0x10], u16[p4 + 0x10]))
+				Checks.report("quad camera diagnostic", 1, stringformat("C1 %04x,%04x C2 %04x,%04x P1 %04x,%04x", camera.position.x.u16, camera.position.y.u16, camera.position.x.u16.player2, camera.position.y.u16.player2, u16[DropIn.P1 + 0x10], u16[DropIn.P1 + 0x14]))
+				Checks.report("quad plane diagnostic", 1, stringformat("planeA bands %d/%d/%d/%d", PartyCheck.countPlaneCells(0xc000, 0), PartyCheck.countPlaneCells(0xc000, 1), PartyCheck.countPlaneCells(0xc000, 2), PartyCheck.countPlaneCells(0xc000, 3)))
+				u16 scrollDiff12 = 0
+				u16 scrollDiff23 = 0
+				u16 scrollDiff34 = 0
+				for (u16 line = 0; line < getScreenHeight() / 2; ++line)
+				{
+					if (u32[DropIn.PARTY_SCROLL1 + line * 4] != u32[DropIn.PARTY_SCROLL2 + line * 4])
+						++scrollDiff12
+					if (u32[DropIn.PARTY_SCROLL2 + line * 4] != u32[DropIn.PARTY_SCROLL3 + line * 4])
+						++scrollDiff23
+					if (u32[DropIn.PARTY_SCROLL3 + line * 4] != u32[DropIn.PARTY_SCROLL4 + line * 4])
+						++scrollDiff34
+				}
+				Checks.report("quad per-view scroll data", scrollDiff12 > 0 && scrollDiff23 > 0 && scrollDiff34 > 0, stringformat("different lines P1/P2 %d P2/P3 %d P3/P4 %d", scrollDiff12, scrollDiff23, scrollDiff34))
+				Checks.report("party picture", Checks.capture("party-quad"), "Engine framebuffer with four clipped views")
+			}
+			else
+			{
+				Checks.report("party camera", !dropin.split_active && DropIn.partyCount() == __PLAYER_COUNT__, "Shared camera while three/four players play")
+				Checks.report("party picture", Checks.capture("party"), "Engine framebuffer for visual verification")
+			}
+		}
+		if (phase == 300)
+		{
+			Checks.report("party alive", u8[DropIn.P1 + 5] < base_state.DIED && u8[DropIn.P2 + 5] < base_state.DIED && u8[p3 + 5] < base_state.DIED && (p4 == 0 || u8[p4 + 5] < base_state.DIED), "Original terrain physics, no invulnerability or disabled damage fixture")
+		}
+		if (phase == 260)
+			PartyCheck.platforms()
+		if (phase == 270)
+		{
+			partycheck.score1 = player.score
+			partycheck.score2 = player2.score
+			u32 old3 = dropin.score3
+			u32 old4 = dropin.score4
+			pushAll()
+			A0 = p3
+			addScore(50)
+			if (p4 != 0)
+			{
+				A0 = p4
+				addScore(100)
+			}
+			popAll()
+			Checks.report("party score", player.score == partycheck.score1 && player2.score == partycheck.score2 && dropin.score3 == old3 + 50 && (p4 == 0 || dropin.score4 == old4 + 100), "Extra players receive only their own points")
+		}
+		if (phase == 280)
+		{
+			ring_counter = 40
+			ring_counter.player2 = 30
+			dropin.rings3 = 25
+			dropin.rings4 = 17
+			pushAll()
+			A0 = p3
+			char.invuln.countdown = 0
+			A2 = DropIn.P1
+			dropin.party_updating = 2
+			ring_counter = 25
+			ring_counter.player2 = 25
+			Character.GettingHurt()
+			dropin.party_updating = 0
+			ring_counter = 40
+			ring_counter.player2 = 30
+			popAll()
+		}
+		if (phase == 288)
+			Checks.report("party damage", ring_counter >= 40 && ring_counter.player2 >= 30 && dropin.rings3 == 0 && (p4 == 0 || dropin.rings4 >= 17), stringformat("rings P1 %d P2 %d P3 %d P4 %d", ring_counter, ring_counter.player2, dropin.rings3, dropin.rings4))
+		if (phase == 320)
+		{
+			pushAll()
+			A0 = p3
+			Character.Die_internal()
+			popAll()
+		}
+		if (phase == 480)
+			Checks.report("party respawn", DropIn.partyPlayer(2) == p3 && u8[p3 + 5] == base_state.NORMAL && dropin.rings3 == 0 && u8[DropIn.P1 + 5] == base_state.NORMAL && DropIn.partyCount() == __PLAYER_COUNT__, "Extra player's real death and respawn do not restart the leader's game")
+		if (phase == 500)
+		{
+			Checks.report("run complete", 1, "")
+			partycheck.done = true
+		}
+	}
+	if (partycheck.frame % 120 == 0)
+		Checks.report("party diag", 1, stringformat("frame%d P1state%d flags%02x override%d P3%08x P4%08x", partycheck.frame, u8[DropIn.P1 + 5], u8[DropIn.P1 + 0x2a], player1.control_override, p3, p4))
+	if (partycheck.frame >= 1500 && !partycheck.done)
+	{
+		Checks.report("party actors", 0, "Party never became ready before frame 1500")
+		Checks.report("run complete", 1, "")
+		partycheck.done = true
+	}
+}

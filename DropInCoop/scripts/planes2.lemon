@@ -1,0 +1,969 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: plane content for the split screen.
+//
+// The renderer has only one name table per plane (64x32 patterns = 512x256 pixels), which is not enough for two independent views.
+// So while the split screen is active, both planes A (foreground) and B (background) get rebuilt each frame from the level data:
+//  - Plane rows 0-15 (band 0) show the area of the upper view (player 1)
+//  - Plane rows 16-31 (band 1) show the area of the lower view (player 2)
+// Each tile row is filled for exactly the horizontal range that the view's line scroll offsets need.
+//
+// For player 2's view, the zone's own scrolling code (parallax, water ripples) gets run a second time with player 2's camera.
+// This is only done for zone parts whose scrolling code is known to be free of side effects, see "DropIn.isScrollingSupported".
+
+global u16 dropin.view2.fg_y		// Foreground and background camera y-positions of the lower view
+global u16 dropin.view2.bg_y
+global bool dropin.view2.state_valid		// Is "dropin.view2.indoors" set up? (cleared whenever the lower view gets reset)
+global bool dropin.view2.indoors			// ICZ 2: is the lower view in the indoor area, with the indoor background?
+global u16 dropin.palette2.count				// Number of palette entries in which the lower view differs from the main palette (see "water2.lemon")
+global u16 dropin.view3.fg_y
+global u16 dropin.view3.bg_y
+global bool dropin.view3.state_valid
+global bool dropin.view3.indoors
+global u16 dropin.view4.fg_y
+global u16 dropin.view4.bg_y
+global bool dropin.view4.state_valid
+global bool dropin.view4.indoors
+global u8 dropin.prepare_view_index
+
+
+// Scroll profiles: the parts of the game whose scrolling code can be run a second time for the lower view
+constant u8 DropIn.PROFILE_AIZ1 = 1
+constant u8 DropIn.PROFILE_AIZ2 = 2
+constant u8 DropIn.PROFILE_HCZ1 = 3
+constant u8 DropIn.PROFILE_HCZ2 = 4
+constant u8 DropIn.PROFILE_MGZ1 = 5
+constant u8 DropIn.PROFILE_CNZ1 = 6
+constant u8 DropIn.PROFILE_CNZ2 = 7
+constant u8 DropIn.PROFILE_LBZ1 = 8
+constant u8 DropIn.PROFILE_LBZ2 = 9
+constant u8 DropIn.PROFILE_DEZ1 = 10
+constant u8 DropIn.PROFILE_DEZ2 = 11
+constant u8 DropIn.PROFILE_MHZ1 = 12
+constant u8 DropIn.PROFILE_SOZ1 = 13
+constant u8 DropIn.PROFILE_LRZ1 = 14
+constant u8 DropIn.PROFILE_LRZ2 = 15
+constant u8 DropIn.PROFILE_MGZ2 = 16
+constant u8 DropIn.PROFILE_FBZ1 = 17
+constant u8 DropIn.PROFILE_FBZ2 = 18
+constant u8 DropIn.PROFILE_MHZ2 = 19
+constant u8 DropIn.PROFILE_ICZ2 = 20
+constant u8 DropIn.PROFILE_SSZ = 21
+constant u8 DropIn.PROFILE_SOZ2 = 22
+constant u8 DropIn.PROFILE_SSZ_CLOUDS = 23
+constant u8 DropIn.PROFILE_AIZ1_INTRO = 24
+constant u8 DropIn.PROFILE_HPZ = 25
+constant u8 DropIn.PROFILE_ICZ1_OUTDOORS = 26
+constant u8 DropIn.PROFILE_ICZ1_INDOORS = 27
+
+// Scratch memory (in the shared memory range) for saving the game's state around the lower view's scrolling code
+constant u32 DropIn.SCRATCH_STATE_A = 0x8f0000		// 0x200 bytes
+constant u32 DropIn.SCRATCH_STATE_B = 0x8f0200		// 0x400 bytes
+constant u32 DropIn.SCRATCH_SCROLL2 = 0x8f1000		// Line scroll offsets of the lower view (one u32 per line, up to 0x400 bytes)
+constant u32 DropIn.SCRATCH_GUARD = 0x8f3000		// Backup of the game's data behind the 224 line scroll table (0x280 bytes), see "UpdateLevelDisplay"
+constant u32 DropIn.SCRATCH_PAL = 0x8f0a00			// Backup of the palette (0x100 bytes)
+constant u32 DropIn.SCRATCH_PAL2 = 0x8f0b00		// Palette entries for the lower view: count (u16), then pairs of index (u16) and packed color (u16)
+
+
+// Does the split screen exist at all in this zone (even if parts of it, like cutscenes and bosses, are single screen)?
+function bool DropIn.isZoneSupported()
+{
+	return global.zone <= 0x08 || global.zone == 0x09 || global.zone == 0x0a || global.zone == 0x0b || global.zone == 0x16
+}
+
+// Which scroll profile applies right now? 0 means: not supported, use a single screen
+function u8 DropIn.getScrollProfile()
+{
+	if (gfx.plane_update_routine != 0)
+		return 0
+
+	// Boss fights are one shared screen (the screen is not split while the boss is on)
+	if (DropIn.bossViewActive())
+		return 0
+
+	u16 zoneAct = global.zone_act
+	u16 routine = level.scrolling_routine
+	if (zoneAct == 0x0000)
+	{
+		// AIZ 1: regular scrolling (0x04, 0x08), not during the intro (0x00) or the fire transition (0x0c and higher)
+		if (routine == 0x04 || routine == 0x08)
+			return DropIn.PROFILE_AIZ1
+		// The burnt start of AIZ 1: it has its own scrolling code, and the level graphics are the same for both views as long as both cameras are still in that part
+		if (routine == 0x00 && u16[0xffffeec6] == 0 && camera.update_routine < 0x04 && camera.position.x.u16 < 0x1400 && camera.position.x.u16.player2 < 0x1400)
+			return DropIn.PROFILE_AIZ1_INTRO
+	}
+	else if (zoneAct == 0x0001)
+	{
+		// AIZ 2: regular scrolling only, not in the blimp sequence or at the boss
+		if (routine == 0x0c && u16[0xffffeec0] == 0)
+			return DropIn.PROFILE_AIZ2
+	}
+	else if (zoneAct == 0x0100)
+	{
+		// HCZ 1: regular scrolling only, not the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_HCZ1
+	}
+	else if (zoneAct == 0x0101)
+	{
+		// HCZ 2: regular scrolling only, not the wall chase in the first part
+		if (routine == 0x10)
+			return DropIn.PROFILE_HCZ2
+	}
+	else if (zoneAct == 0x0200)
+	{
+		// MGZ 1: regular scrolling only, not the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_MGZ1
+	}
+	else if (zoneAct == 0x0201)
+	{
+		// MGZ 2: regular scrolling and background only, not the earthquake areas (which need a different background)
+		if (routine == 0x04 && level.display_routine == 0 && u16[0xffffeea2] == 0 && u16[0xffffeec0] == 0 && !DropIn.isPlayer2InMarbleQuakeArea())
+			return DropIn.PROFILE_MGZ2
+	}
+	else if (zoneAct == 0x0400)
+	{
+		// FBZ 1: regular scrolling only (the routine changes while the background gets reloaded when entering or leaving the buildings)
+		if (routine == 0x00)
+			return DropIn.PROFILE_FBZ1
+	}
+	else if (zoneAct == 0x0401)
+	{
+		// FBZ 2: regular scrolling only, not the end of the act
+		if (routine == 0x04)
+			return DropIn.PROFILE_FBZ2
+	}
+	else if (zoneAct == 0x0300)
+	{
+		// CNZ 1: regular scrolling only, not the boss and the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_CNZ1
+	}
+	else if (zoneAct == 0x0301)
+	{
+		// CNZ 2: regular scrolling only, not the start of the act and the boss
+		if (routine == 0x08)
+			return DropIn.PROFILE_CNZ2
+	}
+	else if (zoneAct == 0x0600)
+	{
+		// LBZ 1: regular scrolling only, not the collapse and the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_LBZ1
+	}
+	else if (zoneAct == 0x0601)
+	{
+		// LBZ 2: regular scrolling only, not the start of the act and the boss parts
+		if (routine == 0x08)
+			return DropIn.PROFILE_LBZ2
+	}
+	else if (zoneAct == 0x0700)
+	{
+		// MHZ 1: regular scrolling only, not the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_MHZ1
+	}
+	else if (zoneAct == 0x0701)
+	{
+		// MHZ 2: regular scrolling only, not the areas that use a different background (player 1 and 2 both)
+		if (routine == 0x00 && !(u16[0xffffb000 + 0x10] >= 0x3700 && u16[0xffffb000 + 0x14] < 0x0500) && !(u16[DropIn.P2 + 0x10] >= 0x36c0 && u16[DropIn.P2 + 0x14] < 0x0540))
+			return DropIn.PROFILE_MHZ2
+	}
+	else if (zoneAct == 0x0500)
+	{
+		// Avalanche and background replacement routines stay shared-screen.
+		if (routine == 0x00)
+			return DropIn.PROFILE_ICZ1_OUTDOORS
+		if (routine == 0x10)
+			return DropIn.PROFILE_ICZ1_INDOORS
+	}
+	else if (zoneAct == 0x0501)
+	{
+		// ICZ 2: regular scrolling (0x04) and the background reload after switching between outdoors and indoors (0x08)
+		if (routine == 0x04 || routine == 0x08)
+			return DropIn.PROFILE_ICZ2
+	}
+	else if (zoneAct == 0x0a00)
+	{
+		// SSZ: only the sky parts (regular scrolling), not the inside of the sanctuary that uses a different background
+		if (routine == 0x00 && !DropIn.isSkySanctuaryInterior(camera.position.y.u16) && !DropIn.isSkySanctuaryInterior(camera.position.y.u16.player2))
+			return DropIn.PROFILE_SSZ
+		// ... and the part in the clouds, which is where most of the zone takes place
+		if (routine == 0x08 && u16[0xffffeede] == 0 && DropIn.isSkySanctuaryInterior(camera.position.y.u16) && DropIn.isSkySanctuaryInterior(camera.position.y.u16.player2))
+			return DropIn.PROFILE_SSZ_CLOUDS
+	}
+	else if (zoneAct == 0x0801)
+	{
+		// SOZ 2: regular scrolling in both halves of the act, not the parts with the ghosts or the rising sand
+		if (routine == 0x10 || routine == 0x20)
+			return DropIn.PROFILE_SOZ2
+	}
+	else if (zoneAct == 0x0800)
+	{
+		// SOZ 1: regular scrolling only, not the pyramid rising and the boss
+		if (routine == 0x00)
+			return DropIn.PROFILE_SOZ1
+	}
+	else if (zoneAct == 0x0900)
+	{
+		// LRZ 1: regular scrolling only (not the lava lake, which has a different background), and only while player 2 is not near the areas
+		// where the game switches to the lava lake background either
+		if (routine == 0x00 && u32[0xffffeed4] == 0 && !DropIn.isPlayer2InLavaLakeSwitchArea())
+			return DropIn.PROFILE_LRZ1
+	}
+	else if (zoneAct == 0x0901)
+	{
+		// LRZ 2: regular scrolling only, not the start of the act and the boss
+		if (routine == 0x08)
+			return DropIn.PROFILE_LRZ2
+	}
+	else if (zoneAct == 0x1601)
+	{
+		// Hidden Palace: regular scrolling in the two steady states (0x00 and 0x08), not the background changes in between (0x04 and 0x0c)
+		if (routine == 0x00 || routine == 0x08)
+			return DropIn.PROFILE_HPZ
+	}
+	else if (zoneAct == 0x0b00)
+	{
+		// DEZ 1: regular scrolling only, not the transition to act 2
+		if (routine == 0x00)
+			return DropIn.PROFILE_DEZ1
+	}
+	else if (zoneAct == 0x0b01)
+	{
+		// DEZ 2: regular scrolling only, not the start of the act
+		if (routine == 0x08)
+			return DropIn.PROFILE_DEZ2
+	}
+	return 0
+}
+
+// Is the scrolling code of the current zone part supported for the lower view?
+function bool DropIn.isScrollingSupported()
+{
+	return DropIn.getScrollProfile() != 0
+}
+
+
+// Division by 16, rounding down also for negative values
+function s32 DropIn.floorDiv16(s32 value)
+{
+	return (value >= 0) ? (value / 16) : -((15 - value) / 16)
+}
+
+
+// The game fills each tile row of the background plane with a 512 pixels wide part of the level, starting at a reference x-position.
+// That is not necessarily the scroll position of the row: e.g. repeating cloud layers are filled once and then only scrolled.
+// This returns that reference x-position for the background tile row at the given y-position.
+function s32 DropIn.getBackgroundReferenceX(u16 worldY)
+{
+	if (global.zone_act == 0x0500 && level.scrolling_routine == 0)
+		return 0x1880 // Outdoor tile window, matching fn053780 / initial tiles fill.
+	u32 heights = 0
+	if (global.zone_act == 0x0000 && level.scrolling_routine == 0x00)
+		heights = 0x23b1f6		// AIZ 1, burnt start
+	else if (global.zone_act == 0x0000)
+		heights = 0x23b254		// AIZ 1
+	else if (global.zone_act == 0x0600)
+		heights = 0x05433a		// LBZ 1
+	else if (global.zone_act == 0x1601)
+		heights = 0x05a39c		// Hidden Palace
+	else if (global.zone_act == 0x0900)
+		heights = 0x056f68		// LRZ 1
+	if ((global.zone_act == 0x0400 || global.zone_act == 0x0401) && u16[0xffffeed6] != 0)
+		return 0x200			// FBZ: the background inside the buildings starts at x = 0x200
+	if (global.zone_act == 0x0a00 && level.scrolling_routine == 0x08)
+		return 0x1c00			// SSZ: the background in the clouds starts at x = 0x1c00
+
+	if (heights != 0)
+	{
+		// One reference x-position per band of rows, see "fn04edf6"
+		u32 entry = 0xffffa800
+		u16 bandEnd = u16[heights]
+		for (u8 i = 0; i < 0x20 && s16(worldY - bandEnd) >= 0; ++i)
+		{
+			heights += 2
+			entry += 4
+			bandEnd += u16[heights]
+		}
+		return s16(u16[entry])
+	}
+
+	// AIZ 2: the whole background is filled starting at x-position 0, see "fn050260"
+	return 0
+}
+
+
+// Writes one view's level content into a plane
+//  - "vramBase" is the plane's name table (0xc000 for plane A, 0xe000 for plane B)
+//  - "layoutBase" is the start of the chunk line table (0xffff8008 for foreground, 0xffff800a for background)
+//  - "worldTop" is the world y-position shown in the view's first line
+//  - "band" is the plane band to write to (0 or 1), or 0xff to use the regular world-based rows (single screen)
+//  - Line scroll offsets for each line of the view are read from the scroll offset table at 0xffffe000
+function void DropIn.fillPlaneView(u16 vramBase, u32 layoutBase, u16 worldTop, u16 numLines, u8 band, bool foreground)
+{
+	// Online, the host's planes stay as the game made them (this only writes to the planes, nothing else)
+	if (DropIn.role() == 1)
+		return
+
+	bool fourViews = DropIn.partyCount() > 2 && DropIn.fourViewRequested() && band != 0xff
+	s32 width = fourViews ? getScreenWidth() / 2 : getScreenWidth()
+	s32 numTileRows = (numLines + 15) / 16 + 1
+
+	for (s32 ty = 0; ty < numTileRows; ++ty)
+	{
+		// Lines of the view that show this tile row
+		s32 rowTop = ty * 16 - s32(worldTop & 0x0f)
+		s32 lineA = (rowTop > 0) ? rowTop : 0
+		s32 lineB = (rowTop + 15 < s32(numLines) - 1) ? (rowTop + 15) : (s32(numLines) - 1)
+		if (lineA > lineB)
+			continue
+
+		// Horizontal range needed for these lines
+		s32 minX = 0x7fffffff
+		s32 maxX = -0x7fffffff
+		for (s32 line = lineA; line <= lineB; ++line)
+		{
+			u32 entry = u32[0xffffe000 + line * 4]
+			s32 x = foreground ? -s32(s16(entry >> 16)) : -s32(s16(entry & 0xffff))
+			if (x < minX)
+				minX = x
+			if (x > maxX)
+				maxX = x
+		}
+		s32 firstTile = DropIn.floorDiv16(minX)
+		s32 lastTile = DropIn.floorDiv16(maxX + width - 1)
+		if (lastTile - firstTile > 31)
+			lastTile = firstTile + 31		// The plane is only 32 tiles wide
+
+		// Level data of this tile row
+		u16 worldY = (worldTop & 0xfff0) + u16(ty * 16)
+		u32 chunkLineOffset = ((u32(worldY) >> 7) * 4) & level.chunksize.bitmask
+		u16 chunkLine = u16[layoutBase + chunkLineOffset]
+		u32 tileRowInChunk = worldY & 0x70
+
+		u32 planeRow = (band == 0xff) ? ((u32(worldY) >> 4) & 0x0f) : (fourViews ? ((u32(band) >> 1) * 8 + u32(ty)) : (u32(band) * DropIn.bandRows() + u32(ty)))
+		u16 lineBase = vramBase + u16(planeRow * 2 * 0x80)
+
+		// Each plane column shows the tile from the 32 tiles wide window starting at the reference position
+		//  -> The Sky Sanctuary background gets streamed in like the foreground (no fixed position)
+		bool streamed = foreground || (global.zone_act == 0x0a00 && level.scrolling_routine != 0x08)
+		s32 referenceTile = streamed ? firstTile : DropIn.floorDiv16(DropIn.getBackgroundReferenceX(worldY))
+
+		for (s32 tx = firstTile; tx <= lastTile; ++tx)
+		{
+			s32 sourceX = referenceTile + ((tx - referenceTile) & 0x1f)
+
+			// Same chunk lookup as in "UpdateChunkLinePointerX"
+			u32 chunkType = u8[0xffff0000 + u16(chunkLine + u16(sourceX >> 3))]
+			u16 tile = u16[0xffff0000 + (chunkType << 7) + tileRowInChunk + u32(sourceX & 7) * 2]
+
+			// Access tile graphics (consisting of 2x2 patterns)
+			u32 patternBase = 0xffff9000 + (tile & 0x03ff) * 8
+			u32 mx = (tile & 0x0400) ? 2 : 0
+			u32 my = (tile & 0x0800) ? 4 : 0
+			u16 xorMask = (tile & 0x0c00) << 1
+
+			u32 column = fourViews ? ((u32(band & 1) * 0x10) + (u32(tx) & 0x0f)) : (u32(tx) & 0x1f)
+			u16 lineBase0 = lineBase + u16(column * 4)
+			u16 lineBase1 = lineBase0 + 0x80
+			setVRAM(lineBase0 + 0, u16[patternBase     + mx + my] ^ xorMask)
+			setVRAM(lineBase0 + 2, u16[patternBase + 2 - mx + my] ^ xorMask)
+			setVRAM(lineBase1 + 0, u16[patternBase + 4 + mx - my] ^ xorMask)
+			setVRAM(lineBase1 + 2, u16[patternBase + 6 - mx - my] ^ xorMask)
+		}
+	}
+}
+
+
+// Runs the zone's scrolling code for the lower view; the camera values it needs got set up before
+//  -> This must only calculate: the line scroll offsets (table at 0xffffe000) and the background y-position
+function void DropIn.runScrolling2(u8 profile)
+{
+	if (profile == DropIn.PROFILE_ICZ1_OUTDOORS)
+	{
+		// ICZ1 accumulates vertical movement rather than horizontal movement.
+		DropIn.syncAccumulator(0xffffeeb4, 0xffffeeb6, camera.foreground.y.u16)
+		fn053940()
+		A4 = 0x23defa
+		A5 = 0xffffa800
+		fn04f0ce()
+		return
+	}
+	if (profile == DropIn.PROFILE_ICZ1_INDOORS)
+	{
+		UpdateBackgroundScrolling.ICZ1.Indoors()
+		WriteScrollOffsets()
+		return
+	}
+	if (profile == DropIn.PROFILE_AIZ1_INTRO)
+	{
+		// The scrolling of the burnt start (the part of "fn04fb68" that runs while the level is not changing)
+		fn23afd2()
+		// fn04edf6 queues tile transfers, not scroll offsets. The second view
+		// rebuilds its planes directly and must not append to the first view's queue.
+
+		A4 = 0x23b20a
+		A5 = 0xffffa828
+		fn04f0ce()
+		return
+	}
+	if (profile == DropIn.PROFILE_AIZ1)
+	{
+		UpdateBackgroundScrolling.AIZ1()
+		UpdateForegroundScrolling.AIZ1()
+	}
+	else if (profile == DropIn.PROFILE_AIZ2)
+	{
+		DropIn.syncAccumulator(0xffffeeb4, 0xffffeeb6, camera.foreground.x.u16)
+		fn23b626()
+		fn23b680()
+	}
+	else if (profile == DropIn.PROFILE_HCZ1)
+	{
+		UpdateBackground.HCZ1()
+		A4 = 0x23c590
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_HCZ2)
+	{
+		UpdateBackground.HCZ2()
+		A4 = 0x23c7d2
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_MGZ1)
+	{
+		UpdateBackground.MGZ1()
+		A4 = 0x23c9f8
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_CNZ1 || profile == DropIn.PROFILE_CNZ2)
+	{
+		UpdateBackground.CNZ1()
+		A4 = 0x0520fe
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_LBZ1)
+	{
+		fn23e756()
+		A4 = 0x05433e
+		A5 = 0xffffa808
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_LBZ2)
+	{
+		UpdateBackground.LBZ2()
+		A4 = 0x23eee0
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_MGZ2)
+	{
+		fn23d1d0()
+		A4 = 0x23d498
+		A5 = 0xffffa808
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_FBZ1 || profile == DropIn.PROFILE_FBZ2)
+	{
+		fn052a2a()
+		A4 = (u16[0xffffeed6] == 0) ? 0x052d28 : 0x052d6e
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_DEZ1 || profile == DropIn.PROFILE_DEZ2)
+	{
+		camera.background.x.u16 = 0
+		camera.background.y.u16 = 0
+		WriteScrollOffsets()
+	}
+	else if (profile == DropIn.PROFILE_MHZ1 || profile == DropIn.PROFILE_MHZ2)
+	{
+		// The background position is based on player 1's accumulated camera position (see "fn04f368"), so move that one along
+		DropIn.syncAccumulator(0xffffeeb4, 0xffffeeb6, camera.foreground.x.u16)
+		fn054c68()
+		WriteScrollOffsets()
+	}
+	else if (profile == DropIn.PROFILE_ICZ2)
+	{
+		if (u16[0xffffeee8] == 0)
+		{
+			UpdateBackgroundScrolling.ICZ2.Outdoors()
+			A4 = 0x23e23e
+		}
+		else
+		{
+			UpdateBackgroundScrolling.ICZ2.Indoors()
+			A4 = 0x23e246
+		}
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_HPZ)
+		{
+			// The background changes at x = 0x0ec0 of player 2's view (the same rule as in the game, see "UpdateBackground.HPZ")
+			if (u16[DropIn.P2 + 0x10] < 0x0ec0)
+			{
+				D2.u16 = 0x0348
+				D3 = 0
+			}
+			else
+			{
+				D2.u16 = 0x0e00
+				D3.u16 = 0x0700
+			}
+			UpdateBackground.HPZ()
+			A4 = 0x05a3a0
+			A5 = 0xffffa808
+			fn04f0ce()
+		}
+		else if (profile == DropIn.PROFILE_SSZ_CLOUDS)
+	{
+		fn057a60()
+		A4 = 0x058502
+		A5 = 0xffffa804
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_SSZ)
+	{
+		fn0579f0()
+		WriteScrollOffsets()
+	}
+	else if (profile == DropIn.PROFILE_SOZ2)
+	{
+		fn0566d2()
+		WriteScrollOffsets()
+	}
+	else if (profile == DropIn.PROFILE_SOZ1)
+	{
+		fn055d56()
+		fn055df2()
+	}
+	else if (profile == DropIn.PROFILE_LRZ1)
+	{
+		UpdateBackground.LRZ1()
+		A4 = 0x056f6e
+		A5 = 0xffffa80c
+		fn04f0ce()
+	}
+	else if (profile == DropIn.PROFILE_LRZ2)
+	{
+		UpdateBackground.LRZ2()
+		A4 = 0x057184
+		A5 = 0xffffa800
+		fn04f0ce()
+	}
+}
+
+
+// Does the zone add the screen shake to the foreground y-position before running its scrolling code?
+function bool DropIn.profileUsesScreenShake(u8 profile)
+{
+	return profile == DropIn.PROFILE_AIZ2 || profile == DropIn.PROFILE_HCZ2 || profile == DropIn.PROFILE_MGZ1 || profile == DropIn.PROFILE_CNZ2 || profile == DropIn.PROFILE_LBZ1 || profile == DropIn.PROFILE_LBZ2 || profile == DropIn.PROFILE_SOZ1 || profile == DropIn.PROFILE_LRZ1 || profile == DropIn.PROFILE_LRZ2 || profile == DropIn.PROFILE_MGZ2 || profile == DropIn.PROFILE_FBZ2 || profile == DropIn.PROFILE_SOZ2 || profile == DropIn.PROFILE_SSZ_CLOUDS || profile == DropIn.PROFILE_SSZ
+}
+
+
+// Runs the zone's scrolling code with player 2's camera, and sets up the lower view from the results
+//  -> Called before the regular level display update, which then overwrites all of the changed data again for player 1
+function void DropIn.prepareView2()
+{
+	u8 viewIndex = dropin.prepare_view_index == 0 ? 1 : dropin.prepare_view_index
+	dropin.palette2.count = 0
+	u8 profile = DropIn.getScrollProfile()
+	if (profile == 0)
+		return
+
+	// Backup of everything the scrolling code may change
+	u32 backupRegs0 = D0
+	u32 backupRegs1 = D1
+	u32 backupRegs2 = D2
+	u32 backupRegs3 = D3
+	u32 backupRegs4 = D4
+	u32 backupRegs5 = D5
+	u32 backupRegs6 = D6
+	u32 backupRegs7 = D7
+	u32 backupA0 = A0
+	u32 backupA1 = A1
+	u32 backupA2 = A2
+	u32 backupA3 = A3
+	u32 backupA4 = A4
+	u32 backupA5 = A5
+	u32 backupA6 = A6
+	copyMemory(DropIn.SCRATCH_STATE_A, 0xffffee00, 0x200)		// Camera and level variables
+	copyMemory(DropIn.SCRATCH_STATE_B, 0xffffa800, 0x400)		// Scroll buffers of the zone
+	copyMemory(DropIn.SCRATCH_PAL, 0xfffffc00, 0x100)							// Palette (the zones change entries of it when switching areas)
+	bool player1Indoors = (u16[0xffffeee8] != 0)
+
+	u16 cameraX = camera.position.x.u16.player2
+	u16 cameraY = camera.position.y.u16.player2
+	camera.foreground.x.u16 = cameraX
+	camera.foreground.y.u16 = cameraY
+	if (DropIn.profileUsesScreenShake(profile))
+		camera.foreground.y.u16 += camera.screenshake.offset
+	if (profile == DropIn.PROFILE_MHZ2)
+		camera.foreground.x.u16 += camera.screenshake.offset		// This zone shakes horizontally
+
+	// Scrolling code that looks at the camera position or at player 1 should see player 2 here
+	//  -> The camera is part of the level variables that get restored below
+	camera.position.x.u16 = cameraX
+	camera.position.y.u16 = cameraY
+	u16 backupPlayerX = u16[DropIn.P1 + 0x10]
+	u16 backupPlayerY = u16[DropIn.P1 + 0x14]
+	u16[DropIn.P1 + 0x10] = u16[DropIn.P2 + 0x10]
+	u16[DropIn.P1 + 0x14] = u16[DropIn.P2 + 0x14]
+
+	DropIn.applyView2State(profile)
+	DropIn.computeViewPalette2(profile, player1Indoors)
+
+	DropIn.runScrolling2(profile)
+
+	u16[DropIn.P1 + 0x10] = backupPlayerX
+	u16[DropIn.P1 + 0x14] = backupPlayerY
+
+	dropin.view2.fg_y = camera.foreground.y.u16
+	dropin.view2.bg_y = camera.background.y.u16
+
+	// Line scroll offsets of the lower view; they get applied in "DropIn.setupSplitScreen"
+	u16 split = DropIn.lowerTop()
+	bool fourViews = DropIn.partyCount() > 2 && DropIn.fourViewRequested()
+	u16 viewHeight = fourViews ? getScreenHeight() / 2 : getScreenHeight() - split
+	u8 band2 = fourViews ? viewIndex : (split == 0 ? 0 : 1)			// Online, the lower view is the only one and uses the first band
+	copyMemory(DropIn.SCRATCH_SCROLL2, 0xffffe000, viewHeight * 4)
+
+	// Plane content of the lower view
+	DropIn.fillPlaneView(0xc000, 0xffff8008, dropin.view2.fg_y, viewHeight, band2, true)
+	DropIn.fillPlaneView(DropIn.planeBaseB(), 0xffff800a, dropin.view2.bg_y, viewHeight, band2, false)
+	if (viewIndex == 2)
+	{
+		dropin.view3.fg_y = dropin.view2.fg_y
+		dropin.view3.bg_y = dropin.view2.bg_y
+		copyMemory(DropIn.PARTY_SCROLL3, DropIn.SCRATCH_SCROLL2, viewHeight * 4)
+	}
+	else if (viewIndex == 3)
+	{
+		dropin.view4.fg_y = dropin.view2.fg_y
+		dropin.view4.bg_y = dropin.view2.bg_y
+		copyMemory(DropIn.PARTY_SCROLL4, DropIn.SCRATCH_SCROLL2, viewHeight * 4)
+	}
+
+	// Restore
+	copyMemory(0xffffee00, DropIn.SCRATCH_STATE_A, 0x200)
+	copyMemory(0xffffa800, DropIn.SCRATCH_STATE_B, 0x400)
+	copyMemory(0xfffffc00, DropIn.SCRATCH_PAL, 0x100)
+	D0 = backupRegs0
+	D1 = backupRegs1
+	D2 = backupRegs2
+	D3 = backupRegs3
+	D4 = backupRegs4
+	D5 = backupRegs5
+	D6 = backupRegs6
+	D7 = backupRegs7
+	A0 = backupA0
+	A1 = backupA1
+	A2 = backupA2
+	A3 = backupA3
+	A4 = backupA4
+	A5 = backupA5
+	A6 = backupA6
+}
+
+
+// Reuses the game's safe player-2 scrolling sandbox for party players 3 and 4.
+// Only transient player/camera coordinates are substituted; every value is
+// restored before returning to gameplay.
+function void DropIn.preparePartyExtraView(u8 viewIndex)
+{
+	if (viewIndex < 2 || viewIndex > 3)
+		return
+	u32 player = DropIn.partyViewPlayer(viewIndex)
+	if (player == 0)
+		return
+	u16 oldP2X = u16[DropIn.P2 + 0x10]
+	u16 oldP2Y = u16[DropIn.P2 + 0x14]
+	u32 oldCameraX = camera.position.x.player2
+	u32 oldCameraY = camera.position.y.player2
+	u8 oldPrepareIndex = dropin.prepare_view_index
+	bool oldView2Valid = dropin.view2.state_valid
+	bool oldView2Indoors = dropin.view2.indoors
+
+	if (viewIndex == 2)
+	{
+		dropin.view2.state_valid = dropin.view3.state_valid
+		dropin.view2.indoors = dropin.view3.indoors
+	}
+	else
+	{
+		dropin.view2.state_valid = dropin.view4.state_valid
+		dropin.view2.indoors = dropin.view4.indoors
+	}
+	u16[DropIn.P2 + 0x10] = u16[player + 0x10]
+	u16[DropIn.P2 + 0x14] = u16[player + 0x14]
+	camera.position.x.player2 = u32(DropIn.partyViewCameraX(viewIndex)) << 16
+	camera.position.y.player2 = u32(DropIn.partyViewCameraY(viewIndex)) << 16
+	dropin.prepare_view_index = viewIndex
+	DropIn.prepareView2()
+	if (viewIndex == 2)
+	{
+		dropin.view3.state_valid = dropin.view2.state_valid
+		dropin.view3.indoors = dropin.view2.indoors
+		copyMemory(DropIn.PARTY_SCROLL3, DropIn.SCRATCH_SCROLL2, (getScreenHeight() / 2) * 4)
+	}
+	else
+	{
+		dropin.view4.state_valid = dropin.view2.state_valid
+		dropin.view4.indoors = dropin.view2.indoors
+		copyMemory(DropIn.PARTY_SCROLL4, DropIn.SCRATCH_SCROLL2, (getScreenHeight() / 2) * 4)
+	}
+	dropin.prepare_view_index = oldPrepareIndex
+	dropin.view2.state_valid = oldView2Valid
+	dropin.view2.indoors = oldView2Indoors
+	u16[DropIn.P2 + 0x10] = oldP2X
+	u16[DropIn.P2 + 0x14] = oldP2Y
+	camera.position.x.player2 = oldCameraX
+	camera.position.y.player2 = oldCameraY
+}
+
+
+// Sets up the upper view from the regular level display update (player 1)
+function void DropIn.prepareView1()
+{
+	DropIn.fillPlaneView(0xc000, 0xffff8008, camera.foreground.y.u16, DropIn.localViewHeight(), 0, true)
+	DropIn.fillPlaneView(DropIn.planeBaseB(), 0xffff800a, camera.background.y.u16, DropIn.localViewHeight(), 0, false)
+}
+
+
+// Rebuilds both planes the way the game expects them for a single view (when the split screen ends)
+function void DropIn.restoreSingleViewPlanes()
+{
+	DropIn.fillPlaneView(0xc000, 0xffff8008, camera.foreground.y.u16, getScreenHeight(), 0xff, true)
+	DropIn.fillPlaneView(0xe000, 0xffff800a, camera.background.y.u16, getScreenHeight(), 0xff, false)
+}
+
+
+// The game writes changed rows and columns of the planes during V-Int (see "UpdatePlanePatterns").
+// In split screen, both plane name tables are rebuilt each frame instead, so these writes must be skipped:
+// they target the world-based layout of a single view and would show up as flashing stripes in both views.
+function void writePlanePatterns(u32 sourceAddress)
+{
+	A0 = sourceAddress
+	while (true)
+	{
+		D0.u16 = u16[A0]
+		if (D0.u16 == 0)
+			break
+
+		u16[A0] = 0
+		D1.u16 = u16[A0 + 2]
+		A0 += 4
+
+		bool isColumn = (D1.u16 & 0x8000) != 0
+		D1.u16 &= 0x7fff
+		// Keep the original transfer semantics. A byte-count estimate is not a valid
+		// bound for column transfers (their stride is 0x80); discarding the buffer
+		// hid errors and lost unrelated pending writes. The engine validates copies.
+		bool isPlaneTable = dropin.split_active && DropIn.role() != 1 && ((D0.u16 >= 0xc000 && D0.u16 < 0xd000) || (D0.u16 >= 0xe000 && D0.u16 < 0xf000))
+		if (isPlaneTable)
+		{
+			// Skip the data
+			A0 += (D1.u16 + 1) * 8
+		}
+		else if (isColumn)
+		{
+			VDP.setWriteIncrement(0x80)
+			WriteDataToVRAM()
+			D0.u16 += 2
+			WriteDataToVRAM()
+		}
+		else
+		{
+			VDP.setWriteIncrement(2)
+			WriteDataToVRAM()
+			D0.u16 += 0x80
+			WriteDataToVRAM()
+		}
+	}
+
+	VDP.setWriteIncrement(2)
+}
+
+
+// AIZ 1 foreground line scrolling, with the underwater ripple below the water surface.
+// The original code does not handle the water surface being above the top of the screen (the regular camera never gets there in AIZ 1):
+// it would write tens of thousands of lines into the scroll table and overwrite other game data.
+// In split screen, the cameras can get lower, so treat that case as "everything below the first line is under water".
+//# address-hook(0x23b0d4)
+function void UpdateForegroundScrolling.AIZ1()
+{
+	if (!dropin.split_active || s16(water.height.current - camera.foreground.y.u16) >= 1)
+	{
+		base.UpdateForegroundScrolling.AIZ1()
+		return
+	}
+
+	// Same as the original's underwater branch, with the water surface at the first line
+	A4 = 0x23b258
+	A5 = 0xffffa808
+	D1.u16 = 0
+	fn239e90()
+
+	u32 backupA1 = A1
+	A1 = 0xffffa840
+	A6 = 0x23a170
+	D0.u16 = water.height.current
+	D1.u16 = 0xde
+	D2.u16 = (level.framecounter + D0.u16 * 2) & 0x7e
+	A6 += D2.u16
+	D6.s16 = -s16(camera.foreground.x.u16)
+	fn239e74()
+
+	A1 = backupA1
+	A2 = 0xffffa840
+	A4 = 0x23b258
+	A5 = 0xffffa808
+	A6 = 0x23a3b0
+	D0.u16 = water.height.current - camera.foreground.y.u16 + camera.background.y.u16
+	D2.u16 = ((level.framecounter >> 1) + D0.u16 * 2) & 0x7e
+	A6 += D2.u16
+	fn239f18()
+}
+
+
+// LRZ 1 switches to a different background (the lava lake) depending on where player 1 is, see "fn056dca".
+// Player 2 gets the same background as player 1, so it must not be in or at the areas that cause that switch.
+function bool DropIn.isPlayer2InLavaLakeSwitchArea()
+{
+	u16 px = u16[DropIn.P2 + 0x10]
+	u16 py = u16[DropIn.P2 + 0x14]
+	u32 address = 0x056f88
+	for (u8 i = 0; i < 3; ++i)
+	{
+		if (px >= u16[address] - 0x40 && px <= u16[address + 2] + 0x40 && py >= u16[address + 4] - 0x40 && py < u16[address + 6] + 0x40)
+			return true
+		address += 10
+	}
+	return false
+}
+
+
+// MGZ 2 switches to a different background in the two earthquake areas, depending on where player 1 is, see "fn051a6a".
+// Player 2 gets the same background as player 1, so it must not be in or at those areas.
+function bool DropIn.isPlayer2InMarbleQuakeArea()
+{
+	u16 px = u16[DropIn.P2 + 0x10]
+	u16 py = u16[DropIn.P2 + 0x14]
+	if (py >= 0x0040 && py < 0x01c0 && px >= 0x3780)
+		return true
+	if (py >= 0x07c0 && py < 0x0940 && px >= 0x3480)
+		return true
+	return false
+}
+
+
+// Sky Sanctuary has a different background inside the sanctuary (the vertical part), which the sky scrolling code cannot show
+function bool DropIn.isSkySanctuaryInterior(u16 cameraY)
+{
+	u16 y = cameraY & level.height.bitmask
+	return y >= 0x0800 - 0x40 && y < 0x0f00 + 0x40
+}
+
+
+// Some zones show a different background depending on where the player is, and keep track of that in a variable.
+// Player 2's view has its own state for this, decided by player 2's camera in the same way as the game does it for player 1
+// (this runs inside the sandbox of "DropIn.prepareView2", so the game's own variable gets restored afterwards).
+function void DropIn.applyView2State(u8 profile)
+{
+	if (profile == DropIn.PROFILE_ICZ2)
+	{
+		// Same rules as in "fn053d78" (and "InitLevelScrolling.ICZ2" for the start), using player 2's camera
+		u16 x = camera.position.x.u16.player2
+		u16 y = camera.position.y.u16.player2
+		if (!dropin.view2.state_valid)
+		{
+			dropin.view2.state_valid = true
+			dropin.view2.indoors = false
+			if (x < 0x3600)
+			{
+				if (y >= 0x0720)
+					dropin.view2.indoors = true
+				else if (y >= 0x0580 && x < 0x1000)
+					dropin.view2.indoors = true
+			}
+		}
+		else if (x >= 0x1000 && x < 0x3600)
+		{
+			if (!dropin.view2.indoors)
+			{
+				if (y >= 0x0720)
+					dropin.view2.indoors = true
+			}
+			else if (x < 0x1900 || x >= 0x1b80)
+			{
+				if (y < 0x0720)
+					dropin.view2.indoors = false
+			}
+		}
+		u16[0xffffeee8] = dropin.view2.indoors ? 0xff00 : 0
+	}
+}
+
+
+// When the two views are in different areas of a zone that has area-dependent colors, the lower view gets the colors of its own area:
+// the game's own function for that area runs in the sandbox, and the palette entries that it changes get collected
+// (they are then applied to the lower half of the screen with the water palette, see "water2.lemon")
+function void DropIn.computeViewPalette2(u8 profile, bool player1Indoors)
+{
+	dropin.palette2.count = 0
+	if (profile != DropIn.PROFILE_ICZ2 || dropin.view2.indoors == player1Indoors)
+		return
+
+	if (dropin.view2.indoors)
+		fn23e1da()
+	else if (camera.position.x.u16 < 0x0720)
+		fn23e20e()
+	else
+		fn23e1aa()
+
+	u16 count = 0
+	for (u8 i = 0; i < 0x40 && count < 0x20; ++i)
+	{
+		u16 color = u16[0xfffffc00 + i * 2]
+		if (color != u16[DropIn.SCRATCH_PAL + i * 2])
+		{
+			u16[DropIn.SCRATCH_PAL2 + 2 + count * 4] = i
+			u16[DropIn.SCRATCH_PAL2 + 4 + count * 4] = color
+			++count
+		}
+	}
+	u16[DropIn.SCRATCH_PAL2] = count
+	dropin.palette2.count = count
+}
+
+
+// Some zones add up the camera movement into a running total, which their background position is based on (see "fn04f368"),
+// and which gets updated from the difference to the "last" camera value (stored next to it).
+// For the lower view, the total moves along with player 2's camera right away, and the "last" value is set so that the zone's own code adds nothing more
+// (its handling of big jumps would otherwise get confused by the distance between the two cameras)
+function void DropIn.syncAccumulator(u32 lastAddress, u32 totalAddress, u16 value)
+{
+	u16[totalAddress] += value - u16[lastAddress]
+	u16[lastAddress] = value
+}
+
+
+// Fills the line scroll offsets from the zone's table of line bands (the tables describe the original 224 lines).
+// While the split screen enlarged the screen, the game's own code must not ask for more lines than the tables hold, or it reads past their end.
+// Each view only needs the first lines of the result.
+//# address-hook(0x04f0ce)
+function void fn04f0ce()
+{
+	A1 = 0xffffe000		// Location of linewise scroll offsets
+	D0.u16 = camera.background.y.u16
+	D1.u16 = DropIn.baseScreenH() - 1
+	D3.u16 = camera.foreground.x.u16
+	fn04f0de()
+}

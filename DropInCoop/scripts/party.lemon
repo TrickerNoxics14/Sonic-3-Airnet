@@ -1,0 +1,497 @@
+//# script-feature-level(2)
+
+// Extra characters own real dynamic-object slots. Original terrain/character
+// physics run against those slots; legacy global counters are exchanged only
+// while an extra character is being updated, and restored before returning.
+global u8 option.dropin.players
+global u8 option.dropin.party_slot3
+global u8 option.dropin.party_slot4
+global u32 dropin.party3
+global u32 dropin.party4
+global u16 dropin.rings3
+global u16 dropin.rings4
+global u32 dropin.score3
+global u32 dropin.score4
+global u8 dropin.lives3
+global u8 dropin.lives4
+global u16 dropin.dead3
+global u16 dropin.dead4
+constant u32 DropIn.PARTY_SPEED3 = 0x8fe000
+constant u32 DropIn.PARTY_SPEED4 = 0x8fe010
+global u8 dropin.party_updating
+global bool dropin.party_wants3
+global bool dropin.party_wants4
+global u16 dropin.party_leave3
+global u16 dropin.party_leave4
+global u16 dropin.party_rescue3
+global u16 dropin.party_rescue4
+global u16 dropin.party_cooldown3
+global u16 dropin.party_cooldown4
+
+function u32 DropIn.partyPlayer(u8 index)
+{
+	u32 player = index == 2 ? dropin.party3 : dropin.party4
+	return player != 0 && u32[player] == addressof(DropIn.partyActorUpdate) ? player : 0
+}
+
+function u8 DropIn.partyIndex(u32 player)
+{
+	if (player != 0 && player == DropIn.partyPlayer(2))
+		return 2
+	if (player != 0 && player == DropIn.partyPlayer(3))
+		return 3
+	return 0
+}
+
+function u8 DropIn.partyCount()
+{
+	return 2 + (DropIn.partyPlayer(2) != 0 ? 1 : 0) + (DropIn.partyPlayer(3) != 0 ? 1 : 0)
+}
+
+function u16 DropIn.partyInput(u8 index)
+{
+	return Input.getController(index)
+}
+
+function u16 DropIn.partyPreviousInput(u8 index)
+{
+	return Input.getControllerPrevious(index)
+}
+
+function u16 DropIn.partyRings(u8 index)
+{
+	return index == 2 ? dropin.rings3 : dropin.rings4
+}
+
+function void DropIn.setPartyRings(u8 index, u16 rings)
+{
+	if (index == 2)
+		dropin.rings3 = rings
+	else
+		dropin.rings4 = rings
+}
+
+function u8 DropIn.partyExtraSlot(u8 index)
+{
+	return index == 2 ? option.dropin.party_slot3 : option.dropin.party_slot4
+}
+
+// ESU extra characters expose a slot-specific startup function. Resolve its
+// Sonic/Tails/Knuckles movement base without compiling against ESU globals.
+// Dynamic lookup keeps Drop-In Co-op loadable when ESU or a character mod is absent.
+function u8 DropIn.resolvePartyCharacter(u8 index)
+{
+	u8 slot = DropIn.partyExtraSlot(index)
+	if (slot == 0)
+		return index == 2 ? CHARACTER_KNUCKLES : CHARACTER_SONIC
+
+	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")
+	u8 savedCharacters = global.characters
+	System.setGlobalVariableValueByName("global.xtrachar", slot)
+	bool available = System.callFunctionByName(stringformat("ExtraChar.startup_char%d", slot))
+	u8 character = available ? getMainCharacter() : (index == 2 ? CHARACTER_KNUCKLES : CHARACTER_SONIC)
+	global.characters = savedCharacters
+	System.setGlobalVariableValueByName("global.xtrachar", savedExtraSlot)
+	return character
+}
+
+function bool DropIn.drawPartyExtraCharacter(u8 slot, u8 character, s16 px, s16 py, u16 renderQueue)
+{
+	if (slot == 0)
+		return false
+	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")
+	System.setGlobalVariableValueByName("global.xtrachar", slot)
+	push(character)
+	push(1)
+	push(px)
+	push(py)
+	push(false)
+	push(0)
+	bool called = System.callFunctionByName(stringformat("ExtraChar.drawCharacterSprite_char%d", slot))
+	bool drawn = called ? pop() : false
+	System.setGlobalVariableValueByName("global.xtrachar", savedExtraSlot)
+	return drawn
+}
+
+function bool DropIn.joinParty(u8 index)
+{
+	bool aizIntro = global.zone_act == 0x0000 && camera.update_routine < 0x04 && DropIn.getScrollProfile() == DropIn.PROFILE_AIZ1_INTRO
+	bool gameplayJoin = player1.control_override == 0 && u8[DropIn.P1 + 5] == base_state.NORMAL
+	bool safeToJoin = DropIn.safeAnchor(DropIn.P1)
+	if (index < 2 || index > 3 || option.dropin.players <= index || !DropIn.isActiveContext() || (!safeToJoin && !aizIntro && !gameplayJoin) || (player1.control_override != 0 && !aizIntro && !gameplayJoin) || (global.level_started <= 0 && !aizIntro && !gameplayJoin))
+		return false
+	if (DropIn.partyPlayer(index) != 0)
+		return true
+	pushAll()
+	bool newPlayer = !(index == 2 ? dropin.party_wants3 : dropin.party_wants4)
+	bool allocated = allocDynamicObjectStd()
+	if (allocated)
+	{
+		u32 player = A1
+		copyMemory(player, DropIn.P1, 0x4a)
+		A0 = player
+		objA0.update_address = addressof(DropIn.partyActorUpdate)
+		char.character = DropIn.resolvePartyCharacter(index)
+		char.mapping_offset = char.character == CHARACTER_KNUCKLES ? 0x14a8d6 : char.character == CHARACTER_TAILS ? 0x148eb8 : 0x146620
+		char.position.x.u16 = u16[DropIn.P1 + 0x10]
+		char.position.y.u16 = u16[DropIn.P1 + 0x14]
+		char.velocity.x = 0
+		char.velocity.y = 0
+		char.groundspeed = 0
+		char.state = char.state.STANDING
+		char.state.former = 0xff
+		char.animation.sprite = 0
+		char.animation.frame = 0
+		char.animation.timer = 0
+		char.flags = char.flag.IN_AIR
+		char.flags2d = 0
+		char.control_flags = 0
+		char.object_standing_on = 0
+		char.double_jump_state = 0
+		char.spindash = 0
+		char.spindash_charge = 0
+		char.hitbox_extends.x = char.hitbox.x.UPRIGHT
+		char.hitbox_extends.y = char.hitbox.y.UPRIGHT
+		char.hitbox.default.x = char.hitbox.x.UPRIGHT
+		char.hitbox.default.y = char.hitbox.y.UPRIGHT
+		char.bonus_effect = 0
+		char.protection_flag = 0
+		char.invuln.countdown = 60
+		char.drown_countdown = 30
+		if (index == 2)
+		{
+			dropin.party3 = player
+			dropin.dead3 = 0
+			dropin.party_leave3 = 0
+			dropin.party_rescue3 = 0
+			dropin.party_cooldown3 = 0
+			dropin.party_wants3 = true
+			// A player who joins again may be somewhere else: the four-view camera and plane state must start over from this player
+			dropin.camera3.valid = false
+			dropin.view3.state_valid = false
+			if (newPlayer)
+			{
+				dropin.rings3 = 0
+				dropin.score3 = 0
+				dropin.lives3 = 3
+			}
+			setSpeedCapProperties(DropIn.PARTY_SPEED3, false)
+		}
+		else
+		{
+			dropin.party4 = player
+			dropin.dead4 = 0
+			dropin.party_leave4 = 0
+			dropin.party_rescue4 = 0
+			dropin.party_cooldown4 = 0
+			dropin.party_wants4 = true
+			dropin.camera4.valid = false
+			dropin.view4.state_valid = false
+			if (newPlayer)
+			{
+				dropin.rings4 = 0
+				dropin.score4 = 0
+				dropin.lives4 = 3
+			}
+			setSpeedCapProperties(DropIn.PARTY_SPEED4, false)
+		}
+		if (!dropin.joined)
+			DropIn.join()
+	}
+	popAll()
+	return allocated
+}
+
+function void DropIn.updateParty()
+{
+	if (global.game_mode != 0x0c || competition_mode.active != 0)
+		return
+	for (u8 index = 2; index < 4; ++index)
+	{
+		u32 player = DropIn.partyPlayer(index)
+		u16 input = DropIn.partyInput(index)
+		u16 leaveFrames = index == 2 ? dropin.party_leave3 : dropin.party_leave4
+		leaveFrames = player != 0 && (input & (CONTROL_DOWN | CONTROL_MODE)) == (CONTROL_DOWN | CONTROL_MODE) ? leaveFrames + 1 : 0
+		if (index == 2)
+			dropin.party_leave3 = leaveFrames
+		else
+			dropin.party_leave4 = leaveFrames
+		if (option.dropin.players <= index || leaveFrames >= 120)
+		{
+			if (player != 0)
+				zeroMemory(player, 0x4a)
+			if (index == 2)
+			{
+				dropin.party3 = 0
+				dropin.party_wants3 = false
+			}
+			else
+			{
+				dropin.party4 = 0
+				dropin.party_wants4 = false
+			}
+		}
+		else if (player == 0 && ((input & CONTROL_START) || (index == 2 ? dropin.party_wants3 : dropin.party_wants4)))
+			DropIn.joinParty(index)
+		else if (player != 0)
+		{
+			u16 cooldown = index == 2 ? dropin.party_cooldown3 : dropin.party_cooldown4
+			u16 rescue = index == 2 ? dropin.party_rescue3 : dropin.party_rescue4
+			if (cooldown > 0)
+				--cooldown
+			rescue = option.dropin.rescue && cooldown == 0 && !DropIn.bossViewActive() && (input & (CONTROL_DOWN | CONTROL_Y)) == (CONTROL_DOWN | CONTROL_Y) ? min(rescue + 1, 120) : 0
+			if (rescue == 120 && DropIn.safeAnchor(DropIn.P1) && u8[player + 5] == base_state.NORMAL && u8[player + 0x2e] == 0)
+			{
+				pushAll()
+				DropIn.partyRespawn(index, false)
+				if (option.dropin.team_features)
+				{
+					A0 = player
+					char.velocity.y = -0x500
+					char.flags |= char.flag.IN_AIR
+					++dropin.team_rescues
+					DropIn.addTeamCombo(10)
+				}
+				popAll()
+				cooldown = 300
+				rescue = 0
+			}
+			if (index == 2)
+			{
+				dropin.party_rescue3 = rescue
+				dropin.party_cooldown3 = cooldown
+			}
+			else
+			{
+				dropin.party_rescue4 = rescue
+				dropin.party_cooldown4 = cooldown
+			}
+		}
+	}
+	if (DropIn.partyCount() > 2 && (abs(s16(u16[DropIn.P2 + 0x10] - u16[DropIn.P1 + 0x10])) > getScreenWidth() / 2 - 40 || abs(s16(u16[DropIn.P2 + 0x14] - u16[DropIn.P1 + 0x14])) > getScreenHeight() / 2 - 32))
+		DropIn.rescuePlayer(DropIn.P2, DropIn.P1)
+}
+
+function void DropIn.partyRespawn(u8 index, bool died)
+{
+	u32 player = DropIn.partyPlayer(index)
+	if (player == 0 || !DropIn.safeAnchor(DropIn.P1))
+		return
+	A0 = player
+	char.base_state = base_state.NORMAL
+	char.position.x = u32[DropIn.P1 + 0x10]
+	char.position.y = u32[DropIn.P1 + 0x14]
+	char.velocity.x = 0
+	char.velocity.y = 0
+	char.groundspeed = 0
+	char.control_flags = 0
+	char.flags = char.flag.IN_AIR
+	char.flags2d = 0
+	char.state = char.state.STANDING
+	char.state.former = 0xff
+	char.hitbox_extends.x = char.hitbox.x.UPRIGHT
+	char.hitbox_extends.y = char.hitbox.y.UPRIGHT
+	char.rotation.both = 0
+	char.jumping = 0
+	char.hlock_countdown = 0
+	char.double_jump_state = 0
+	char.spindash = 0
+	char.spindash_charge = 0
+	char.object_standing_on = 0
+	char.layer_flags = u16[DropIn.P1 + 0x46]
+	char.invuln.countdown = 90
+	char.drown_countdown = 30
+	if (died)
+		DropIn.setPartyRings(index, 0)
+}
+
+//# address-hook(0x3f1000)
+function void DropIn.partyActorUpdate()
+{
+	u8 index = DropIn.partyIndex(A0)
+	if (index == 0)
+		return
+	if (player1.control_override != 0 || u8[DropIn.P1 + 5] >= base_state.DIED)
+	{
+		DrawObject()
+		return
+	}
+	if (char.base_state >= base_state.DIED)
+	{
+		u16 deadFrames = (index == 2 ? dropin.dead3 : dropin.dead4) + 1
+		if (index == 2)
+			dropin.dead3 = deadFrames
+		else
+			dropin.dead4 = deadFrames
+		if (deadFrames >= 120)
+			DropIn.partyRespawn(index, true)
+		if (char.base_state >= base_state.DIED)
+		{
+			dropin.party_updating = index
+			if (char.character == CHARACTER_KNUCKLES)
+				Character.UpdateDiedState.Knuckles()
+			else
+				Character.UpdateDiedState.Sonic()
+			dropin.party_updating = 0
+		}
+		else
+			DrawObject()
+		return
+	}
+	if (index == 2)
+		dropin.dead3 = 0
+	else
+		dropin.dead4 = 0
+	// The shared party camera has one loaded world window. Bring a stranded
+	// player back to an actual grounded teammate, without changing their rings.
+	if (abs(s16(char.position.x.u16 - u16[DropIn.P1 + 0x10])) > getScreenWidth() / 2 - 40 || abs(s16(char.position.y.u16 - u16[DropIn.P1 + 0x14])) > getScreenHeight() / 2 - 32)
+		DropIn.partyRespawn(index, false)
+	u16 pad = control.pad1
+	u16 playerControl = control.player1
+	u16 savedRings = ring_counter
+	u16 savedRings2 = ring_counter.player2
+	u32 savedScore = player.score
+	u8 savedLives = lives_counter
+	u8 savedSuper = super.active
+	u8 savedGranted = extra_lives_granted
+	u8 savedFast = sonic.fastrunanim.timer
+	u8 savedWaterCurrent = level.HCZ_water_current_flags.player1
+	u16 input = DropIn.partyInput(index)
+	u16 previous = DropIn.partyPreviousInput(index)
+	control.pad1 = ((input & 0xff) << 8) | (input & ~previous & 0xff)
+	control.player1 = control.pad1
+	ring_counter = DropIn.partyRings(index)
+	ring_counter.player2 = ring_counter
+	player.score = index == 2 ? dropin.score3 : dropin.score4
+	lives_counter = index == 2 ? dropin.lives3 : dropin.lives4
+	extra_lives_granted = 0
+	super.active = 0
+	level.HCZ_water_current_flags.player1 = 0
+	A4 = index == 2 ? DropIn.PARTY_SPEED3 : DropIn.PARTY_SPEED4
+	// Private scratch for legacy dust/look helpers, outside actor and globals storage.
+	A6 = index == 2 ? 0x8fe100 : 0x8fe180
+	A5 = A6 + 0x70
+	dropin.party_updating = index
+	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")
+	System.setGlobalVariableValueByName("global.xtrachar", DropIn.partyExtraSlot(index))
+	if (char.base_state == base_state.HURT)
+	{
+		if (char.character == CHARACTER_KNUCKLES)
+			Character.UpdateGotHurtState.Knuckles()
+		else
+			Character.UpdateGotHurtState.Sonic()
+	}
+	else if (char.character == CHARACTER_KNUCKLES)
+		Character.UpdateNormalState.Knuckles()
+	else
+		Character.UpdateNormalState.Sonic()
+	DropIn.setPartyRings(index, ring_counter)
+	if (index == 2)
+	{
+		dropin.score3 = player.score
+		dropin.lives3 = lives_counter
+	}
+	else
+	{
+		dropin.score4 = player.score
+		dropin.lives4 = lives_counter
+	}
+	dropin.party_updating = 0
+	control.pad1 = pad
+	control.player1 = playerControl
+	ring_counter = savedRings
+	ring_counter.player2 = savedRings2
+	player.score = savedScore
+	lives_counter = savedLives
+	extra_lives_granted = savedGranted
+	super.active = savedSuper
+	sonic.fastrunanim.timer = savedFast
+	level.HCZ_water_current_flags.player1 = savedWaterCurrent
+	System.setGlobalVariableValueByName("global.xtrachar", savedExtraSlot)
+}
+
+function void updateCharacterSpritePatterns(u8 character, u8 animationSprite)
+{
+	// Extra characters use ROM-backed custom sprites and must not overwrite
+	// Sonic's single VRAM upload area while animating Knuckles or player four.
+	if (dropin.party_updating == 0)
+		base.updateCharacterSpritePatterns(character, animationSprite)
+}
+
+function bool Standalone.onWriteToSpriteTable(s16 px, s16 py, u16 renderQueue)
+{
+	if (DropIn.partyIndex(A0) != 0)
+	{
+		u8 flags = char.render_flags & (SPRITE_FLAG_FLIP_X | SPRITE_FLAG_FLIP_Y)
+		if (char.sprite_attributes & sprite_attribute.PRIORITY)
+			flags |= SPRITE_FLAG_PRIO
+		u8 savedSuper = super.active
+		super.active = 0
+		bool drawnByExtraSlot = DropIn.drawPartyExtraCharacter(DropIn.partyExtraSlot(DropIn.partyIndex(A0)), char.character, px, py, renderQueue)
+		if (!drawnByExtraSlot)
+			Standalone.drawCharacterSpriteDirect(char.character, px, py, char.animation.sprite, flags, 0x40 + char.character * 0x20, renderQueue)
+		super.active = savedSuper
+		Renderer.drawText(DropIn.FONT, px, py - 28, stringformat("P%d", DropIn.partyIndex(A0) + 1), 0xffffffff, 5, 0, renderQueue + 1, false)
+		return true
+	}
+	return base.Standalone.onWriteToSpriteTable(px, py, renderQueue)
+}
+
+function bool DropIn.handlePartyHurt()
+{
+	u8 index = DropIn.partyIndex(A0)
+	if (index == 0)
+		return false
+	if (dropin.party_updating == index)
+	{
+		if (option.dropin.team_features && dropin.team_insurance_charges > 0 && ring_counter.player2 == 0 && (char.bonus_effect & char.bonus.ANY_SHIELD) == 0 && (char.protection_flag & 0x80) == 0)
+		{
+			ring_counter.player2 = 10
+			DropIn.spendTeamInsurance()
+		}
+		DropIn.hurtPlayer2()
+		ring_counter = ring_counter.player2
+		return true
+	}
+	u16 savedRings2 = ring_counter.player2
+	ring_counter.player2 = DropIn.partyRings(index)
+	if (option.dropin.team_features && dropin.team_insurance_charges > 0 && ring_counter.player2 == 0 && (char.bonus_effect & char.bonus.ANY_SHIELD) == 0 && (char.protection_flag & 0x80) == 0)
+	{
+		ring_counter.player2 = 10
+		DropIn.spendTeamInsurance()
+	}
+	DropIn.hurtPlayer2()
+	DropIn.setPartyRings(index, ring_counter.player2)
+	ring_counter.player2 = savedRings2
+	return true
+}
+
+
+
+
+
+//# address-hook(0x006a76)
+function void InitializeGameCharacters()
+{
+	dropin.party3 = 0
+	dropin.party4 = 0
+	dropin.party_updating = 0
+	base.InitializeGameCharacters()
+}
+
+//# address-hook(0x01d8ac)
+function void ItemEffect.ApplyExtraRings()
+{
+	if (DropIn.partyIndex(A1) != 0)
+	{
+		++u16[A2]
+		ring_counter = min(ring_counter + 10, 999)
+		hud.dirty.rings |= 1
+		if (checkForExtraLifeByRings())
+			gainExtraLife()
+		else
+			playMusic(SFX_RING)
+		return
+	}
+	base.ItemEffect.ApplyExtraRings()
+}

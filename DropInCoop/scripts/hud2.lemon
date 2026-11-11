@@ -1,0 +1,201 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: HUD for the split screen.
+//
+// The regular HUD (score, time and rings in three rows) covers almost half of the upper view, so while the screen is split:
+//  - The upper view (player 1) gets a single row: time, rings, score, and the lives at the right
+//  - The lower view (player 2) shows player 2's own rings
+// Separate ring counts for the two players come from the Co-op Deluxe mod (it counts player 2's rings in "ring_counter.player2").
+// Without it, both players share the rings as in the original game, and the lower view shows that shared count.
+//
+// The regular HUD is hidden by skipping all HUD drawing calls while "RenderHUD" runs. This also hides what other mods
+// (like Co-op Deluxe) add to the HUD, no matter which mod has the higher priority.
+
+global bool dropin.hud_hidden
+
+
+//# address-hook(0x00db44)
+function void RenderHUD()
+{
+	if (DropIn.partyCount() > 2)
+	{
+		u16 savedRings = ring_counter
+		u32 savedScore = player.score
+		if (DropIn.role() >= 3)
+		{
+			ring_counter = DropIn.partyRings(DropIn.role() - 1)
+			player.score = DropIn.role() == 3 ? dropin.score3 : dropin.score4
+		}
+		else if (DropIn.role() == 2)
+		{
+			ring_counter = ring_counter.player2
+			player.score = player2.score
+		}
+		base.RenderHUD()
+		ring_counter = savedRings
+		player.score = savedScore
+		for (u8 index = 0; index < 4; ++index)
+		{
+			if (index < 2 || DropIn.partyPlayer(index) != 0)
+			{
+				u16 rings = index == 0 ? ring_counter : index == 1 ? ring_counter.player2 : DropIn.partyRings(index)
+				Renderer.drawText(DropIn.FONT, 4 + getScreenWidth() * index / 4, getScreenHeight() - 12, stringformat("P%d R%d", index + 1, rings), 0xffffffff, 1, 0, 0xe100, false)
+			}
+		}
+		return
+	}
+	if (dropin.split_active && !debug_mode.state && !DropIn.net())
+	{
+		// Hide the HUD drawn by the game (and other mods) until "RenderStaticRings", which comes right after it
+		dropin.hud_hidden = true
+		return
+	}
+
+	// Online, the friend sees player 2's rings
+	bool showPlayer2 = (DropIn.role() == 2 && DropIn.ownRings())
+	if (showPlayer2)
+	{
+		DropIn.swapRings()
+		DropIn.swapScore()
+	}
+	base.RenderHUD()
+	if (showPlayer2)
+	{
+		DropIn.swapRings()
+		DropIn.swapScore()
+	}
+}
+
+//# address-hook(0x00eb86)
+function void RenderStaticRings()
+{
+	dropin.hud_hidden = false
+	base.RenderStaticRings()
+}
+
+function void HUD.drawSprite(u64 key, u16 px, u16 py, u16 renderQueue)
+{
+	if (!dropin.hud_hidden)
+		base.HUD.drawSprite(key, px, py, renderQueue)
+}
+
+function void HUD.drawDigit(u8 digit, u16 px, u16 py, u16 renderQueue)
+{
+	if (!dropin.hud_hidden)
+		base.HUD.drawDigit(digit, px, py, renderQueue)
+}
+
+function void HUD.drawNumber(string stringMask, u32 number, u16 px, u16 py, u16 renderQueue)
+{
+	if (!dropin.hud_hidden)
+		base.HUD.drawNumber(stringMask, number, px, py, renderQueue)
+}
+
+function void HUD.drawSmallDigit(u8 digit, u16 px, u16 py, u16 renderQueue)
+{
+	if (!dropin.hud_hidden)
+		base.HUD.drawSmallDigit(digit, px, py, renderQueue)
+}
+
+
+function bool DropIn.hasSeparateRings()
+{
+	return Mods.isModActive("Co-op-Deluxe (Beta)") || Mods.isModActive("CO-OP Deluxe (Beta)")
+}
+
+// Right-aligned number, ending at "px"
+function void DropIn.drawHudNumber(u32 value, s16 px, s16 py, u16 renderQueue)
+{
+	while (true)
+	{
+		HUD.drawDigit(value % 10, px, py, renderQueue)
+		px -= 8
+		value /= 10
+		if (value == 0)
+			break
+	}
+}
+
+function void DropIn.drawHudRings(u16 rings, s16 px, s16 py, u16 renderQueue)
+{
+	bool show = (rings != 0 || (level.framecounter & 0x08))
+	HUD.drawSprite(show ? "hud_text_rings" : "hud_text_rings_red", px, py, renderQueue)
+	DropIn.drawHudNumber(rings, px + 0x40, py, renderQueue + 1)
+}
+
+function void DropIn.drawHudTime(s16 px, s16 py, u16 renderQueue)
+{
+	bool show = (timer.minutes < 9 || (level.framecounter & 0x08) || Game.getSetting(SETTING_INFINITE_TIME))
+	HUD.drawSprite(show ? "hud_text_time" : "hud_text_time_red", px, py, renderQueue)
+
+	u16 minutes = timer.minutes
+	u16 seconds = timer.seconds
+	if (minutes >= 10)
+		px += 8
+	if (minutes >= 10)
+		HUD.drawDigit(minutes / 10, px + 0x20, py, renderQueue + 1)
+	HUD.drawDigit(minutes % 10, px + 0x28, py, renderQueue + 1)
+	if (Game.getSetting(SETTING_EXTENDED_HUD))
+	{
+		u16 centiseconds = (timer.frames * 99 + 30) / 59
+		HUD.drawSprite("hud_char_minutes", px + 0x30, py, renderQueue + 1)
+		HUD.drawDigit(seconds / 10, px + 0x38, py, renderQueue + 1)
+		HUD.drawDigit(seconds % 10, px + 0x40, py, renderQueue + 1)
+		HUD.drawSprite("hud_char_seconds", px + 0x48, py, renderQueue + 1)
+		HUD.drawDigit(centiseconds / 10, px + 0x50, py, renderQueue + 1)
+		if (minutes < 10)
+			HUD.drawDigit(centiseconds % 10, px + 0x58, py, renderQueue + 1)
+	}
+	else
+	{
+		HUD.drawSprite("hud_char_colon", px + 0x30, py, renderQueue + 1)
+		HUD.drawDigit(seconds / 10, px + 0x38, py, renderQueue + 1)
+		HUD.drawDigit(seconds % 10, px + 0x40, py, renderQueue + 1)
+	}
+}
+
+// Called after the sprites of both views were rendered
+function void DropIn.drawSplitHud()
+{
+	if (global.level_started <= 0 || debug_mode.state)
+		return
+
+	Renderer.setSpriteTagWithPosition(1, 0, 0)
+	Renderer.setLogicalSpriteSpace(Space.SCREEN)
+
+	s16 px = 0x0f
+	s16 py = 0x04
+	u16 renderQueue = 0xe000
+	u16 width = getScreenWidth()
+
+	// Upper view: one row with time, rings and (if there is enough room) score
+	DropIn.drawHudTime(px, py, renderQueue)
+	DropIn.drawHudRings(ring_counter, px + 0x68, py, renderQueue + 2)
+	if (width >= 400)
+	{
+		HUD.drawSprite("hud_text_score", px + 0xc0, py, renderQueue + 4)
+		DropIn.drawHudNumber(player.score * 10, px + 0xc0 + 0x58, py, renderQueue + 5)
+	}
+
+	// Lives, at the right end of the row
+	if (!Game.isTimeAttack() && !Game.getSetting(SETTING_INFINITE_LIVES))
+	{
+		s16 lx = s16(width) - px - 0x30
+		HUD.drawSprite(getCharacterLivesIcon(getMainCharacter()), lx, py, renderQueue + 6)
+		if (lives_counter >= 10)
+			HUD.drawSmallDigit(u16((lives_counter / 10) % 10), lx + 0x20, py + 8, renderQueue + 7)
+		HUD.drawSmallDigit(u16(lives_counter % 10), lx + 0x28, py + 8, renderQueue + 7)
+	}
+
+	// Lower view: player 2's rings
+	u16 rings2 = (DropIn.hasSeparateRings() || DropIn.ownRings()) ? ring_counter.player2 : ring_counter
+	DropIn.drawHudRings(rings2, px, DropIn.localViewHeight() + py, renderQueue + 8)
+	if (DropIn.ownRings() && width >= 400)
+	{
+		HUD.drawSprite("hud_text_score", px + 0x68, DropIn.localViewHeight() + py, renderQueue + 10)
+		DropIn.drawHudNumber(player2.score * 10, px + 0x68 + 0x58, DropIn.localViewHeight() + py, renderQueue + 11)
+	}
+
+	Renderer.clearSpriteTag()
+	Renderer.setLogicalSpriteSpace(Space.WORLD)
+}

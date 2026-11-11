@@ -1,0 +1,204 @@
+{
+  "H02": {
+    "x": "0x4720",
+    "y": "0x01a0",
+    "source": "levelobjects_01_aiz.lemon",
+    "object": "1_92",
+    "address": "0x0691a8",
+    "targetX": "0x48a0",
+    "targetY": "0x01c0"
+  },
+  "H03": {
+    "x": "0x35a0",
+    "y": "0x0560",
+    "source": "levelobjects_02_hcz.lemon",
+    "object": "1_99",
+    "address": "0x069ea0",
+    "targetX": "0x3720",
+    "targetY": "0x0580"
+  },
+  "H04": {
+    "x": "0x3f48",
+    "y": "0x06c0",
+    "source": "levelobjects_02_hcz.lemon",
+    "object": "1_9a",
+    "address": "0x06aeb6",
+    "targetX": "0x40c8",
+    "targetY": "0x06e0"
+  },
+  "H05": {
+    "x": "0x2d80",
+    "y": "0x0e40",
+    "source": "levelobjects_03_mgz.lemon",
+    "object": "1_9f",
+    "address": "0x088568",
+    "targetX": "0x2f00",
+    "targetY": "0x0e60"
+  },
+  "H06": {
+    "x": "0x3ba0",
+    "y": "0x0648",
+    "source": "level\\03_mgz\\level_mgz.lemon",
+    "object": "1_a1",
+    "address": "0x06c31a",
+    "targetX": "0x3d20",
+    "targetY": "0x0668"
+  },
+  "H07": {
+    "x": "0x3140",
+    "y": "0x01ec",
+    "source": "levelobjects_04_cnz.lemon",
+    "object": "1_a6",
+    "address": "0x06d99c",
+    "targetX": "0x32c0",
+    "targetY": "0x020c"
+  },
+  "H08": {
+    "x": "0x47c0",
+    "y": "0x0250",
+    "source": "levelobjects_04_cnz.lemon",
+    "object": "1_a7",
+    "address": "0x06e47e",
+    "targetX": "0x4940",
+    "targetY": "0x0270"
+  },
+  "H09": {
+    "x": "0x2d80",
+    "y": "0x05c0",
+    "source": "levelobjects_08_fbz.lemon",
+    "object": "1_aa",
+    "address": "0x06ee68",
+    "targetX": "0x2f00",
+    "targetY": "0x05e0"
+  },
+  "H11": {
+    "x": "0x0670",
+    "y": "0x0260",
+    "source": "levelobjects_05_icz.lemon",
+    "object": "1_bc",
+    "address": "0x071162",
+    "targetX": "0x07f0",
+    "targetY": "0x0280"
+  },
+  "H12": {
+    "x": "0x4310",
+    "y": "0x0598",
+    "source": "levelobjects_05_icz.lemon",
+    "object": "1_bd",
+    "address": "0x071bce",
+    "targetX": "0x4490",
+    "targetY": "0x05b8"
+  },
+  "H13": {
+    "x": "0x3d40",
+    "y": "0x0140",
+    "source": "levelobjects_06_lbz.lemon",
+    "object": "1_c9",
+    "address": "0x0723e0",
+    "targetX": "0x3ec0",
+    "targetY": "0x0160"
+  },
+  "H14": {
+    "x": "0x4320",
+    "y": "0x0760",
+    "source": "level\\06_lbz\\lbz2_mid_boss_cutscene.lemon",
+    "object": "1_ca",
+    "address": "0x0729ba",
+    "targetX": "0x44a0",
+    "targetY": "0x0780"
+  },
+  "H15": {
+    "x": "0x4230",
+    "y": "0x0750",
+    "source": "levelobjects_07_mhz.lemon",
+    "object": "2_92",
+    "address": "0x0751ca",
+    "targetX": "0x43b0",
+    "targetY": "0x0770"
+  },
+  "H16": {
+    "x": "0x3b50",
+    "y": "0x0304",
+    "source": "levelobjects_07_mhz.lemon",
+    "object": "2_93",
+    "address": "0x075f50",
+    "targetX": "0x3cd0",
+    "targetY": "0x0324"
+  },
+  "H18": {
+    "x": "0x50d0",
+    "y": "0x06b8",
+    "source": "levelobjects_09_soz.lemon",
+    "object": "2_98",
+    "address": "0x07764e",
+    "targetX": "0x5250",
+    "targetY": "0x06d8"
+  },
+  "H19": {
+    "x": "0x2b20",
+    "y": "0x0860",
+    "source": "levelobjects_10_lrz.lemon",
+    "object": "2_9d",
+    "address": "0x0784f0",
+    "targetX": "0x2ca0",
+    "targetY": "0x0880"
+  },
+  "H22": {
+    "x": "0x35c0",
+    "y": "0x02a0",
+    "source": "levelobjects_13_dez.lemon",
+    "object": "2_a6",
+    "address": "0x07ddb4",
+    "targetX": "0x3740",
+    "targetY": "0x02c0"
+  },
+  "H23": {
+    "x": "0x3390",
+    "y": "0x01e0",
+    "source": "levelobjects_13_dez.lemon",
+    "object": "2_a7",
+    "address": "0x07f06c",
+    "targetX": "0x3510",
+    "targetY": "0x0200"
+  },
+  "H01": {
+    "x": "0x1070",
+    "y": "0x0269",
+    "source": "level/01_aiz/level_aiz.lemon:AIZ1a.checkPreBossArea",
+    "address": "0x068a24",
+    "targetX": "0x11f0",
+    "targetY": "0x0289"
+  },
+  "H10": {
+    "x": "0x3040",
+    "y": "0x0670",
+    "source": "level/08_fbz/fbz_dualplane.lemon:fn053372",
+    "address": "0x0705ea",
+    "targetX": "0x31c0",
+    "targetY": "0x0690"
+  },
+  "H17": {
+    "x": "0x421d",
+    "y": "0x09d7",
+    "source": "bosses/boss_soz1.lemon:fn076a12",
+    "address": "0x076a12",
+    "targetX": "0x439d",
+    "targetY": "0x09f7"
+  },
+  "H20": {
+    "x": "0x0880",
+    "y": "0x0540",
+    "source": "level/10_lrz/level_lrz.lemon:fn059c8c",
+    "address": "0x079786",
+    "targetX": "0x0a00",
+    "targetY": "0x0560"
+  },
+  "H21": {
+    "x": "0x18c0",
+    "y": "0x0650",
+    "source": "standalone/resources/level_objects/levelobjects_12_ssz.lemon:final teleporter; objects/level/teleporter.lemon:fn045a72",
+    "address": "0x07b288",
+    "targetX": "0x1a40",
+    "targetY": "0x0670"
+  }
+}

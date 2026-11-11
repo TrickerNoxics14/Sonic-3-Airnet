@@ -1,0 +1,194 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: water for the split screen.
+//
+// The renderer can switch to the underwater palette at one screen line only ("Renderer.enableSecondaryPalette").
+// With two views, there are up to two water surfaces on screen, so not every combination can be shown.
+// On top of that, the OpenGL renderer only applies that palette switch to plane rects that the switch line actually
+// passes through (a rect lying completely below it keeps the main palette), while sprites always switch at the line.
+// To get the same result in all renderers without planes and sprites disagreeing, the switch line is only ever placed
+// inside the lower view. That leaves these options:
+//  - Mode 0: regular main palette, switch at the water surface in the lower view (upper view above water)
+//  - Mode 1: underwater main palette, no switch (both views under water)
+//  - Mode 2: underwater main palette, switch back to the regular colors right at the start of the lower view
+//            (upper view under water, lower view above water)
+// The option with the fewest wrongly colored lines gets used.
+// Switching between the options changes the colors of large screen areas at once, so it is only done when clearly better:
+// immediately if it saves a lot of wrong lines, otherwise only after the other option was better for a while.
+
+constant s16 DropIn.WATER_SWITCH_LINES = 24		// Switch right away if this saves at least this many wrongly colored lines
+constant u16 DropIn.WATER_SWITCH_DELAY = 30		// Otherwise, switch once the other option was better for this many frames
+
+global bool dropin.water_swap
+global bool dropin.palette2_active				// The switch to the second palette is used to give the lower view its own colors (no water in the lower view)
+global bool dropin.water_mode_valid
+global u8   dropin.water_mode					// See above
+global u16  dropin.water_mode_timer
+
+
+//# address-hook(0x006c34)
+function void UpdateWater()
+{
+	base.UpdateWater()
+
+	dropin.water_swap = false
+	dropin.palette2_active = false
+	if (dropin.split_active && !DropIn.net() && level.water_present && irq_table.lineupdate == 0x000dd8)
+		DropIn.updateSplitWater()
+	else
+		dropin.water_mode_valid = false
+}
+
+
+function void DropIn.updateSplitWater()
+{
+	s16 split = DropIn.localViewHeight()
+	s16 height = getScreenHeight()
+
+	// Screen line of the water surface in each view, clamped to that view
+	s16 top = clamp(s16(water.height.current - camera.position.y.u16), 0, split)
+	s16 bottom = clamp(s16(water.height.current - camera.position.y.u16.player2), 0, height - split) + split
+
+	// Number of screen lines with the wrong palette for each option
+	s16 errorMode0 = split - top								// The wet part of the upper view looks dry
+	s16 errorMode1 = top + (bottom - split)						// The dry parts of both views look wet
+	s16 errorMode2 = top + (height - bottom)					// The dry part of the upper and the wet part of the lower view are wrong
+
+	// Best option right now
+	u8 bestMode = 0
+	s16 bestError = errorMode0
+	if (errorMode1 < bestError)
+	{
+		bestMode = 1
+		bestError = errorMode1
+	}
+	if (errorMode2 < bestError)
+	{
+		bestMode = 2
+		bestError = errorMode2
+	}
+
+	if (!dropin.water_mode_valid)
+	{
+		dropin.water_mode_valid = true
+		dropin.water_mode = bestMode
+		dropin.water_mode_timer = 0
+	}
+	else if (bestMode != dropin.water_mode)
+	{
+		s16 currentError = (dropin.water_mode == 0) ? errorMode0 : ((dropin.water_mode == 1) ? errorMode1 : errorMode2)
+		if (bestError + DropIn.WATER_SWITCH_LINES <= currentError)
+		{
+			dropin.water_mode = bestMode
+			dropin.water_mode_timer = 0
+		}
+		else if (bestError < currentError)
+		{
+			++dropin.water_mode_timer
+			if (dropin.water_mode_timer >= DropIn.WATER_SWITCH_DELAY)
+			{
+				dropin.water_mode = bestMode
+				dropin.water_mode_timer = 0
+			}
+		}
+		else
+		{
+			dropin.water_mode_timer = 0
+		}
+	}
+	else
+	{
+		dropin.water_mode_timer = 0
+	}
+
+	// Note that the palette switch happens 2 lines below "h_int.line"
+	if (dropin.water_mode == 0)
+	{
+		water.fullscreen = 0
+		h_int.line = (bottom >= height) ? 0xff : (((bottom > split) ? bottom : (split + 1)) - 2)
+		if (bottom >= height && dropin.palette2.count > 0)
+		{
+			// No water in the lower view: the switch to the second palette is free for the lower view's own colors, starting one line below the border
+			h_int.line = split + 1 - 2
+			dropin.palette2_active = true
+		}
+	}
+	else if (dropin.water_mode == 1)
+	{
+		water.fullscreen = 1
+		h_int.line = 0xff
+	}
+	else
+	{
+		// Main palette is the underwater one, the secondary palette gets the regular colors (see "HInt_000dd8" below)
+		//  -> The switch is one line below the border between the views, so it is inside the lower view's plane rects
+		water.fullscreen = 1
+		h_int.line = split + 1 - 2
+		dropin.water_swap = true
+	}
+}
+
+
+// Water palette switch; when the palettes are swapped, the secondary palette gets the regular (above water) colors
+function void HInt_000dd8()
+{
+	if (dropin.palette2_active)
+	{
+		DropIn.hintPalette2()
+		return
+	}
+
+	if (!dropin.water_swap)
+	{
+		base.HInt_000dd8()
+		return
+	}
+
+	if (u16[0xfffff644] == 0)
+		return
+	u16[0xfffff644] = 0
+
+	Renderer.enableSecondaryPalette(h_int.line + 2)
+
+	// Same list of palette entries as for the water, but taken from the regular palette
+	u32 source = water.palette.source
+	s16 count = s16(u16[source])
+	source += 2
+	while (count >= 0)
+	{
+		u16 offset = u16[source]
+		source += 2
+
+		u8 index = offset / 2
+		Renderer.setSecondaryPaletteEntryPacked(index,     u16[0xfffffc00 + offset])
+		Renderer.setSecondaryPaletteEntryPacked(index + 1, u16[0xfffffc00 + offset + 2])
+		Renderer.setSecondaryPaletteEntryPacked(index + 2, u16[0xfffffc00 + offset + 4])
+		--count
+	}
+
+	if (EXTENDED_CHARACTER_PALETTES)
+	{
+		for (u16 i = 0; i < 0xc0; ++i)
+		{
+			Renderer.setSecondaryPaletteEntryPacked(i + 0x40, u16[0x802000 + i * 2])
+		}
+	}
+}
+
+
+// Gives the lower half of the screen its own colors for some palette entries (see "DropIn.computeViewPalette2")
+function void DropIn.hintPalette2()
+{
+	if (u16[0xfffff644] == 0)
+		return
+	u16[0xfffff644] = 0
+
+	Renderer.enableSecondaryPalette(h_int.line + 2)
+
+	u16 count = u16[DropIn.SCRATCH_PAL2]
+	for (u16 i = 0; i < count; ++i)
+	{
+		u16 index = u16[DropIn.SCRATCH_PAL2 + 2 + i * 4]
+		Renderer.setSecondaryPaletteEntryPacked(u8(index), u16[DropIn.SCRATCH_PAL2 + 4 + i * 4])
+	}
+}

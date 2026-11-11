@@ -1,0 +1,284 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: things that a second human player needs to be able to do, which the original game only has for the CPU Tails or for Competition mode:
+//  - Own rings: each player has their own ring count (player 1: "ring_counter", player 2: "ring_counter.player2", which the game has for Competition mode).
+//    Getting hurt only takes away the rings of the player who got hurt, and rings are collected by the player who touches them.
+//    The game's own ring code only knows "ring_counter", so the two counters get swapped around the code that belongs to player 2.
+//  - Monitors: player 2 can open them like player 1 does.
+
+// Does each player have their own rings? (the Co-op Deluxe mod does that on its own)
+function bool DropIn.ownRings()
+{
+	return dropin.joined && !DropIn.hasSeparateRings() && competition_mode.active == 0
+}
+
+function void DropIn.swapRings()
+{
+	u16 rings = ring_counter
+	ring_counter = ring_counter.player2
+	ring_counter.player2 = rings
+
+	u8 granted = extra_lives_granted
+	extra_lives_granted = unused.extra_lives_granted.player2
+	unused.extra_lives_granted.player2 = granted
+}
+
+// Is the object at A0 (e.g. a ring) closer to player 2 than to player 1?
+function bool DropIn.isCloserToPlayer2(u32 objectAddress)
+{
+	s32 x = s16(u16[objectAddress + 0x10])
+	s32 y = s16(u16[objectAddress + 0x14])
+	s32 d1 = abs(x - s16(u16[DropIn.P1 + 0x10])) + abs(y - s16(u16[DropIn.P1 + 0x14]))
+	s32 d2 = abs(x - s16(u16[DropIn.P2 + 0x10])) + abs(y - s16(u16[DropIn.P2 + 0x14]))
+	return d2 < d1
+}
+
+
+// A ring that was touched (dropped rings) gets collected by the player who is closer
+//# address-hook(0x01a7c2)
+function void fn01a7c2()
+{
+	u8 partyIndex = DropIn.partyIndex(0xffff0000 + u32(u16[A0 + 0x3e]))
+	if (partyIndex != 0)
+	{
+		u16 savedRings = ring_counter
+		u16 savedRings2 = ring_counter.player2
+		u8 savedLives = lives_counter
+		u8 savedGranted = extra_lives_granted
+		u32 savedA0 = A0
+		ring_counter = DropIn.partyRings(partyIndex)
+		lives_counter = partyIndex == 2 ? dropin.lives3 : dropin.lives4
+		u16[A0 + 0x3e] = 0
+		base.fn01a7c2()
+		DropIn.setPartyRings(partyIndex, ring_counter)
+		if (partyIndex == 2)
+			dropin.lives3 = lives_counter
+		else
+			dropin.lives4 = lives_counter
+		ring_counter = savedRings
+		ring_counter.player2 = savedRings2
+		lives_counter = savedLives
+		extra_lives_granted = savedGranted
+		A0 = savedA0
+		return
+	}
+	if (DropIn.ownRings() && DropIn.isCloserToPlayer2(A0))
+	{
+		DropIn.swapRings()
+		base.fn01a7c2()
+		DropIn.swapRings()
+		return
+	}
+	base.fn01a7c2()
+}
+
+
+// Rings lost by player 2 (see "DropIn.hurtPlayer2"): the spill object takes its ring count from player 2's counter
+//# address-hook(0x01a67a)
+function void fn01a67a()
+{
+	u8 partyIndex = DropIn.partyIndex(0xffff0000 + u32(u16[A0 + 0x3e]))
+	if (partyIndex != 0)
+	{
+		u16 savedRings = ring_counter
+		u16 savedRings2 = ring_counter.player2
+		u8 savedGranted = extra_lives_granted
+		u32 savedA0 = A0
+		// Vanilla treats byte 3f as a two-player selector. Clear the owner tag
+		// before entering it so its count comes from this player's primary counter.
+		u16[A0 + 0x3e] = 0
+		ring_counter = DropIn.partyRings(partyIndex)
+		base.fn01a67a()
+		DropIn.setPartyRings(partyIndex, ring_counter)
+		ring_counter = savedRings
+		ring_counter.player2 = savedRings2
+		extra_lives_granted = savedGranted
+		A0 = savedA0
+		return
+	}
+	++dropin.dbg_init
+	if (DropIn.ownRings() && u16[A0 + 0x3e] == u16(DropIn.P2))
+	{
+		u32 backupA0 = A0
+		DropIn.swapRings()
+		u16[A0 + 0x3e] = 0
+		base.fn01a67a()
+		DropIn.swapRings()
+		A0 = backupA0
+		return
+	}
+	base.fn01a67a()
+}
+
+
+// Rings from a monitor and the like go to whoever opened it
+//# address-hook(0x01d820)
+function void ItemEffect.UpdateDefaultInternal()
+{
+	u8 partyIndex = DropIn.partyIndex(0xffff0000 + u32(u16[A0 + 0x42]))
+	if (partyIndex != 0)
+	{
+		u16 savedRings = ring_counter
+		u16 savedRings2 = ring_counter.player2
+		u8 savedLives = lives_counter
+		u8 savedGranted = extra_lives_granted
+		u32 savedA0 = A0
+		ring_counter = DropIn.partyRings(partyIndex)
+		lives_counter = partyIndex == 2 ? dropin.lives3 : dropin.lives4
+		base.ItemEffect.UpdateDefaultInternal()
+		DropIn.setPartyRings(partyIndex, ring_counter)
+		if (partyIndex == 2)
+			dropin.lives3 = lives_counter
+		else
+			dropin.lives4 = lives_counter
+		ring_counter = savedRings
+		ring_counter.player2 = savedRings2
+		lives_counter = savedLives
+		extra_lives_granted = savedGranted
+		A0 = savedA0
+		return
+	}
+	if (DropIn.ownRings() && u16[A0 + 0x42] == u16(DropIn.P2))
+	{
+		u32 backupA0 = A0
+		DropIn.swapRings()
+		base.ItemEffect.UpdateDefaultInternal()
+		DropIn.swapRings()
+		A0 = backupA0
+		return
+	}
+	base.ItemEffect.UpdateDefaultInternal()
+}
+
+// Local co-op: a positive monitor power-up creates a matching native item
+// effect for each other active player. Native effect routines then apply rings,
+// lives, shields and timers through each player's existing character data.
+function bool DropIn.shareableMonitorType(u8 itemType)
+{
+	return itemType != 0x00 && itemType != 0x02 && itemType <= 0x08
+}
+
+function bool DropIn.validSharedMonitor(u8 itemType, u16 owner, u32 teammate)
+{
+	return DropIn.shareableMonitorType(itemType) && owner != 0 && teammate != 0 && u16(teammate) != owner
+}
+
+//# address-hook(0x01d7ce)
+function void ItemEffect.Init()
+{
+	u32 sourceEffect = A0
+	u8 itemType = objA0.state
+	u16 owner = objA0.monitor.character_address
+	base.ItemEffect.Init()
+	if (option.dropin.team_features == 0 || !DropIn.shareableMonitorType(itemType) || owner == 0 || (!dropin.joined && DropIn.partyCount() <= 2))
+		return
+	pushAll()
+	u8 sharedCount = 0
+	for (u8 index = 0; index < 4; ++index)
+	{
+		u32 teammate = DropIn.teamPlayer(index)
+		if (!DropIn.validSharedMonitor(itemType, owner, teammate))
+			continue
+		if (allocDynamicObjectStd())
+		{
+			u32 sharedEffect = A1
+			copyMemory(sharedEffect, sourceEffect, 0x4a)
+			A0 = sharedEffect
+			objA0.update_address = addressof(ItemEffect.BaseUpdate)
+			objA0.monitor.character_address = u16(teammate)
+			++sharedCount
+		}
+	}
+	if (sharedCount > 0)
+	{
+		dropin.team_card = 8
+		dropin.team_card_timer = 120
+	}
+	popAll()
+}
+
+
+// Player 2 touching an item (monitor or ring): the game's code lets only player 1 (or Competition mode) do that
+//# address-hook(0x00ffd4)
+function void Character.OnCollisionWithDynamicObject()
+{
+	u32 hitPlayer = A0
+	bool bossActive = DropIn.bossViewActive()
+	u32 bossTarget = dropin.boss_object != 0 ? dropin.boss_object : A1
+	u8 bossHitsBefore = (bossActive && bossTarget != 0) ? u8[bossTarget + 0x29] : 0
+	bool partyPlayer = DropIn.partyIndex(A0) != 0
+	bool enablePartyItemCollision = ((A0 == DropIn.P2 && dropin.joined) || (partyPlayer && DropIn.partyCount() > 2)) && competition_mode.active == 0 && (objA1.collision_attributes & collision_attributes.flags) == collision.flag.ITEM
+	if (enablePartyItemCollision)
+	{
+		if (partyPlayer && (objA1.collision_attributes & collision_attributes.size) != collision.size.16x16)
+			u16[A1 + 0x3e] = A0.u16
+		competition_mode.active = 1
+	}
+	base.Character.OnCollisionWithDynamicObject()
+	if (enablePartyItemCollision)
+		competition_mode.active = 0
+	if (bossActive)
+		DropIn.checkBossTeamHit(hitPlayer, bossTarget, bossHitsBefore)
+}
+
+
+// A monitor that player 2 is standing on or running into: it opens in the same cases as for player 1
+//# address-hook(0x01d6c2)
+function void MonitorIntact.CheckBlocking.player2()
+{
+	if ((dropin.joined || DropIn.partyCount() > 2) && competition_mode.active == 0)
+	{
+		MonitorIntact.CheckBlocking()
+		return
+	}
+	base.MonitorIntact.CheckBlocking.player2()
+}
+
+
+// Own score: same idea as for the rings, with the score of player 2 kept in "player2.score" (which the game has for Competition mode)
+function void DropIn.swapScore()
+{
+	u32 score = player.score
+	player.score = player2.score
+	player2.score = score
+}
+
+// Points go to the player who caused them (e.g. who destroyed an enemy); anything else (bumpers, bosses, the end of the act) counts for player 1
+function void addScore(u32 value)
+{
+	u8 index = DropIn.partyIndex(A0)
+	if (index != 0 && dropin.party_updating == 0)
+	{
+		u32 savedScore = player.score
+		u8 savedLives = lives_counter
+		u8 savedGranted = extra_lives_granted
+		player.score = index == 2 ? dropin.score3 : dropin.score4
+		lives_counter = index == 2 ? dropin.lives3 : dropin.lives4
+		extra_lives_granted = 0
+		base.addScore(value)
+		if (index == 2)
+		{
+			dropin.score3 = player.score
+			dropin.lives3 = lives_counter
+		}
+		else
+		{
+			dropin.score4 = player.score
+			dropin.lives4 = lives_counter
+		}
+		player.score = savedScore
+		lives_counter = savedLives
+		extra_lives_granted = savedGranted
+		return
+	}
+	if (A0 == DropIn.P2 && DropIn.ownRings())
+	{
+		u32 backupA0 = A0
+		DropIn.swapScore()
+		base.addScore(value)
+		DropIn.swapScore()
+		A0 = backupA0
+		return
+	}
+	base.addScore(value)
+}

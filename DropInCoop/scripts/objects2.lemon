@@ -1,0 +1,212 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: second object window for the lower (player 2) view.
+//
+// The game only keeps objects alive around its single camera: "DynamicObjectsLoading" spawns the objects of a level
+// in an area around the camera, and each object removes itself once it is outside of "level.despawn_position".
+// For the split screen, the same spawning code runs a second time with player 2's camera (using its own copy of the
+// spawning state), and the object update loop lets each object use whichever camera it is closest to.
+
+global u32 dropin.objtable_start
+
+global bool dropin.om2.valid
+global u32  dropin.om2.addr_begin
+global u32  dropin.om2.addr_end
+global u16  dropin.om2.respawn_begin
+global u16  dropin.om2.respawn_end
+global u16  dropin.om2.areastart_x
+global u16  dropin.om2.areastart_y
+global u16  dropin.om2.despawn_x
+global u16  dropin.om2.despawn_y
+
+
+// Remember where the object table of this level starts
+function void LevelObjectTableBuilder.buildObjects()
+{
+	base.LevelObjectTableBuilder.buildObjects()
+	dropin.objtable_start = A0
+}
+
+
+// Sets up the spawning state of the second object window, the same way as it is done at level start
+function void DropIn.initObjectWindow2()
+{
+	u16 cameraX = camera.position.x.u16.player2
+	u16 cameraY = camera.position.y.u16.player2
+	u32 respawnBase = 0xffffeb00
+
+	u16 limit = max(0, s16(cameraX - 0x80)) & 0xff80
+
+	u32 address = dropin.objtable_start
+	u32 respawn = respawnBase
+	while (u16[address] < limit)
+	{
+		address += 6
+		++respawn
+	}
+	dropin.om2.addr_end = address
+	dropin.om2.respawn_end = u16(respawn)
+
+	address = dropin.objtable_start
+	respawn = respawnBase
+	limit -= 0x80
+	if (s16(limit) >= 0)
+	{
+		while (u16[address] < limit)
+		{
+			address += 6
+			++respawn
+		}
+	}
+	dropin.om2.addr_begin = address
+	dropin.om2.respawn_begin = u16(respawn)
+
+	dropin.om2.areastart_x = 0xffff
+	dropin.om2.areastart_y = cameraY & 0xff80
+	dropin.om2.despawn_x = (cameraX - 0x80) & 0xff80
+	dropin.om2.despawn_y = (cameraY - 0x80) & 0xff80
+	dropin.om2.valid = true
+}
+
+
+// Runs the game's object spawning for player 2's camera
+function void DropIn.updateObjectWindow2()
+{
+	if (!dropin.om2.valid)
+		DropIn.initObjectWindow2()
+
+	// Back up the state of the first object window and the camera
+	u16 backupAreaX = dynobjects.areastart.x
+	u16 backupAreaY = dynobjects.areastart.y
+	u32 backupAddrEnd = dynobjects.addr.end
+	u32 backupAddrBegin = dynobjects.addr.begin
+	u16 backupRespawnEnd = dynobjects.respawn.end
+	u16 backupRespawnBegin = dynobjects.respawn.begin
+	u16 backupDespawnX = level.despawn_position.x
+	u16 backupDespawnY = level.despawn_position.y
+	u16 backupCameraX = camera.position.x.u16
+	u16 backupCameraY = camera.position.y.u16
+	u32 backupA0 = A0
+	u32 backupA1 = A1
+	u32 backupA3 = A3
+	u32 backupA4 = A4
+	u32 backupA6 = A6
+
+	// Load the state of the second window and run the spawning code
+	dynobjects.areastart.x = dropin.om2.areastart_x
+	dynobjects.areastart.y = dropin.om2.areastart_y
+	dynobjects.addr.end = dropin.om2.addr_end
+	dynobjects.addr.begin = dropin.om2.addr_begin
+	dynobjects.respawn.end = dropin.om2.respawn_end
+	dynobjects.respawn.begin = dropin.om2.respawn_begin
+	camera.position.x.u16 = camera.position.x.u16.player2
+	camera.position.y.u16 = camera.position.y.u16.player2
+
+	DynamicObjectsLoading.UpdateDefault()
+
+	dropin.om2.areastart_x = dynobjects.areastart.x
+	dropin.om2.areastart_y = dynobjects.areastart.y
+	dropin.om2.addr_end = dynobjects.addr.end
+	dropin.om2.addr_begin = dynobjects.addr.begin
+	dropin.om2.respawn_end = dynobjects.respawn.end
+	dropin.om2.respawn_begin = dynobjects.respawn.begin
+	dropin.om2.despawn_x = level.despawn_position.x
+	dropin.om2.despawn_y = level.despawn_position.y
+
+	// Restore the first window
+	dynobjects.areastart.x = backupAreaX
+	dynobjects.areastart.y = backupAreaY
+	dynobjects.addr.end = backupAddrEnd
+	dynobjects.addr.begin = backupAddrBegin
+	dynobjects.respawn.end = backupRespawnEnd
+	dynobjects.respawn.begin = backupRespawnBegin
+	level.despawn_position.x = backupDespawnX
+	level.despawn_position.y = backupDespawnY
+	camera.position.x.u16 = backupCameraX
+	camera.position.y.u16 = backupCameraY
+	A0 = backupA0
+	A1 = backupA1
+	A3 = backupA3
+	A4 = backupA4
+	A6 = backupA6
+}
+
+
+//# address-hook(0x01b690)
+function void DynamicObjectsLoading()
+{
+	base.DynamicObjectsLoading()
+
+	// Only for levels that use the default dynamic object loading ("dynobjects.routine" is 4 then)
+	if (dropin.split_active && dynobjects.routine == 4)
+		DropIn.updateObjectWindow2()
+}
+
+
+// Object update loop (copy of the original), where objects near player 2 use player 2's camera
+function void updateGameObjectLoop()
+{
+	if (!dropin.split_active || dynobjects.routine != 4 || !dropin.om2.valid)
+	{
+		base.updateGameObjectLoop()
+		return
+	}
+
+	u16 despawnX = level.despawn_position.x
+	u16 despawnY = level.despawn_position.y
+	u16 cameraX = camera.position.x.u16
+	u16 cameraY = camera.position.y.u16
+
+	while (D7.s16 >= 0)
+	{
+		D1 = 0
+
+		D0 = u32[A0]
+		if (D0 != 0)
+		{
+			assert(isValidUpdateAddress(D0), "Invalid update routine address")
+
+			// Decide which camera this object belongs to
+			bool useCamera2 = false
+			if (A0 == DropIn.P2)
+			{
+				useCamera2 = true
+			}
+			else if (A0 != DropIn.P1)
+			{
+				u16 objectX = objA0.position.x.u16 & 0xff80
+				useCamera2 = (u16(objectX - despawnX) > 0x280 && u16(objectX - dropin.om2.despawn_x) <= 0x280)
+			}
+
+			// Player 2 also uses its own level bottom border (that is where characters die when falling down)
+			bool isPlayer2 = (A0 == DropIn.P2)
+			u16 bottom = move_area.bottom.current
+
+			if (useCamera2)
+			{
+				level.despawn_position.x = dropin.om2.despawn_x
+				level.despawn_position.y = dropin.om2.despawn_y
+				camera.position.x.u16 = camera.position.x.u16.player2
+				camera.position.y.u16 = camera.position.y.u16.player2
+				if (isPlayer2)
+					move_area.bottom.current = dropin.bottom2
+			}
+
+			A1 = D0
+			call A1
+
+			if (useCamera2)
+			{
+				level.despawn_position.x = despawnX
+				level.despawn_position.y = despawnY
+				camera.position.x.u16 = cameraX
+				camera.position.y.u16 = cameraY
+				if (isPlayer2)
+					move_area.bottom.current = bottom
+			}
+		}
+
+		A0 += 0x4a
+		--D7.s16
+	}
+}

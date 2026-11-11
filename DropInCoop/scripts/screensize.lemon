@@ -1,0 +1,126 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: game code that cannot work with a screen taller than 255 lines.
+//
+// The split screen can make the screen taller (see "DropIn.applyViewSize"). A few places of the game's own scripts count the screen lines
+// with an 8 bit variable ("for (u8 line = 0; line < getScreenHeight(); ++line)"). With 256 or more lines such a loop never ends and
+// writes over the game's memory. The copies below do the same as the game's functions, with a 16 bit counter.
+// They only run while the screen is enlarged; otherwise the game's own functions run unchanged.
+
+
+// Angel Island 1, scrolling while the burnt jungle is on fire (and the step into Act 2)
+//# address-hook(0x05011e)
+function void fn05011e()
+{
+	if (dropin.big_h == 0)
+	{
+		base.fn05011e()
+		return
+	}
+
+	fn23b152()
+	fn23b17a()
+	if (level.display_routine == 0)
+	{
+		D0.u16 = camera.background.y.u16 & 0x7f
+		if (D0.u16 < 0x20 || D0.u16 >= 0x30)
+		{
+			WriteScrollOffsets()
+			return
+		}
+
+		D0.u16 += 0x180
+		camera.background.y.u16 = D0.u16
+		camera.background.y.old = (D0.u16 & level.height.tilemask) - 0x10
+		u8[0xffffeed2] = 0xff
+	}
+
+	A6 = addressof(camera.background.y)
+	A5 = addressof(camera.background.y.old)
+	D1.u16 = 0x200
+	D6 = 0x20
+	LoadTileContentInDirY()
+
+	if (camera.background.y.u16 >= 0x0310)
+	{
+		// This gets called when the fire wall just disappeared
+		push(A3)
+		push(A2)
+		push(A0)
+		push(D7)
+
+		requestLoadingPatterns(0x0c)		// AIZ2 object sprites
+		fn02f77c()
+
+		D7 = pop()
+		A0 = pop()
+		A2 = pop()
+		A3 = pop()
+
+		A1 = 0xfffffc62
+		u32[A1]   = 0x08ee00aa
+		u32[A1+4] = 0x008e004e
+		u32[A1+8] = 0x002e000c
+
+		D0.u16 = 0x6000
+		move_area.right = D0.u16
+		fn23b626()
+		fn04f2f6()
+
+		u16[0xffffeec8] = (D0.u16 + getScreenHeight()) & level.height.tilemask
+		u16[0xffffeeca] = 0x0f
+		gfx.plane_update_routine = 0x0c		// Leave vertical scroll mode again
+		level.scrolling_routine += 4
+		fn050204()
+	}
+	else
+	{
+		fn23b680()
+		A1 = 0xffffe002
+		D0.s16 = -s16(camera.background.x.u16)
+		for (u16 i = 0; i < getScreenHeight(); ++i)
+		{
+			u16[A1] = D0.u16
+			A1 += 4
+		}
+	}
+}
+
+
+// Sky Sanctuary: after the act, the Death Egg gets moved depending on the screen width
+//# address-hook(0x0578f0)
+function void fn0578f0()
+{
+	if (dropin.big_h == 0)
+	{
+		base.fn0578f0()
+		return
+	}
+
+	UpdateBackgroundTiles.General()
+	WriteScrollOffsets()
+
+	if (level.results_done && camera.position.y.u16 <= 0x500)
+	{
+		D0.s16 = -s16(camera.foreground.x.u16) + max(0, s16(getScreenExtend() - 40) + 8)
+		for (u16 line = 0; line < getScreenHeight(); ++line)
+		{
+			u16[0xffffe000 + line * 4] = D0
+		}
+
+		// Also make sure to remove garbage values for plane A
+		VDP.Util.clearPatternRectInVRAM(0xc000, 0xd000, 0x80, 0x48, 0x5c)
+	}
+}
+
+
+// Angel Island: copies a table of scroll offsets for D1+1 lines. The code around it was made for a screen of exactly 224 lines (it works out
+// "0xde - lines above the water"), so with a taller screen D1 can become negative, and the 16 bit counter then runs about 65000 times over
+// the game's memory. Nobody needs those lines: the views only show what is within the first 224 lines.
+//# address-hook(0x239e74)
+function void fn239e74()
+{
+	if (dropin.big_h != 0 && D1.s16 < 0)
+		return
+	base.fn239e74()
+}

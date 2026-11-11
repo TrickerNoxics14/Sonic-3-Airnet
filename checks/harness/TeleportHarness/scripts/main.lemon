@@ -1,0 +1,36 @@
+//# script-feature-level(2)
+
+// Vanilla check (stage V of checks/run_checks.ps1): no co-op mod is loaded. Sonic is moved to the end of the act and runs right,
+// the same as the boss check. If the game itself crashes here, the crash does not come from the co-op mod.
+// Not part of the release: this mod is only active while the check run is going on.
+
+global u32 checks.frame
+global bool checks.done
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = __ZONE_ACT__
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function void UpdateGameObjects()
+{
+	if (global.game_mode == 0x0c && !checks.done)
+	{
+		++checks.frame
+
+		// Frame 150: Sonic goes to the last part of the act (500 pixels before the end of the level), and runs right from there
+		if (checks.frame == 150)
+			u16[0xffffb000 + 0x10] = u16(u32(u16[0xffff8000]) * 0x80 - 0x500)
+		if (checks.frame >= 150 && checks.frame < 1500)
+			control.pad1.state |= CONTROL_RIGHT
+
+		if (checks.frame == 1500)
+		{
+			checks.done = true
+			Checks.report("run complete", 1, "")
+		}
+	}
+	base.UpdateGameObjects()
+}

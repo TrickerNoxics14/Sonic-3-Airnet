@@ -1,0 +1,39 @@
+﻿Sonic 3 A.I.R. Drop-In Co-op automated checks - 2026-11-09 11:49
+
+PASS  A1   Engine is built from the current C++ source  -- build log ok: True, exe newer than newest source file: True (run with -Build if not)
+PASS  A2   Release package exists and can be opened  -- 823 files
+PASS  A3   Packaged engine is the same file as the build
+PASS  A4   Packaged game scripts are the current scripts  -- 485 files, 0 differ, 485 packaged
+PASS  A5   Packaged co-op mod is the current DropInCoop  -- 15 files, 0 differ
+PASS  A6   No saves, script caches or save states in the package
+PASS  A7   No game ROM in the package
+PASS  A8   Packaged config starts the normal way (no test start)
+PASS  A9   Readme explains the join code and the log file
+PASS  A10  No developer test mods in the package
+PASS  B1   Co-op scripts have balanced brackets
+PASS  B2   Co-op scripts contain no test hooks
+PASS  C1   session code round trip
+PASS  C2   session code accepts lower case without dash
+PASS  C3   join code round trip
+PASS  C4   join code rejects an invalid address
+PASS  C5   join code rejects wrong length
+PASS  C6   join code rejects invalid characters
+PASS  C7   join code notices typing mistakes  -- 0 of 2232 single character typos accepted (limit 0.5 percent)
+PASS  F1   Co-op scripts load in the game without errors
+PASS  F2   Player 2 joins at the start of Angel Island while Sonic has not moved  -- before: camera routine 0, Tails routine 0a; after: joined 1, Tails routine 06, level started 0, Sonic control 00
+PASS  F3   Player 2 has his own view from the start of Angel Island  -- still in intro 1, split 1, split possible 1, Tails routine 06, Tails base state 02, split reason 0
+PASS  F4   Score is kept separately for each player  -- player 1 0 -> 0, player 2 0 -> 50
+PASS  F5   Getting hurt only costs the rings of the player who got hurt  -- player 1 rings 40 (was 40), player 2 rings 0 (was 25); player 2 state after the hit 1a, invulnerability 120, protection 00
+PASS  F6   The off screen indicator for player 2 is hidden while he is playing  -- joined 1, hidden 1
+PASS  F7   A clipped empty tile update emits no malformed queue entry  -- column 1, row 1, explicit zero 1
+PASS  F8   Both players can request rescue with hold, cancel and cooldown  -- wait 1 reset 1 P1 1 P2 1
+PASS  F9   Rescue rejects airborne, attached and scripted destinations  -- air 1 platform 1 cutscene 1 boss 1
+PASS  F10  Player 2 saves a shared checkpoint using their camera and layer  -- P2 state 1 main camera restored 1
+PASS  F11  Both players independently respawn at the shared checkpoint  -- P1 1 P2 1 zone guard 1
+PASS  F12  Boss entry regroups an off-screen partner once  -- regroup 1 repeated teleport prevented 1
+PASS  F13  Tails carry requires consent and has an explicit release  -- consent 1 carry 1 release 1
+PASS  T1   Player 1 is Sonic  -- Player 1 is a live Sonic character
+PASS  T2   Player 2 is Tails  -- Player 2 is a joined Tails in normal control
+FAIL  T3   A third playable Knuckles exists alongside Sonic and Tails  -- Playable Knuckles objects alongside Sonic and Tails: 0
+
+Result: 34 of 35 passed. NOT READY, see the FAIL lines.

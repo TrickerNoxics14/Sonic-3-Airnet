@@ -1,0 +1,115 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: player 2 can get hurt, lose the (shared) rings and die, like player 1.
+//
+// In the original game, a second player Tails can never lose rings or die from being hit; he is only knocked back
+// ("canLoseShield" is false for him in "Character.GettingHurt"). That is fine for a CPU Tails, but not for a second player.
+// While a second player has joined, this uses the same rules as for player 1:
+//  - Rings: the rings are shared in the original game, so they are spilled from the shared counter
+//    (the Co-op Deluxe mod has separate rings per player and takes care of this itself)
+//  - Shields: lost first, as usual
+//  - No rings and no shield: player 2 dies (and flies back in after a moment; no life is lost)
+
+function bool DropIn.player2CanBeHurt()
+{
+	if (option.dropin.p2_hurt == 0 || !dropin.joined || competition_mode.active != 0)
+		return false
+	if (DropIn.hasSeparateRings())
+		return false
+	return true
+}
+
+
+//# address-hook(0x010294)
+function void Character.GettingHurt()
+{
+	if (DropIn.handlePartyHurt())
+		return
+	if (dropin.joined && option.dropin.team_features && (char.bonus_effect & char.bonus.ANY_SHIELD) == 0 && (char.protection_flag & 0x80) == 0)
+	{
+		if (A0 == DropIn.P1 && ring_counter == 0 && dropin.team_insurance_charges > 0)
+		{
+			ring_counter = 10
+			DropIn.spendTeamInsurance()
+		}
+		else if (A0 == DropIn.P2 && ring_counter.player2 == 0 && dropin.team_insurance_charges > 0 && DropIn.player2CanBeHurt())
+		{
+			ring_counter.player2 = 10
+			DropIn.spendTeamInsurance()
+		}
+	}
+	if (A0 == DropIn.P2 && DropIn.player2CanBeHurt())
+	{
+		DropIn.hurtPlayer2()
+		return
+	}
+	base.Character.GettingHurt()
+}
+
+
+// Same as "Character.GettingHurt" in the original game, for player 2 with shared rings
+function void DropIn.hurtPlayer2()
+{
+	++dropin.dbg_hurt
+	bool isProtectedByObject = ((char.protection_flag & 0x80) != 0)
+	bool spilledRings = false
+
+	if ((char.bonus_effect & char.bonus.ANY_SHIELD) == 0)
+	{
+		if (!isProtectedByObject)
+		{
+			// No more rings?
+			if (ring_counter.player2 == 0)
+			{
+				D0 = getSoundIdByObstacleAddress(u32[A2])
+				Character.Die_internal()
+				return
+			}
+
+			// Create ring spill object, owned by player 2 so that it spills player 2's rings (see "coop2.lemon")
+			if (allocDynamicObjectStd())
+			{
+				objA1.update_address = 0x01a64a
+				objA1.position.x.u16 = char.position.x.u16
+				objA1.position.y.u16 = char.position.y.u16
+				u16[A1 + 0x3e] = A0.u16
+				++dropin.dbg_spawn
+			}
+			spilledRings = true
+
+			char.bonus_effect &= ~char.bonus.ALL_SHIELDS
+		}
+	}
+	else
+	{
+		if (!isProtectedByObject)
+			char.bonus_effect &= ~char.bonus.ALL_SHIELDS
+	}
+
+	char.base_state = base_state.HURT
+	Character.LandingOnGroundNoSpindash()
+	char.flags |= char.flag.IN_AIR
+	if (char.flags & char.flag.UNDERWATER)
+	{
+		char.velocity.x = -0x100
+		char.velocity.y = -0x200
+	}
+	else
+	{
+		char.velocity.x = -0x200
+		char.velocity.y = -0x400
+	}
+	if (char.position.x.u16 >= u16[A2 + 0x10])
+	{
+		char.velocity.x = -char.velocity.x
+	}
+
+	char.groundspeed = 0
+	char.state = char.state.GOT_HURT
+	char.invuln.countdown = 120
+
+	if (!spilledRings)
+		playSound(getSoundIdByObstacleAddress(u32[A2]))
+	D0 = 0xffffffff
+}
+

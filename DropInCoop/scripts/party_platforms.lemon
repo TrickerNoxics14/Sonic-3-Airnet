@@ -1,0 +1,103 @@
+//# script-feature-level(2)
+
+// Original platform helpers encode two contacts in an object's status byte.
+// Reuse the P2 contact bits for one extra character at a time and restore them;
+// each extra character keeps its own standing-object pointer and movement flags.
+function void DropIn.partyPlatforms(u8 mode, u32 width, u32 height, u32 offset, u32 oldX, u32 slopes)
+{
+	if (DropIn.partyCount() <= 2)
+		return
+	pushAll()
+	u32 platform = A0
+	for (u8 index = 2; index < 4; ++index)
+	{
+		u32 player = DropIn.partyPlayer(index)
+		if (player == 0 || u8[player + 5] >= base_state.DIED)
+			continue
+		A0 = platform
+		u8 originalContacts = objA0.flags2a & 0x50
+		objA0.flags2a &= ~0x50
+		if ((u8[player + 0x2a] & char.flag.ON_OBJECT) && u16[player + 0x42] == A0.u16)
+			objA0.flags2a |= object.flag.P2_ON_OBJECT
+		A1 = player
+		A2 = slopes
+		D1 = width
+		D2 = height
+		D3 = offset
+		D4 = oldX
+		D6 = 4
+		if (mode == 0)
+			fn01dc74()
+		else if (mode == 1)
+			fn01dccc()
+		else if (mode == 2)
+			fn01dd24()
+		else if (mode == 3)
+			fn01dddc()
+		else
+			fn01de36()
+		A0 = platform
+		objA0.flags2a = (objA0.flags2a & ~0x50) | originalContacts
+	}
+	popAll()
+}
+
+//# address-hook(0x01dc56)
+function void fn01dc56()
+{
+	u32 width = D1
+	u32 height = D2
+	u32 offset = D3
+	u32 oldX = D4
+	u32 slopes = A2
+	base.fn01dc56()
+	DropIn.partyPlatforms(0, width, height, offset, oldX, slopes)
+}
+
+//# address-hook(0x01dcb6)
+function void CheckCharacterOnClimbableObject()
+{
+	u32 width = D1
+	u32 height = D2
+	u32 offset = D3
+	u32 oldX = D4
+	u32 slopes = A2
+	base.CheckCharacterOnClimbableObject()
+	DropIn.partyPlatforms(1, width, height, offset, oldX, slopes)
+}
+
+//# address-hook(0x01dd0e)
+function void fn01dd0e()
+{
+	u32 width = D1
+	u32 height = D2
+	u32 offset = D3
+	u32 oldX = D4
+	u32 slopes = A2
+	base.fn01dd0e()
+	DropIn.partyPlatforms(2, width, height, offset, oldX, slopes)
+}
+
+//# address-hook(0x01ddc6)
+function void fn01ddc6()
+{
+	u32 width = D1
+	u32 height = D2
+	u32 offset = D3
+	u32 oldX = D4
+	u32 slopes = A2
+	base.fn01ddc6()
+	DropIn.partyPlatforms(3, width, height, offset, oldX, slopes)
+}
+
+//# address-hook(0x01de20)
+function void fn01de20()
+{
+	u32 width = D1
+	u32 height = D2
+	u32 offset = D3
+	u32 oldX = D4
+	u32 slopes = A2
+	base.fn01de20()
+	DropIn.partyPlatforms(4, width, height, offset, oldX, slopes)
+}

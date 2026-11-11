@@ -1,0 +1,11 @@
+{
+	"Metadata":
+	{
+		"Name": "ChecksHarness",
+		"UniqueID": "s3air-drop-in-checks-harness",
+		"Author": "checks",
+		"Description": "Automated checks for Drop-In Co-op. Only active while checks/run_checks.ps1 runs. Not part of the release.",
+		"ModVersion": "1.0.0",
+		"GameVersion": "20.07.24.0"
+	}
+}

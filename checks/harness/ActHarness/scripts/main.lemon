@@ -1,0 +1,373 @@
+//# script-feature-level(2)
+constant bool QUAD_ACT_TEST = false
+constant bool ZIPLINE_TEST = false
+
+// Split screen check for one act, run by checks/run_checks.ps1 (stage G). The runner replaces __ZONE_ACT__, __EXPECT_SPLIT__ and __END_FRAME__.
+// Not part of the release: this mod is only active while the check run is going on.
+
+global u32 checks.frame
+global u32 checks.splitFrames
+global bool checks.done
+global u8 checks.jumpHold
+global u16 checks.lastX
+global u16 checks.stalled
+global u8 checks.spinFrame
+global bool checks.captured
+global bool checks.quadSeen
+global u16 checks.quadValidFrames
+global u8 checks.originalBoss
+global u8 checks.contractTick
+global bool checks.contractDone
+global bool checks.ziplineSetup
+global u16 checks.ziplineFrames
+global bool checks.ziplineSpawnTraced
+global u16 checks.ziplineSpawnD3
+global u16 checks.ziplineSpawnD4
+global u16 checks.ziplineSpawnY
+global u16 checks.ziplineSpawnRespawn
+global bool checks.ziplineSpawnWrap
+global bool checks.ziplineSpawnForceY
+global u8 checks.ziplineSpawnBefore
+global u8 checks.ziplineSpawnAfter
+global bool checks.ziplineSpawnResult
+global bool checks.ziplineCullTraced
+global bool checks.ziplineCullReported
+global u16 checks.ziplineCullDistance
+global u16 checks.ziplineCullDespawnX
+global u16 checks.ziplineCullX
+global u16 checks.ziplineCullY
+global u32 checks.ziplineCullUpdateAfter
+global u8 checks.ziplineCullRespawnAfter
+
+function void fn021f38()
+{
+	u16 distance = (objA0.position.x.u16 & 0xff80) - level.despawn_position.x
+	bool trace = ZIPLINE_TEST && !checks.ziplineCullReported && checks.ziplineSpawnRespawn != 0 && objA0.respawn_entry == checks.ziplineSpawnRespawn && distance > 0x280
+	if (trace)
+	{
+		checks.ziplineCullTraced = true
+		checks.ziplineCullReported = true
+		checks.ziplineCullDistance = distance
+		checks.ziplineCullDespawnX = level.despawn_position.x
+		checks.ziplineCullX = objA0.position.x.u16
+		checks.ziplineCullY = objA0.position.y.u16
+	}
+	base.fn021f38()
+	if (trace)
+	{
+		checks.ziplineCullUpdateAfter = u32[A0]
+		checks.ziplineCullRespawnAfter = u8[0xffff0000 + checks.ziplineSpawnRespawn]
+	}
+}
+
+function bool conditionalSpawnDynamicObject(bool considerLevelWrap, bool forceYPositionCheck)
+{
+	bool trace = ZIPLINE_TEST && !checks.ziplineSpawnTraced && camera.position.x.u16 == camera.position.x.u16.player2 && u16[A0] == 0x2200 && (u16[A0 + 2] & 0x1fff) == 0x01e0 && u8[A0 + 4] == 0x06 && u8[A0 + 5] == 0x3b
+	u16 respawn = A3.u16
+	if (trace)
+	{
+		checks.ziplineSpawnTraced = true
+		checks.ziplineSpawnD3 = D3.u16
+		checks.ziplineSpawnD4 = D4.u16
+		checks.ziplineSpawnY = u16[A0 + 2] & 0x0fff
+		checks.ziplineSpawnRespawn = respawn
+		checks.ziplineSpawnBefore = u8[A3]
+		checks.ziplineSpawnWrap = considerLevelWrap
+		checks.ziplineSpawnForceY = forceYPositionCheck
+	}
+	bool result = base.conditionalSpawnDynamicObject(considerLevelWrap, forceYPositionCheck)
+	if (trace)
+	{
+		checks.ziplineSpawnResult = result
+		checks.ziplineSpawnAfter = u8[0xffff0000 + respawn]
+	}
+	return result
+}
+
+function u16 DropIn.partyInput(u8 index)
+{
+	if (QUAD_ACT_TEST && index >= 2 && index <= 3)
+	{
+		if (DropIn.partyPlayer(index) == 0)
+		{
+			if (global.zone_act == 0x0000 && camera.update_routine < 0x04)
+				return 0
+			return checks.frame >= 150 && checks.frame < __END_FRAME__ ? CONTROL_START : 0
+		}
+		return CONTROL_RIGHT | (checks.frame % 70 == 0 ? CONTROL_ABC : 0)
+	}
+	return 0
+}
+
+function void SetupCharacterAtStartPosition()
+{
+	base.SetupCharacterAtStartPosition()
+	if (__TELEPORT_ON__ == 1)
+	{
+		u16[DropIn.P1 + 0x10] = __TELEPORT_X__
+		u16[DropIn.P1 + 0x14] = __TELEPORT_Y__
+		camera.position.x.u16 = max(s32(__TELEPORT_X__) - getScreenWidth() / 2, 0)
+		camera.position.y.u16 = max(s32(__TELEPORT_Y__) - 96, 0)
+		camera.position.x.u16.player2 = camera.position.x.u16
+		camera.position.y.u16.player2 = camera.position.y.u16
+	}
+}
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = __ZONE_ACT__
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function void UpdateGameObjects()
+{
+	// Run the camera contract at a confirmed roaming frame. Hold world physics
+	// fixed while camera/render updates continue, so a new cutscene cannot
+	// legitimately disable split screen partway through this camera-only check.
+	if (checks.contractTick != 0)
+	{
+		++checks.contractTick
+		if (checks.contractTick == 2)
+		{
+			checks.originalBoss = level.boss_encounter
+			level.boss_encounter = 1
+		}
+		if (checks.contractTick == 11)
+			Checks.report("boss screen contract", (!dropin.split_active && dropin.joined), "Fixed roaming scene: encounter input enters shared screen")
+		if (checks.contractTick == 12)
+			level.boss_encounter = checks.originalBoss
+		if (checks.contractTick == 81)
+		{
+			Checks.report("resume screen contract", (checks.originalBoss == 0 && dropin.split_active && dropin.joined), "Fixed roaming scene: clearing encounter input resumes split")
+			checks.contractTick = 0
+			checks.contractDone = true
+		}
+		return
+	}
+	if (global.game_mode == 0x0c && !checks.done)
+	{
+		++checks.frame
+		// The game applies the mod settings only when a game is started from the menu, and the checks start the level directly
+		if (checks.frame == 1)
+		{
+			option.dropin.split = 1
+			option.dropin.players = QUAD_ACT_TEST ? 4 : 2
+			option.dropin.four_view_split = QUAD_ACT_TEST ? 1 : 0
+			option.dropin.split_mode = 0
+			option.dropin.view_size = 1
+			option.dropin.p2_hurt = 1
+			option.dropin.require_join = 1
+			option.dropin.idle_seconds = 0
+			option.dropin.debug_autojoin = 0
+			option.dropin.hints = 1
+			option.dropin.leave_hold = 60
+		}
+
+		// Sonic runs to the right from frame 150, so the level scrolls and the screen can split
+		if (checks.frame >= 150 && checks.frame < __END_FRAME__ + 81 && (!ZIPLINE_TEST || u16[DropIn.P1 + 0x10] < 0x1d00))
+			control.pad1.state |= CONTROL_RIGHT
+
+		// Keep navigating after the opening: jump from the ground to clear enemies and steps.
+		u32 jumpStep = checks.frame / 40
+		if (checks.frame >= 150 && checks.frame < __END_FRAME__ + 81 && (!ZIPLINE_TEST || u16[DropIn.P1 + 0x10] < 0x1d00) && jumpStep * 40 == checks.frame && (player1.control_override != 0 || (u8[DropIn.P1 + 0x2a] & char.flag.IN_AIR) == 0))
+		{
+			control.pad1.pressed |= CONTROL_ABC
+			control.pad1.state |= CONTROL_ABC
+			checks.jumpHold = 12
+		}
+		if ((!ZIPLINE_TEST || u16[DropIn.P1 + 0x10] < 0x1d00) && checks.jumpHold > 0)
+		{
+			control.pad1.state |= CONTROL_ABC
+			--checks.jumpHold
+		}
+
+		// Ice barriers and breakable walls require a rolling attack, not repeated walking.
+		if ((!ZIPLINE_TEST || u16[DropIn.P1 + 0x10] < 0x1d00) && checks.frame >= 150)
+		{
+			u16 x = u16[DropIn.P1 + 0x10]
+			checks.stalled = (x == checks.lastX) ? (checks.stalled + 1) : 0
+			checks.lastX = x
+			if (checks.stalled >= 35 && checks.spinFrame == 0 && player1.control_override == 0)
+				checks.spinFrame = 1
+			if (checks.spinFrame != 0)
+			{
+				control.pad1.state = CONTROL_DOWN
+				control.pad1.pressed = 0
+				if (checks.spinFrame == 6 || checks.spinFrame == 10 || checks.spinFrame == 14)
+				{
+					control.pad1.state |= CONTROL_ABC
+					control.pad1.pressed |= CONTROL_ABC
+				}
+				++checks.spinFrame
+				if (checks.spinFrame > 20)
+				{
+					control.pad1.state = CONTROL_RIGHT
+					checks.spinFrame = 0
+					checks.stalled = 0
+				}
+			}
+		}
+
+		// Player 2 presses Start every half second until he has joined (the join needs Tails under the normal AI)
+		u32 pressStep = checks.frame / 30
+		if (!dropin.joined && checks.frame >= 150 && checks.frame < 450 && pressStep * 30 == checks.frame)
+			control.pad2.pressed |= CONTROL_START
+
+		if (dropin.split_active)
+			++checks.splitFrames
+		if (QUAD_ACT_TEST && dropin.split_active && dropin.camera3.valid && dropin.camera4.valid && DropIn.allPartyPlayersActive())
+		{
+			checks.quadValidFrames = min(checks.quadValidFrames + 1, 60)
+			if (checks.quadValidFrames >= 60)
+				checks.quadSeen = true
+		}
+		else
+			checks.quadValidFrames = 0
+		if (!checks.captured && ((QUAD_ACT_TEST && checks.quadSeen) || (!QUAD_ACT_TEST && checks.splitFrames >= 30)))
+		{
+			checks.captured = true
+			Checks.report("render capture", Checks.capture("roaming"), "Engine framebuffer, previous completed render")
+		}
+
+		if (__EXPECT_SPLIT__ == 1 && !checks.contractDone && checks.splitFrames >= 60 && dropin.split_active && !DropIn.splitPaused())
+			checks.contractTick = 1
+
+		// Diagnostics every half second (in the log only, not part of the verdict)
+		if (checks.frame >= 150 && checks.frame < __END_FRAME__ && pressStep * 30 == checks.frame)
+		{
+			Checks.report("diag level", 1, stringformat("f%d scroll %02x cam %02x tails %02x joined %d split %d", checks.frame, level.scrolling_routine, camera.update_routine, tails.ai_routine, dropin.joined, dropin.split_active))
+			Checks.report("diag stall", 1, stringformat("f%d flyin timer %d tails %02x joined %d", checks.frame, dropin.flyin_timer, tails.ai_routine, dropin.joined))
+			Checks.report("diag players", 1, stringformat("f%d reason %d p1 %02x p2 %02x ctrl1 %d ctrl2 %d", checks.frame, dropin.dbg_reason, u8[DropIn.P1 + 0x05], u8[DropIn.P2 + 0x05], player1.control_override, player2.control_override))
+			Checks.report("diag position", 1, stringformat("f%d p1 x%04x y%04x vy%d floor%04x boss%d", checks.frame, u16[DropIn.P1 + 0x10], u16[DropIn.P1 + 0x14], s16[DropIn.P1 + 0x1a], move_area.bottom.current, level.boss_encounter))
+		}
+
+		if (!ZIPLINE_TEST && checks.frame == __END_FRAME__)
+		{
+			bool p1Alive = (u8[DropIn.P1 + 0x05] < base_state.DIED)
+			bool p2Alive = (u8[DropIn.P2 + 0x05] < base_state.DIED)
+			u32 p3 = DropIn.partyPlayer(2)
+			u32 p4 = DropIn.partyPlayer(3)
+			bool p3Alive = !QUAD_ACT_TEST || (p3 != 0 && u8[p3 + 0x05] < base_state.DIED)
+			bool p4Alive = !QUAD_ACT_TEST || (p4 != 0 && u8[p4 + 0x05] < base_state.DIED)
+			// The runner sets __EXPECT_SPLIT__: 1 for a level (split screen while roaming), 0 for a boss arena (one shared screen)
+			bool screenOk = checks.splitFrames == 0
+			bool partyAliveOk = p3Alive && p4Alive
+			bool originalPlayersAliveOk = p1Alive && p2Alive
+			if (QUAD_ACT_TEST)
+			{
+				bool quadScene = (__EXPECT_SPLIT__ == 1 && DropIn.fourViewSceneSupported())
+				screenOk = quadScene ? checks.quadSeen : (!dropin.split_active && DropIn.partyCount() == 4)
+				partyAliveOk = quadScene ? checks.quadSeen : DropIn.partyCount() == 4
+				originalPlayersAliveOk = quadScene ? checks.quadSeen : (p1Alive && p2Alive)
+			}
+			else if (__EXPECT_SPLIT__ == 1)
+				screenOk = checks.splitFrames > 60
+			string detail = QUAD_ACT_TEST ? stringformat("quad %d req %d players %d frames %d seen %d alive34 %d", DropIn.fourViewSceneSupported(), DropIn.fourViewRequested(), DropIn.partyCount(), checks.splitFrames, checks.quadSeen, p3Alive && p4Alive) : stringformat("expect split %d, joined %d, split frames %d, P1 alive %d, P2 alive %d, Tails routine %02x", __EXPECT_SPLIT__, dropin.joined, checks.splitFrames, p1Alive, p2Alive, tails.ai_routine)
+			if (QUAD_ACT_TEST)
+			{
+				Checks.report("quad support reasons", 1, stringformat("zone %d scroll %d boss %d water %d", DropIn.isZoneSupported(), DropIn.isScrollingSupported(), DropIn.bossViewActive(), level.water_present))
+				Checks.report("quad renderer state", 1, stringformat("engine %d camera3 %d camera4 %d", DropIn.fourViewEngineAvailable(), dropin.camera3.valid, dropin.camera4.valid))
+				Checks.report("quad player states", 1, stringformat("p3 %02x p4 %02x", p3 != 0 ? u8[p3 + 5] : 0xff, p4 != 0 ? u8[p4 + 5] : 0xff))
+			}
+			Checks.report("split screen", (dropin.joined && screenOk && originalPlayersAliveOk && partyAliveOk), detail)
+			checks.done = true
+			Checks.report("run complete", 1, "")
+		}
+	}
+	base.UpdateGameObjects()
+	if (ZIPLINE_TEST && checks.ziplineSpawnTraced)
+	{
+		Checks.report("zipline spawn bounds", 1, stringformat("record y%04x bounds %04x-%04x force%d wrap%d", checks.ziplineSpawnY, checks.ziplineSpawnD3, checks.ziplineSpawnD4, checks.ziplineSpawnForceY, checks.ziplineSpawnWrap))
+		Checks.report("zipline spawn decision", 1, stringformat("respawn%04x before%02x after%02x success%d", checks.ziplineSpawnRespawn, checks.ziplineSpawnBefore, checks.ziplineSpawnAfter, checks.ziplineSpawnResult))
+		checks.ziplineSpawnTraced = false
+	}
+	if (ZIPLINE_TEST && checks.ziplineCullTraced)
+	{
+		Checks.report("zipline cleanup trace", 1, stringformat("x%04x y%04x distance%04x despawn%04x", checks.ziplineCullX, checks.ziplineCullY, checks.ziplineCullDistance, checks.ziplineCullDespawnX))
+		Checks.report("zipline cleanup result", 1, stringformat("update%08x respawn%02x", checks.ziplineCullUpdateAfter, checks.ziplineCullRespawnAfter))
+		checks.ziplineCullTraced = false
+	}
+	if (ZIPLINE_TEST && global.game_mode == 0x0c && checks.frame >= 260 && u16[DropIn.P1 + 0x10] >= 0x1d00 && !checks.done)
+	{
+		// Isolate the exact authored rope entry while preserving split state.
+		// P1 remains in the lower route; P2 and its camera are held in the
+		// upper rope's authored scene so the real second-window loader runs.
+		if (!checks.ziplineSetup)
+		{
+			checks.ziplineSetup = true
+			u16[DropIn.P2 + 0x10] = 0x2200
+			u16[DropIn.P2 + 0x14] = 0x0220
+			s16[DropIn.P2 + 0x18] = 0
+			s16[DropIn.P2 + 0x1a] = 0
+			camera.position.x.u16.player2 = 0x2138
+			camera.position.y.u16.player2 = 0x01f0
+			DropIn.resetView2()
+		}
+		if (checks.ziplineSetup)
+			++checks.ziplineFrames
+		if (checks.ziplineFrames >= 60)
+		{
+			u16 segments = 0
+			u16 visibleOnlyInP2 = 0
+			u16 targetObjects = 0
+			u32 targetUpdate = 0
+			u32 targetRecord = 0
+			u8 targetRespawn = 0
+			u16 freeObjectSlots = 0
+			for (u32 object = 0xffffb0de; object <= 0xffffb0de + 0x4a * 0x59; object += 0x4a)
+			{
+				if (u32[object] == 0)
+					++freeObjectSlots
+			}
+			for (u32 entry = dropin.objtable_start; entry < 0x812000; entry += 6)
+			{
+				if (u16[entry] == 0x2200 && (u16[entry + 2] & 0x1fff) == 0x01e0 && u8[entry + 4] == 0x06 && u8[entry + 5] == 0x3b)
+				{
+					targetRecord = entry
+					break
+				}
+			}
+			if (targetRecord != 0)
+				targetRespawn = u8[0xffffeb00 + ((targetRecord - dropin.objtable_start) / 6)]
+			u16 sampleX = 0
+			u16 sampleY = 0
+			u8 sampleFlags = 0
+			s16 sampleP1dx = 0
+			s16 sampleP2dx = 0
+			for (u32 object = 0xffffb000; object < 0xffffcc00; object += 0x4a)
+			{
+				u16 objectX = u16[object + 0x10]
+				u16 objectY = u16[object + 0x14]
+				bool ropeSegment = u32[object] == addressof(AIZZipLine.BaseUpdate) && objectY >= 0x0100 && objectY <= 0x0400
+				if (ropeSegment)
+				{
+					++segments
+					++targetObjects
+					targetUpdate = u32[object]
+					s16 p1dx = s16(u16(objectX - camera.position.x.u16))
+					s16 p2dx = s16(u16(objectX - camera.position.x.u16.player2))
+					if (targetObjects == 1)
+					{
+						sampleX = objectX
+						sampleY = objectY
+						sampleFlags = u8[object + 4]
+						sampleP1dx = p1dx
+						sampleP2dx = p2dx
+					}
+					if ((p1dx < -8 || p1dx >= getScreenWidth()) && p2dx >= -8 && p2dx < getScreenWidth() && (u8[object + 4] & render_flag.VISIBLE) != 0)
+						++visibleOnlyInP2
+				}
+			}
+			bool passed = dropin.joined && dropin.split_active && segments > 0 && visibleOnlyInP2 > 0
+			Checks.report("zipline p2-only view", passed, stringformat("joined %d split %d segments %d visible only in P2 %d", dropin.joined, dropin.split_active, segments, visibleOnlyInP2))
+			Checks.report("zipline object sample", 1, stringformat("x%04x y%04x flags%02x p1dx%d p2dx%d cam2%04x", sampleX, sampleY, sampleFlags, sampleP1dx, sampleP2dx, camera.position.x.u16.player2))
+			Checks.report("zipline camera state", 1, stringformat("p1x%04x p2x%04x c1%04x c2%04x c2y%04x p2y%04x", u16[DropIn.P1 + 0x10], u16[DropIn.P2 + 0x10], camera.position.x.u16, camera.position.x.u16.player2, camera.position.y.u16.player2, u16[DropIn.P2 + 0x14]))
+			Checks.report("zipline object window", 1, stringformat("record%06x begin%06x end%06x area%04x/%04x respawn%02x", targetRecord, dropin.om2.addr_begin, dropin.om2.addr_end, dropin.om2.areastart_x, dropin.om2.areastart_y, targetRespawn))
+			Checks.report("zipline allocation", 1, stringformat("objects%d update%08x in%d free%d dX%04x dY%04x", targetObjects, targetUpdate, targetRecord >= dropin.om2.addr_begin && targetRecord < dropin.om2.addr_end, freeObjectSlots, dropin.om2.despawn_x, dropin.om2.despawn_y))
+			Checks.report("zipline framebuffer", Checks.capture("zipline"), "Engine framebuffer at the P2-only zip-line view")
+			checks.done = true
+			Checks.report("run complete", 1, "")
+		}
+	}
+}

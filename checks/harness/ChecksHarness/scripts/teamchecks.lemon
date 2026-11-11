@@ -1,0 +1,333 @@
+//# script-feature-level(2)
+
+function void Checks.teamFixture()
+{
+	for (u32 player = DropIn.P1; player <= DropIn.P2; player += 0x4a)
+	{
+		u8[player + 5] = base_state.NORMAL
+		u8[player + 0x2a] = 0
+		u8[player + 0x2d] = 0
+		u8[player + 0x2e] = 0
+		u16[player + 0x26] = 0
+		s16[player + 0x18] = 0
+		s16[player + 0x1a] = 0
+		u16[player + 0x10] = 0x600
+		u16[player + 0x14] = 0x300
+	}
+	tails.carrying = 0
+	tails.catch_timeout = 0
+	dropin.joined = true
+	player1.control_override = 0
+	player2.control_override = 0
+	global.level_started = 1
+	level.boss_encounter = 0
+	dropin.boss_object = 0
+	dropin.rescue_hold1 = 0
+	dropin.rescue_hold2 = 0
+	dropin.rescue_cooldown = 0
+	dropin.team_boss = false
+	option.dropin.rescue = 1
+	option.dropin.checkpoints = 1
+	option.dropin.regroup = 1
+	option.dropin.team_moves = 1
+}
+
+function void Checks.testTeamMechanics()
+{
+	u8 oldFeatures = option.dropin.team_features
+	bool moveInputs = DropIn.teamMoveInput(CHARACTER_SONIC) == (CONTROL_RIGHT | CONTROL_X) && DropIn.teamMoveInput(CHARACTER_KNUCKLES) == (CONTROL_DOWN | CONTROL_X) && DropIn.teamMoveInput(CHARACTER_TAILS) == (CONTROL_UP | CONTROL_X)
+	bool moveEdges = DropIn.teamMovePressed(CONTROL_RIGHT | CONTROL_X, 0, CONTROL_RIGHT | CONTROL_X) && !DropIn.teamMovePressed(CONTROL_RIGHT | CONTROL_X, CONTROL_RIGHT | CONTROL_X, CONTROL_RIGHT | CONTROL_X)
+	bool moveSpeeds = DropIn.teamMoveSpeedY(CHARACTER_SONIC) == -0x500 && DropIn.teamMoveSpeedY(CHARACTER_KNUCKLES) == -0x900 && DropIn.teamMoveSpeedY(CHARACTER_TAILS) == -0x900 && DropIn.teamMoveSpeedX(CHARACTER_SONIC, true) == -0x600 && DropIn.teamMoveSpeedX(CHARACTER_KNUCKLES, false) == 0x300 && DropIn.teamMoveSpeedX(CHARACTER_TAILS, false) == 0
+	Checks.report("character move controls", moveInputs && moveEdges && moveSpeeds, stringformat("inputs %d edge-trigger %d velocity profiles %d", moveInputs, moveEdges, moveSpeeds))
+
+	bool goodMonitor = true
+	for (u8 itemType = 1; itemType <= 8; ++itemType)
+		if (itemType != 2)
+			goodMonitor = goodMonitor && DropIn.validSharedMonitor(itemType, u16(DropIn.P1), DropIn.P2)
+	bool badMonitors = !DropIn.validSharedMonitor(0, u16(DropIn.P1), DropIn.P2) && !DropIn.validSharedMonitor(2, u16(DropIn.P1), DropIn.P2) && !DropIn.validSharedMonitor(9, u16(DropIn.P1), DropIn.P2)
+	bool recipients = !DropIn.validSharedMonitor(1, u16(DropIn.P1), 0) && !DropIn.validSharedMonitor(1, u16(DropIn.P1), DropIn.P1)
+	Checks.report("shared power-up eligibility", goodMonitor && badMonitors && recipients, stringformat("positive types %d harmful/unsupported excluded %d invalid recipients excluded %d", goodMonitor, badMonitors, recipients))
+
+	Checks.teamFixture()
+	option.dropin.team_features = 1
+	level.boss_encounter = 1
+	u32 boss = 0xffffb094
+	u8 oldBossHits = u8[boss + 0x29]
+	u8[boss + 0x29] = 5
+	dropin.team_boss_mask = 0
+	dropin.team_boss_window = 0
+	u16 oldCombo = dropin.team_combo
+	u8 oldPhases = dropin.team_boss_phases
+	u8 oldCard = dropin.team_card
+	DropIn.checkBossTeamHit(DropIn.P1, boss, 6)
+	bool firstHitWaits = dropin.team_boss_mask == 1 && dropin.team_boss_phases == oldPhases
+	u8[boss + 0x29] = 4
+	DropIn.checkBossTeamHit(DropIn.P1, boss, 5)
+	bool samePlayerDoesNotCountTwice = dropin.team_boss_phases == oldPhases && dropin.team_boss_mask == 1
+	u8[boss + 0x29] = 3
+	DropIn.checkBossTeamHit(DropIn.P2, boss, 4)
+	bool partnerCompletesPhase = dropin.team_boss_phases == oldPhases + 1 && dropin.team_boss_mask == 0 && dropin.team_boss_window == 0 && dropin.team_combo > oldCombo && dropin.team_card == 9
+	Checks.report("coordinated boss hits", firstHitWaits && samePlayerDoesNotCountTwice && partnerCompletesPhase, stringformat("first waits %d duplicate rejected %d partner completes %d", firstHitWaits, samePlayerDoesNotCountTwice, partnerCompletesPhase))
+	dropin.team_combo = oldCombo
+	dropin.team_boss_phases = oldPhases
+	dropin.team_card = oldCard
+	dropin.team_boss_mask = 0
+	dropin.team_boss_window = 0
+	level.boss_encounter = 0
+	u8[boss + 0x29] = oldBossHits
+	option.dropin.team_features = oldFeatures
+}
+
+function void Checks.testSharedMonitorEffect()
+{
+	pushAll()
+	u16 savedRings1 = ring_counter
+	u16 savedRings2 = ring_counter.player2
+	u16 savedTotalRings1 = player.total_rings
+	u16 savedTotalRings2 = unused.player2.total_rings
+	u8 savedLives = lives_counter
+	u8 savedHudRings = hud.dirty.rings
+	u16 savedBrokenMonitors1 = u16[0xfffffecc]
+	u16 savedBrokenMonitors2 = u16[0xfffffece]
+	u8 savedFeatures = option.dropin.team_features
+	u8 savedCard = dropin.team_card
+	u16 savedCardTimer = dropin.team_card_timer
+	bool sourceCreated = allocDynamicObjectStd()
+	u32 sourceEffect = sourceCreated ? A1 : 0
+	u32 sharedEffect = 0
+	bool recipientApplied = false
+	if (sourceCreated)
+	{
+		zeroMemory(sourceEffect, 0x4a)
+		u32[sourceEffect] = addressof(ItemEffect.BaseUpdate)
+		u8[sourceEffect + 0x20] = 3
+		u16[sourceEffect + 0x10] = 0x7a00
+		u16[sourceEffect + 0x14] = 0x7a00
+		u16[sourceEffect + 0x42] = u16(DropIn.P1)
+		option.dropin.team_features = 1
+		A0 = sourceEffect
+		ItemEffect.Init()
+		for (u32 object = 0xffffb000; object < 0xffffcc00; object += 0x4a)
+		{
+			if (object != sourceEffect && u32[object] == addressof(ItemEffect.BaseUpdate) && u8[object + 0x20] == 3 && u16[object + 0x42] == u16(DropIn.P2) && u16[object + 0x10] == u16[sourceEffect + 0x10] && u16[object + 0x14] == u16[sourceEffect + 0x14])
+			{
+				sharedEffect = object
+				break
+			}
+		}
+		if (sharedEffect != 0)
+		{
+			ring_counter = 11
+			ring_counter.player2 = 23
+			player.total_rings = 0
+			unused.player2.total_rings = 0
+			lives_counter = 3
+			s16[sharedEffect + 0x1a] = 0
+			A0 = sharedEffect
+			ItemEffect.UpdateDefaultInternal()
+			recipientApplied = ring_counter == 11 && ring_counter.player2 == 33 && lives_counter == 3
+		}
+		zeroMemory(sourceEffect, 0x4a)
+		if (sharedEffect != 0)
+			zeroMemory(sharedEffect, 0x4a)
+	}
+	Checks.report("shared monitor effect applied", sourceCreated && sharedEffect != 0 && recipientApplied, stringformat("source allocated %d clone found %d rings P1 %d P2 %d", sourceCreated, sharedEffect != 0, ring_counter, ring_counter.player2))
+	ring_counter = savedRings1
+	ring_counter.player2 = savedRings2
+	player.total_rings = savedTotalRings1
+	unused.player2.total_rings = savedTotalRings2
+	lives_counter = savedLives
+	hud.dirty.rings = savedHudRings
+	u16[0xfffffecc] = savedBrokenMonitors1
+	u16[0xfffffece] = savedBrokenMonitors2
+	option.dropin.team_features = savedFeatures
+	dropin.team_card = savedCard
+	dropin.team_card_timer = savedCardTimer
+	popAll()
+}
+
+function void Checks.testPlayerTwoOpensMonitor()
+{
+	Checks.teamFixture()
+	option.dropin.team_features = 1
+	A0 = DropIn.P2
+	char.state = char.state.ROLLING
+	u32 monitor = 0
+	bool allocated = allocDynamicObjectStd()
+	if (allocated)
+	{
+		monitor = A1
+		zeroMemory(monitor, 0x4a)
+		u16[monitor + 0x10] = u16[DropIn.P2 + 0x10]
+		u16[monitor + 0x14] = u16[DropIn.P2 + 0x14]
+		u8[monitor + 0x28] = collision.flag.ITEM | collision.size.16x16
+		u16 playerX = u16[DropIn.P2 + 0x10]
+		u16 playerY = u16[DropIn.P2 + 0x14]
+		A0 = monitor
+		A1 = DropIn.P2
+		D1 = 0x19
+		D2 = 0x10
+		D3 = 0x11
+		D4 = u16[monitor + 0x10]
+		D6 = 4
+		MonitorIntact.CheckBlocking.player2()
+		bool blockingAllowsOpening = u16[DropIn.P2 + 0x10] == playerX && u16[DropIn.P2 + 0x14] == playerY
+		A0 = DropIn.P2
+		A1 = monitor
+		Character.OnCollisionWithDynamicObject()
+		bool openedByPlayer2 = u8[monitor + 5] == 0x04 && u16[monitor + 0x42] == u16(DropIn.P2)
+		bool modeRestored = competition_mode.active == 0
+		Checks.report("player two opens monitor", blockingAllowsOpening && openedByPlayer2 && modeRestored, stringformat("allocated %d blocking allows %d opened %d ownerP2 %d mode restored %d", allocated, blockingAllowsOpening, openedByPlayer2, u16[monitor + 0x42] == u16(DropIn.P2), modeRestored))
+	}
+	else
+		Checks.report("player two opens monitor", false, "monitor fixture allocation failed")
+	if (allocated)
+		zeroMemory(monitor, 0x4a)
+}
+
+// Isolated state/interaction regressions after the intro checks. Save RAM and
+// registers so this fixture cannot alter earlier checks or the player's files.
+function void Checks.testTeamwork()
+{
+	pushAll()
+	for (u32 offset = 0; offset < 0xde; offset += 2)
+		push(u16[DropIn.P1 + offset])
+	for (u32 offset = 0; offset < 0x1e; offset += 2)
+		push(u16[0xfffffe2a + offset])
+	u8 savedStart = global.level_started
+	u8 savedBoss = level.boss_encounter
+	u8 savedControl1 = player1.control_override
+	u8 savedControl2 = player2.control_override
+	u8 savedLives = lives_counter
+	u16 savedRings = ring_counter
+	u16 savedRings2 = ring_counter.player2
+	u16 savedCameraX = camera.position.x.u16
+	u16 savedCameraY = camera.position.y.u16
+	u16 savedDespawnX = level.despawn_position.x
+	u16 savedCheckpointApparent = checkpoint.zone_act.apparent
+	Checks.teamFixture()
+	Checks.testTeamMechanics()
+	Checks.testSharedMonitorEffect()
+	Checks.testPlayerTwoOpensMonitor()
+	u16 chord = CONTROL_DOWN | CONTROL_Y
+	u16 initialX = u16[DropIn.P1 + 0x10]
+	u16[DropIn.P2 + 0x10] = initialX + 300
+	for (u16 frame = 0; frame < 119; ++frame)
+		DropIn.updateTeamworkInputs(chord, 0, 0)
+	bool waits = u16[DropIn.P1 + 0x10] == initialX
+	DropIn.updateTeamworkInputs(0, 0, 0)
+	bool resets = dropin.rescue_hold1 == 0
+	for (u16 frame = 0; frame < 120; ++frame)
+		DropIn.updateTeamworkInputs(chord, 0, 0)
+	bool rescue1 = u16[DropIn.P1 + 0x10] == initialX + 300 && dropin.rescue_cooldown == 300
+	Checks.teamFixture()
+	u16[DropIn.P2 + 0x10] += 300
+	for (u16 frame = 0; frame < 120; ++frame)
+		DropIn.updateTeamworkInputs(0, chord, 0)
+	bool rescue2 = u16[DropIn.P2 + 0x10] == u16[DropIn.P1 + 0x10]
+	Checks.report("partner rescue", waits && resets && rescue1 && rescue2 && ring_counter == savedRings && ring_counter.player2 == savedRings2, stringformat("wait %d reset %d P1 %d P2 %d", waits, resets, rescue1, rescue2))
+
+	Checks.teamFixture()
+	u8[DropIn.P1 + 0x2a] = char.flag.IN_AIR
+	bool rejectsAir = !DropIn.rescuePlayer(DropIn.P2, DropIn.P1)
+	u8[DropIn.P1 + 0x2a] = char.flag.ON_OBJECT
+	bool rejectsPlatform = !DropIn.rescuePlayer(DropIn.P2, DropIn.P1)
+	u8[DropIn.P1 + 0x2a] = 0
+	player1.control_override = 0xff
+	bool rejectsCutscene = !DropIn.rescuePlayer(DropIn.P2, DropIn.P1)
+	player1.control_override = 0
+	level.boss_encounter = 1
+	for (u16 frame = 0; frame < 120; ++frame)
+		DropIn.updateTeamworkInputs(chord, 0, 0)
+	bool rejectsBoss = dropin.rescue_hold1 == 0
+	Checks.report("rescue safety", rejectsAir && rejectsPlatform && rejectsCutscene && rejectsBoss, stringformat("air %d platform %d cutscene %d boss %d", rejectsAir, rejectsPlatform, rejectsCutscene, rejectsBoss))
+
+	Checks.teamFixture()
+	A0 = 0xffffb094
+	for (u32 offset = 0; offset < 0x4a; offset += 2)
+		u16[A0 + offset] = 0
+	objA0.update_address = addressof(Checkpoint.BaseUpdate)
+	objA0.position.x.u16 = 0x600
+	objA0.position.y.u16 = 0x300
+	objA0.subtype2c = 1
+	u16[A0 + 0x48] = 0xe000
+	u8 savedPostFlag = u8[0xffffe000]
+	u8[0xffffe000] = 0
+	checkpoint.number = 0
+	u16[DropIn.P1 + 0x10] = 0x100
+	u16[DropIn.P2 + 0x46] = 0x0c0d
+	camera.position.x.u16 = 0x500
+	camera.position.y.u16 = 0x200
+	level.despawn_position.x = 0x500
+	camera.position.x.u16.player2 = 0x500
+	camera.position.y.u16.player2 = 0x200
+	Checkpoint.BaseUpdate()
+	Checks.report("diag checkpoint", 1, stringformat("A0 %08x post %08x expected %08x state %d number %d valid %d", A0, u32[0xffffb094], addressof(Checkpoint.BaseUpdate), u8[0xffffb094 + 5], checkpoint.number, dropin.team_checkpoint_valid))
+	bool savedP2 = checkpoint.number == 1 && checkpoint.layer_flags == 0x0c0d && checkpoint.camera.x == 0x500 && dropin.team_checkpoint_valid && dropin.team_checkpoint_zone == global.zone_act
+	bool restoredCamera = camera.position.x.u16 == 0x500 && camera.position.y.u16 == 0x200
+	u8[0xffffe000] = savedPostFlag
+	Checks.report("shared checkpoint", savedP2 && restoredCamera, stringformat("P2 state %d main camera restored %d", savedP2, restoredCamera))
+
+	lives_counter = 3
+	A0 = DropIn.P1
+	char.base_state = base_state.DIED
+	char.position.y.u16 = camera.position.y.u16 + 0x101
+	Character.CheckDiedStateEnd()
+	u8 expectedLives = Game.getSetting(SETTING_INFINITE_LIVES) ? 3 : 2
+	bool respawn1 = char.base_state == base_state.NORMAL && char.position.x.u16 == dropin.team_checkpoint_x && lives_counter == expectedLives && ring_counter == 0
+	A0 = DropIn.P2
+	char.base_state = base_state.DIED
+	char.position.y.u16 = camera.position.y.u16 + 0x101
+	Character.CheckDiedStateEnd()
+	bool respawn2 = char.base_state == base_state.NORMAL && char.position.x.u16 == dropin.team_checkpoint_x && ring_counter.player2 == 0
+	++dropin.team_checkpoint_zone
+	bool zoneGuard = !DropIn.canCheckpointRespawn()
+	Checks.report("independent respawn", respawn1 && respawn2 && zoneGuard, stringformat("P1 %d P2 %d zone guard %d", respawn1, respawn2, zoneGuard))
+
+	Checks.teamFixture()
+	camera.position.x.u16 = 0x580
+	camera.position.y.u16 = 0x280
+	u16[DropIn.P2 + 0x10] = 0x100
+	level.boss_encounter = 1
+	DropIn.updateTeamworkInputs(0, 0, 0)
+	bool regrouped = u16[DropIn.P2 + 0x10] == u16[DropIn.P1 + 0x10]
+	u16[DropIn.P2 + 0x10] += 20
+	DropIn.updateTeamworkInputs(0, 0, 0)
+	bool notRepeated = u16[DropIn.P2 + 0x10] == u16[DropIn.P1 + 0x10] + 20
+	Checks.report("boss regroup", regrouped && notRepeated, stringformat("regroup %d repeated teleport prevented %d", regrouped, notRepeated))
+
+	Checks.teamFixture()
+	A0 = DropIn.P2
+	A1 = DropIn.P1
+	A2 = addressof(tails.carrying)
+	u16[DropIn.P1 + 0x14] = u16[DropIn.P2 + 0x14] + 0x28
+	u8[DropIn.P1 + 0x2a] = char.flag.IN_AIR
+	u8[DropIn.P1 + 0x3d] = 0
+	control.pad1.state = 0
+	Tails.CheckCatchSonic()
+	bool consent = !tails.carrying
+	control.pad1.state = CONTROL_UP
+	Tails.CheckCatchSonic()
+	bool carried = tails.carrying != 0
+	DropIn.updateTeamworkInputs(0, 0, CONTROL_X)
+	bool released = tails.carrying == 0 && u8[DropIn.P1 + 0x2e] == 0 && tails.catch_timeout == 60
+	Checks.report("team carry", consent && carried && released, stringformat("consent %d carry %d release %d", consent, carried, released))
+
+	for (u32 offset = 0x1e; offset > 0; offset -= 2)
+		u16[0xfffffe2a + offset - 2] = pop()
+	for (u32 offset = 0xde; offset > 0; offset -= 2)
+		u16[DropIn.P1 + offset - 2] = pop()
+	global.level_started = savedStart
+	level.boss_encounter = savedBoss
+	player1.control_override = savedControl1
+	player2.control_override = savedControl2
+	lives_counter = savedLives
+	ring_counter = savedRings
+	ring_counter.player2 = savedRings2
+	camera.position.x.u16 = savedCameraX
+	camera.position.y.u16 = savedCameraY
+	level.despawn_position.x = savedDespawnX
+	checkpoint.zone_act.apparent = savedCheckpointApparent
+	dropin.team_checkpoint_valid = false
+	popAll()
+}

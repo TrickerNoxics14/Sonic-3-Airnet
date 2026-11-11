@@ -1,0 +1,56 @@
+# Whitelist: only the mod, the online engine fork, the check tooling and the docs are tracked.
+/*
+!/.gitignore
+!/DropInCoop/
+!/checks/
+!/sonic3air_online_stable_source/
+!/.claude/
+/.claude/*
+!/.claude/bug-patterns.md
+
+# --- checks: keep scripts, harness mods, package files and notes; drop logs, reference copies, archives, objects ---
+/checks/last_logs/
+/checks/research/
+/checks/stock-stable/
+/checks/stable-online-merge/
+/checks/stable-source-reference/
+/checks/test-source-reference/
+/checks/*.zip
+/checks/*.obj
+/checks/stable-build.log
+
+# --- never track: ROMs, saves, states, caches, builds, archives, binaries ---
+*.zip
+*.7z
+*.rar
+*.exe
+*.dll
+*.pdb
+*.obj
+*.o
+*.lib
+*.ilk
+*.idb
+*.ipch
+*.bin
+*.gen
+*.smd
+*.md.bak
+saves/
+states/
+**/bin/
+**/obj/
+**/.vs/
+**/x64/
+**/Release_x64/
+**/Debug_x64/
+*.lemonc
+*.log
+*.tlog
+
+# build intermediates
+*.iobj
+*.ipdb
+*.exp
+*.res
+*.cache

@@ -1,0 +1,100 @@
+//# script-feature-level(2)
+
+// Some original bosses (MGZ1, SOZ1 and Mecha Sonic) do not set the generic
+// encounter byte. Track their actual object lifetime for the camera only.
+global u32 dropin.boss_object
+global u16 dropin.boss_zone
+global u8 dropin.boss_kind
+global bool dropin.boss_had_health
+
+function void DropIn.trackBoss(u32 objectAddress, u8 kind)
+{
+	if (!DropIn.isActiveContext())
+		return
+	dropin.boss_object = objectAddress
+	dropin.boss_zone = global.zone_act
+	dropin.boss_kind = kind
+	dropin.boss_had_health = false
+	dropin.team_boss_mask = 0
+	dropin.team_boss_window = 0
+}
+
+// A team boss phase is completed when two different players damage the boss
+// within five seconds. This rewards coordinated attacks without changing any
+// vanilla boss health or attack timing.
+function void DropIn.checkBossTeamHit(u32 player, u32 bossObject, u8 hitsBefore)
+{
+	if (option.dropin.team_features == 0 || !DropIn.bossViewActive() || bossObject == 0 || u8[bossObject + 0x29] >= hitsBefore)
+		return
+	u8 index = DropIn.partyIndex(player)
+	if (index == 0)
+	{
+		if (player == DropIn.P1)
+			index = 0
+		else if (player == DropIn.P2 && dropin.joined)
+			index = 1
+		else
+			return
+	}
+	if (dropin.team_boss_window == 0)
+		dropin.team_boss_mask = 0
+	dropin.team_boss_window = 300
+	dropin.team_boss_mask |= u8(1 << index)
+	if ((dropin.team_boss_mask & (dropin.team_boss_mask - 1)) != 0)
+	{
+		dropin.team_boss_mask = 0
+		dropin.team_boss_window = 0
+		++dropin.team_boss_phases
+		DropIn.addTeamCombo(30)
+		dropin.team_card = 9
+		dropin.team_card_timer = 180
+	}
+}
+
+function bool DropIn.bossViewActive()
+{
+	return level.boss_encounter != 0 || (dropin.boss_object != 0 && dropin.boss_zone == global.zone_act)
+}
+
+function void DropIn.updateBossTracking()
+{
+	if (dropin.boss_object == 0)
+		return
+	u32 routine = u32[dropin.boss_object]
+	bool valid = (global.game_mode == 0x0c && global.zone_act == dropin.boss_zone && routine != 0)
+	if (dropin.boss_kind == 1)
+		valid = valid && (routine == 0x088568 || routine == 0x088572)
+	else if (dropin.boss_kind == 2)
+		valid = valid && (routine == 0x076a12 || routine == 0x076a92 || routine == addressof(Object.CountdownAndTrigger))
+	else if (dropin.boss_kind == 3)
+		valid = valid && (routine == 0x07b288)
+	u8 hits = u8[dropin.boss_object + 0x29]
+	if (hits != 0)
+		dropin.boss_had_health = true
+	if (!valid || (dropin.boss_had_health && hits == 0))
+		dropin.boss_object = 0
+}
+
+//# address-hook(0x0885a4)
+function void fn0885a4()
+{
+	u32 bossObject = A0
+	base.fn0885a4()
+	DropIn.trackBoss(bossObject, 1)
+}
+
+//# address-hook(0x076a12)
+function void fn076a12()
+{
+	u32 bossObject = A0
+	base.fn076a12()
+	DropIn.trackBoss(bossObject, 2)
+}
+
+//# address-hook(0x07b2dc)
+function void fn07b2dc()
+{
+	u32 bossObject = A0
+	base.fn07b2dc()
+	DropIn.trackBoss(bossObject, 3)
+}

@@ -1,0 +1,223 @@
+{
+	"Metadata": {
+		"Name": "Drop-In Co-op",
+		"UniqueID": "dropin-coop",
+		"Author": "TrickerNoxics14",
+			"Description": "Local co-op for up to four players, with optional ESU extra-slot character adapters for players 3 and 4.",
+		"ModVersion": "0.2.0",
+		"GameVersion": "26.03.28.0"
+	},
+	"Settings": {
+		"Drop-In Co-op": [
+			{
+				"InternalName": "requirejoin",
+				"DisplayName": "Player 2 Must Join",
+				"Category": "Gameplay",
+				"Variable": "option.dropin.require_join",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "No (vanilla: any button takes over Tails)",
+					"1": "Yes (press Start on controller 2)"
+				}
+			},
+			{
+				"InternalName": "leavehold",
+				"DisplayName": "Drop-Out: Hold Back For",
+				"Category": "Gameplay",
+				"Variable": "option.dropin.leave_hold",
+				"DefaultValue": "60",
+				"Options": {
+					"60": "1 second",
+					"120": "2 seconds",
+					"180": "3 seconds"
+				}
+			},
+			{
+				"InternalName": "idlekick",
+				"DisplayName": "Drop-Out When Controller 2 Is Idle",
+				"Category": "Gameplay",
+				"Variable": "option.dropin.idle_seconds",
+				"DefaultValue": "0",
+				"Options": {
+					"0": "Off",
+					"30": "After 30 seconds",
+					"60": "After 60 seconds",
+					"120": "After 2 minutes"
+				}
+			},
+			{
+				"InternalName": "splitscreen",
+				"DisplayName": "Split Screen (experimental)",
+				"Category": "Visuals",
+				"Variable": "option.dropin.split",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off (single screen)",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "splitmode",
+				"DisplayName": "Split Screen Mode",
+				"Category": "Visuals",
+				"Variable": "option.dropin.split_mode",
+				"DefaultValue": "0",
+				"Options": {
+					"0": "Always split while both players play",
+					"1": "Only when the players are far apart (clearer)"
+				}
+			},
+			{
+				"InternalName": "viewsize",
+				"DisplayName": "Split Screen View Size",
+				"Category": "Visuals",
+				"Variable": "option.dropin.view_size",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Small (original, most zoomed in)",
+					"1": "Medium (zoomed out a little)",
+					"2": "Large (zoomed out the most)"
+				}
+			},
+			{
+				"InternalName": "debugautojoin",
+				"DisplayName": "Developer: Join Automatically",
+				"Category": "Developer",
+				"Variable": "option.dropin.debug_autojoin",
+				"DefaultValue": "0",
+				"Options": {
+					"0": "Off",
+					"1": "On (testing without a second controller)",
+					"2": "On + debug overlay"
+				}
+			},
+			{
+				"InternalName": "p2hurt",
+				"DisplayName": "Player 2 Can Be Hurt",
+				"Category": "Gameplay",
+				"Variable": "option.dropin.p2_hurt",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "No (vanilla: Tails only gets knocked back)",
+					"1": "Yes (loses the shared rings, dies without rings)"
+				}
+			},
+			{
+				"InternalName": "showhints",
+				"DisplayName": "On-Screen Hints",
+				"Category": "Visuals",
+				"Variable": "option.dropin.hints",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "partnerrescue",
+				"DisplayName": "Rescue Bounce (hold Down + Y)",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.rescue",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "sharedcheckpoints",
+				"DisplayName": "Shared Checkpoints and Independent Respawn",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.checkpoints",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "bossregroup",
+				"DisplayName": "Regroup for Boss Fights",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.regroup",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "teammoves",
+				"DisplayName": "Team Moves (Tails Carry: Up/X; Sonic Right+X; Knuckles Down+X)",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.team_moves",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "teamfeatures",
+				"DisplayName": "Shared Power-Ups, Insurance and Team Awards",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.team_features",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off",
+					"1": "On"
+				}
+			},
+			{
+				"InternalName": "partyplayers",
+				"DisplayName": "Maximum Players (3/4 Player Party)",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.players",
+				"DefaultValue": "2",
+				"Options": {
+					"2": "2 players (split screen available)",
+					"3": "3 players (Sonic, Tails, Knuckles)",
+					"4": "4 players (+ second Sonic)"
+				}
+			},
+			{
+				"InternalName": "party_slot3",
+				"DisplayName": "Player 3 Extra Character Slot",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.party_slot3",
+				"DefaultValue": "0",
+				"Options": {
+					"0": "Built-in Knuckles",
+					"35": "ESU slot 35 (Modern Sonic; requires its mod and ESU)",
+					"90": "ESU slot 90 (Reto; requires its mod and ESU)"
+				}
+			},
+			{
+				"InternalName": "party_slot4",
+				"DisplayName": "Player 4 Extra Character Slot",
+				"Category": "Teamwork",
+				"Variable": "option.dropin.party_slot4",
+				"DefaultValue": "0",
+				"Options": {
+					"0": "Built-in Sonic",
+					"35": "ESU slot 35 (Modern Sonic; requires its mod and ESU)",
+					"90": "ESU slot 90 (Reto; requires its mod and ESU)"
+				}
+			},
+			{
+				"InternalName": "fourviews",
+				"DisplayName": "Four-Player Quadrant Split Screen",
+				"Category": "Visuals",
+				"Variable": "option.dropin.four_view_split",
+				"DefaultValue": "1",
+				"Options": {
+					"0": "Off (shared camera for 3/4 players)",
+					"1": "On when supported by the game build"
+				}
+			}
+		]
+	},
+	"UsesFeatures": {
+		"FourPlayers": true
+	}
+}

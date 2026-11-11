@@ -1,0 +1,11 @@
+{
+	"Metadata":
+	{
+		"Name": "TeleportHarness",
+		"UniqueID": "s3air-teleport-harness",
+		"Author": "checks",
+		"Description": "Vanilla check: moves Sonic to the end of an act and runs right, without the co-op mod. Only active while checks/run_checks.ps1 runs. Not part of the release.",
+		"ModVersion": "1.0.0",
+		"GameVersion": "20.07.24.0"
+	}
+}

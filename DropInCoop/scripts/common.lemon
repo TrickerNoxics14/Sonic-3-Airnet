@@ -1,0 +1,142 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: shared settings, state and constants
+
+
+// Settings (see mod.json)
+global u8  option.dropin.require_join
+global u16 option.dropin.leave_hold
+global u16 option.dropin.idle_seconds
+global u8  option.dropin.hints
+global u8  option.dropin.p2_hurt
+global u8  option.dropin.split
+global u8  option.dropin.split_mode
+global u8  option.dropin.debug_autojoin
+global u8  option.dropin.four_view_split
+global u8  option.dropin.team_features
+
+// State
+global bool dropin.joined
+global u16  dropin.leave_timer
+global u16  dropin.idle_timer
+global u16  dropin.hint_timer
+
+global u8  option.dropin.view_size		// 0 = 112 lines per view (original), 1 = 144, 2 = 176
+global u16 dropin.base_w					// Screen size before the split screen enlarged it
+global u16 dropin.base_h
+global u16 dropin.big_h					// Height of the enlarged screen while it is enlarged, otherwise 0
+
+// The view height the player chose in the options
+function u16 DropIn.chosenViewHeight()
+{
+	if (option.dropin.view_size == 1)
+		return 144
+	if (option.dropin.view_size == 2)
+		return 176
+	return 112
+}
+
+// Height of each of the two views (local split screen) as they are right now: the screen is only taller while it was enlarged
+function u16 DropIn.localViewHeight()
+{
+	return (dropin.big_h != 0) ? (dropin.big_h / 2) : 112
+}
+
+// Rows of 16 lines one view needs in the plane: its lines, plus one for the scroll offset, plus one for the partial row
+function u16 DropIn.bandRows()
+{
+	return (DropIn.localViewHeight() + 15) / 16 + 1
+}
+
+// Where plane B's name table lives while the split screen is on.
+// Normally 0xe000. The game copies its line scroll table to 0xf000 every frame, so with taller views (which need more rows per plane)
+// plane B moves down to start right after plane A's two bands, below 0xf000.
+function u16 DropIn.planeBaseB()
+{
+	if (dropin.big_h == 0)
+		return 0xe000
+	return 0xc000 + DropIn.bandRows() * 2 * 0x100
+}
+
+// The screen height the game's own code assumes (224 normally), also while the screen is enlarged
+function u16 DropIn.baseScreenH()
+{
+	return (dropin.big_h != 0) ? dropin.base_h : getScreenHeight()
+}
+
+// The game's camera keeps the character at a fixed place of a 224 lines screen; scale that to the view height
+function u16 DropIn.scaleCameraOffset(u16 offset)
+{
+	return u16((u32(offset) * DropIn.localViewHeight()) / 224)
+}
+constant string DropIn.FONT = "oxyfont_tiny:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.6f)"
+
+constant u32 DropIn.P1 = 0xffffb000
+constant u32 DropIn.P2 = 0xffffb04a
+
+// Developer overlay: which condition currently prevents the split screen (0 = none)
+global u8 dropin.dbg_reason
+global u16 dropin.flyin_timer		// Frames player 2's Tails has been flying in without catching up with his flight target
+
+
+// Online play: the engine tells the scripts about the role of this computer, in the shared memory (see "NetplayManager")
+//  0 = not playing online (local co-op with a split screen), 1 = host (sees player 1 on the whole screen), 2 = friend (sees player 2 on the whole screen)
+// While playing online, both computers run exactly the same game; only what gets shown on the screen differs.
+constant u32 DropIn.ROLE_ADDRESS = 0x8fff00
+
+function u8 DropIn.role()
+{
+	return u8[DropIn.ROLE_ADDRESS]
+}
+
+// Playing online? (the same on both computers)
+function bool DropIn.net()
+{
+	return u8[DropIn.ROLE_ADDRESS] != 0
+}
+
+function bool DropIn.fourViewEngineAvailable()
+{
+	u8[0x8fff02] = 0
+	System.callFunctionByName("Engine.markFourViewSplitSupported")
+	return u8[0x8fff02] == 1
+}
+
+// Screen line where the lower view (player 2) starts; online, player 2's view is the whole screen
+function u16 DropIn.lowerTop()
+{
+	return DropIn.net() ? 0 : DropIn.localViewHeight()
+}
+
+// Height of the camera views of the game's own camera logic
+function u16 DropIn.viewH()
+{
+	return DropIn.net() ? getScreenHeight() : DropIn.localViewHeight()
+}
+
+// Settings that change what happens in the game must be the same on both computers while playing online
+global bool dropin.was_net
+
+function void DropIn.forceNetSettings()
+{
+	if (DropIn.net())
+	{
+		option.dropin.split = 1
+		option.dropin.split_mode = 0
+		option.dropin.idle_seconds = 0
+		option.dropin.p2_hurt = 1
+		option.dropin.debug_autojoin = 0
+		option.dropin.require_join = 1
+		option.dropin.rescue = 1
+		option.dropin.checkpoints = 1
+		option.dropin.regroup = 1
+		option.dropin.team_moves = 1
+		option.dropin.team_features = 1
+	}
+}
+
+// Developer counters (see the test harness)
+global u16 dropin.dbg_hurt
+global u16 dropin.dbg_spawn
+global u16 dropin.dbg_init
+global u16 dropin.dbg_toggle

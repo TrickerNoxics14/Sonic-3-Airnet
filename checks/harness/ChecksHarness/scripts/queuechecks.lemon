@@ -1,0 +1,58 @@
+//# script-feature-level(2)
+
+// Exercise the real row and column writers with only a header's worth of
+// capacity left. They must leave the existing terminator and pointer intact.
+function void Checks.testEmptyPlaneQueue()
+{
+	push(D0)
+	push(D1)
+	push(D2)
+	push(D3)
+	push(D4)
+	push(D5)
+	push(D6)
+	push(D7)
+	push(A0)
+	push(A1)
+	push(A2)
+	push(A3)
+	push(A4)
+	push(A5)
+	push(A6)
+	u32 savedHeader = u32[0xfffff57c]
+	u32 savedTail = u32[0xfffff580]
+	u32 sentinel = 0x12345678
+	A0 = 0xfffff57c
+	D0 = 0
+	D7 = 0xe000
+	u32[A0] = sentinel
+	fillPlanePatternsX(0, 1)
+	bool columnOk = (A0 == 0xfffff57c && u32[0xfffff57c] == sentinel)
+	A0 = 0xfffff57c
+	u32[A0] = sentinel
+	fillPlanePatternsY(0, 1)
+	bool rowOk = (A0 == 0xfffff57c && u32[0xfffff57c] == sentinel)
+	A0 = 0xfffff57c
+	u32[A0] = sentinel
+	fillPlanePatternsX(0, 0)
+	fillPlanePatternsY(0, 0)
+	bool zeroOk = (A0 == 0xfffff57c && u32[0xfffff57c] == sentinel)
+	u32[0xfffff57c] = savedHeader
+	u32[0xfffff580] = savedTail
+	A6 = pop()
+	A5 = pop()
+	A4 = pop()
+	A3 = pop()
+	A2 = pop()
+	A1 = pop()
+	A0 = pop()
+	D7 = pop()
+	D6 = pop()
+	D5 = pop()
+	D4 = pop()
+	D3 = pop()
+	D2 = pop()
+	D1 = pop()
+	D0 = pop()
+	Checks.report("empty plane queue", (columnOk && rowOk && zeroOk), stringformat("column %d, row %d, explicit zero %d", columnOk, rowOk, zeroOk))
+}

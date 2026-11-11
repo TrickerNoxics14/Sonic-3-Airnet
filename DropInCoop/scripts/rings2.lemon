@@ -1,0 +1,153 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: level rings for the lower (player 2) view.
+//
+// The game keeps a window into the level's ring table ("rings.around.*") around its single camera; only rings in that
+// window are drawn and can be collected. For the split screen, a second window follows player 2's camera. It is used to
+// draw the rings in the lower view, and while player 2's ring collection runs.
+
+global bool dropin.rings2.valid
+global u32  dropin.rings2.first
+global u32  dropin.rings2.last
+global u16  dropin.rings2.first_state
+
+
+// Moves the second ring window along with player 2's camera (same as "UpdateListOfRingsAround_Default", without the animation update)
+function void DropIn.updateRings2()
+{
+	if (!dropin.rings2.valid)
+	{
+		// Start from player 1's window, it gets moved to the right place below
+		dropin.rings2.first = rings.around.first
+		dropin.rings2.last = rings.around.last
+		dropin.rings2.first_state = rings.around.first.state
+		dropin.rings2.valid = true
+	}
+
+	// Use a wider border than the original, as player 2 might outrun the camera on either side
+	s16 border = 0x28
+
+	u32 first = dropin.rings2.first
+	u16 firstState = dropin.rings2.first_state
+	u16 minX = max(s16(camera.position.x.u16.player2) - border, 1)
+
+	while (minX > u16[first])
+	{
+		first += 4
+		firstState += 2
+	}
+	while (minX <= u16[first - 4])
+	{
+		first -= 4
+		firstState -= 2
+	}
+
+	u32 last = dropin.rings2.last
+	u16 maxX = minX + getScreenWidth() + border * 2
+	while (maxX > u16[last])
+	{
+		last += 4
+	}
+	while (maxX <= u16[last - 4])
+	{
+		last -= 4
+	}
+
+	dropin.rings2.first = first
+	dropin.rings2.first_state = firstState
+	dropin.rings2.last = last
+}
+
+
+//# address-hook(0x00e8aa)
+function void UpdateListOfRingsAround()
+{
+	base.UpdateListOfRingsAround()
+
+	// Only for the default (horizontal) ring layout
+	if (dropin.split_active && rings.update_routine == 0x02)
+		DropIn.updateRings2()
+}
+
+
+// Draws the rings of the second window (a copy of "RenderStaticRings" with a different camera and render queues)
+function void DropIn.renderRings2(u16 cameraX, u16 cameraY)
+{
+	if (!dropin.rings2.valid)
+		return
+
+	u32 ring = dropin.rings2.first
+	u32 state = 0xffff0000 + dropin.rings2.first_state
+	u32 numRings = (dropin.rings2.last - dropin.rings2.first) / 4
+	u32 frames = 0x00ebee
+
+	while (numRings > 0)
+	{
+		u16 ringAnimationState = u16[state]
+		if (ringAnimationState != 0xffff)
+		{
+			u16 py = (u16[ring + 2] - cameraY + 8) & level.height.bitmask
+			if (py < 0xf0)
+			{
+				py += 0x78
+				u16 px = u16[ring] - cameraX + 0x80
+
+				if ((ringAnimationState & 0xff) == 0)
+				{
+					// Not collected: smooth rotating animation
+					u8 animFrame = ((static_rings.animframe * 8 + 7 - static_rings.animtimer) / 4) % 8
+					u64 key = stringformat("ring_0%d", animFrame)
+					Renderer.drawCustomSprite(key, px - 0x80, py - 0x80, 0x00, 0, 0xa000 - DropIn.QUEUE_SHIFT)
+				}
+				else
+				{
+					// Collected: sparkle animation
+					u32 src = frames + (ringAnimationState & 0xff) * 8
+					Renderer.drawVdpSprite(u16[src + 6] + px - 0x80, u16[src + 0] + py - 0x80, u8[src + 3], u16[src + 4], 0xa000 - DropIn.QUEUE_SHIFT)
+				}
+			}
+		}
+		state += 2
+		ring += 4
+		--numRings
+	}
+}
+
+
+// Player 2 collects the rings around player 2's camera
+//# address-hook(0x00ea20)
+function void SonicUpdateRingCollection()
+{
+	// Player 2 collects into his own ring counter (see "coop2.lemon")
+	bool ownCounter = (A0 == DropIn.P2 && DropIn.ownRings())
+	u32 backupA0 = A0
+	if (ownCounter)
+		DropIn.swapRings()
+
+	if (!dropin.split_active || !dropin.rings2.valid || A0 != DropIn.P2)
+	{
+		base.SonicUpdateRingCollection()
+	}
+	else
+	{
+		u32 backupFirst = rings.around.first
+		u32 backupLast = rings.around.last
+		u16 backupFirstState = rings.around.first.state
+
+		rings.around.first = dropin.rings2.first
+		rings.around.last = dropin.rings2.last
+		rings.around.first.state = dropin.rings2.first_state
+
+		base.SonicUpdateRingCollection()
+
+		rings.around.first = backupFirst
+		rings.around.last = backupLast
+		rings.around.first.state = backupFirstState
+	}
+
+	if (ownCounter)
+	{
+		DropIn.swapRings()
+		A0 = backupA0
+	}
+}

@@ -1,0 +1,903 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: split screen (player 1 on top, player 2 below).
+//
+// How it works (script-only, the engine is not modified):
+//  - Player 2 gets its own camera, updated with the game's own camera code (camera.position.*.player2).
+//  - Both planes get re-filled every frame with two "bands" of tile rows (see "planes2.lemon"):
+//    band 0 (plane rows 0-7) shows the area of player 1's view, band 1 (rows 8-15) the area of player 2's view.
+//  - The planes are then displayed through two custom plane rects per plane, one per view, each with its own scroll offsets.
+//
+// The split screen never switches on and off in quick succession (that is hard on the eyes):
+//  - It only starts once everything was fine for a moment.
+//  - Short pauses (e.g. a camera lock) need to last a while before it ends.
+//  - While player 2 is dead or respawning, player 2's camera simply stays where it is.
+
+constant u16 DropIn.SPLIT_ON_DELAY = 30			// Frames everything has to be fine before the screen splits
+constant u16 DropIn.SPLIT_OFF_DELAY = 60		// Frames a pause condition has to last before the screen goes back to a single view
+constant u16 DropIn.RESPAWN_TIMEOUT = 600		// Frames player 2 may be dead / respawning before the screen goes back to a single view
+constant u16 DropIn.FAR_X = 140				// "Only when far apart" mode: the screen splits when the players are further apart than this (x, y) ...
+constant u16 DropIn.FAR_Y = 80
+constant u16 DropIn.NEAR_X = 100				// ... and goes back to one screen once they were closer than this for a while
+constant u16 DropIn.NEAR_Y = 50
+constant u16 DropIn.NEAR_DELAY = 120			// Frames the players have to stay close together before the screen goes back to a single view
+
+global bool dropin.split_active
+global bool dropin.split_was_active
+global bool dropin.camera2_initialized
+global bool dropin.camera2_frozen			// Set while player 2 is dead or respawning
+global u16  dropin.bottom2					// Player 2's level bottom border
+global u16  dropin.split_timer				// Counts frames towards switching the split screen on or off
+global u16  dropin.respawn_timer
+global u16  dropin.near_timer
+global u16  dropin.p1_x
+global s16  dropin.panning2					// Camera panning of player 2 (see "DropIn.updateCamera2")
+global bool dropin.test_mirror				// Developer test: lower view uses the same camera as the upper view, see "_devtools"
+global bool dropin.test_cam2_valid				// Developer test: fixed camera for the lower view
+global u16  dropin.test_cam2_x
+global u16  dropin.test_cam2_y
+global u16  dropin.p1_y
+
+
+//# script-feature-level(2)
+
+// Four quadrant local mode. The extended game build advertises this through
+// Engine.markFourViewSplitSupported; the stock build keeps party mode shared.
+global u16 dropin.camera3.x
+global u16 dropin.camera3.y
+global u16 dropin.camera4.x
+global u16 dropin.camera4.y
+global bool dropin.camera3.valid
+global bool dropin.camera4.valid
+global u8 dropin.party_render_view
+
+constant u16 DropIn.PARTY_VIEW_WIDTH = 160
+constant u16 DropIn.PARTY_VIEW_HEIGHT = 112
+constant u32 DropIn.PARTY_SCROLL1 = 0x8f1c00
+constant u32 DropIn.PARTY_SCROLL2 = 0x8f2000
+constant u32 DropIn.PARTY_SCROLL3 = 0x8f1400
+constant u32 DropIn.PARTY_SCROLL4 = 0x8f1800
+
+function bool DropIn.allPartyPlayersActive()
+{
+	for (u8 view = 0; view < 4; ++view)
+	{
+		u32 player = DropIn.partyViewPlayer(view)
+		if (player == 0 || u8[player + 5] >= base_state.DIED)
+			return false
+	}
+	return true
+}
+
+function void DropIn.resetPartyViews()
+{
+	dropin.camera3.valid = false
+	dropin.camera4.valid = false
+	dropin.view3.state_valid = false
+	dropin.view4.state_valid = false
+}
+
+function bool DropIn.fourViewRequested()
+{
+	return option.dropin.four_view_split != 0 && DropIn.partyCount() > 2 && !DropIn.net() && DropIn.fourViewEngineAvailable()
+}
+
+function bool DropIn.fourViewSceneSupported()
+{
+	return DropIn.isZoneSupported() && DropIn.isScrollingSupported() && !DropIn.bossViewActive() && level.water_present == 0
+}
+
+function u32 DropIn.partyViewPlayer(u8 view)
+{
+	if (view == 0)
+		return DropIn.P1
+	if (view == 1)
+		return DropIn.P2
+	return DropIn.partyPlayer(view)
+}
+
+function u16 DropIn.partyViewCameraX(u8 view)
+{
+	if (view == 0)
+		return camera.position.x.u16
+	if (view == 1)
+		return camera.position.x.u16.player2
+	return view == 2 ? dropin.camera3.x : dropin.camera4.x
+}
+
+function u16 DropIn.partyViewCameraY(u8 view)
+{
+	if (view == 0)
+		return camera.position.y.u16
+	if (view == 1)
+		return camera.position.y.u16.player2
+	return view == 2 ? dropin.camera3.y : dropin.camera4.y
+}
+
+function void DropIn.storePartyViewCamera(u8 view, u16 x, u16 y)
+{
+	if (view == 0)
+	{
+		camera.position.x.u16 = x
+		camera.position.y.u16 = y
+	}
+	else if (view == 1)
+	{
+		camera.position.x.u16.player2 = x
+		camera.position.y.u16.player2 = y
+	}
+	else if (view == 2)
+	{
+		dropin.camera3.x = x
+		dropin.camera3.y = y
+	}
+	else
+	{
+		dropin.camera4.x = x
+		dropin.camera4.y = y
+	}
+}
+
+function void DropIn.updatePartyCamera(u8 view)
+{
+	u32 player = DropIn.partyViewPlayer(view)
+	if (player == 0 || u8[player + 5] >= base_state.DIED)
+		return
+	s16 left = s16(move_area.left)
+	s16 right = max(left, s16(move_area.right) - s16(getScreenWidth() - DropIn.PARTY_VIEW_WIDTH))
+	s16 top = s16(level.vertical_wrap)
+	s16 bottom = max(top, s16(move_area.bottom.current) + s16(getScreenHeight() - DropIn.PARTY_VIEW_HEIGHT))
+	s16 targetX = clamp(s16(u16[player + 0x10]) - 72, left, right)
+	s16 targetY = clamp(s16(u16[player + 0x14]) - 44, top, bottom)
+	u16 x = DropIn.partyViewCameraX(view)
+	u16 y = DropIn.partyViewCameraY(view)
+	bool valid = view == 2 ? dropin.camera3.valid : view == 3 ? dropin.camera4.valid : true
+	if (!valid)
+	{
+		x = u16(targetX)
+		y = u16(targetY)
+		if (view == 2)
+			dropin.camera3.valid = true
+		else if (view == 3)
+			dropin.camera4.valid = true
+	}
+	else
+	{
+		x = u16(s16(x) + clamp(s16(targetX - s16(x)), -8, 8))
+		y = u16(s16(y) + clamp(s16(targetY - s16(y)), -8, 8))
+	}
+	DropIn.storePartyViewCamera(view, x, y)
+}
+
+function void DropIn.updatePartyCameras()
+{
+	for (u8 view = 0; view < 4; ++view)
+		DropIn.updatePartyCamera(view)
+}
+
+function void DropIn.setupFourViewPlanes()
+{
+	u16 width = getScreenWidth() / 2
+	u16 height = getScreenHeight() / 2
+	Renderer.resetCustomPlaneConfigurations()
+	Renderer.enableDefaultPlane(0, false)
+	Renderer.enableDefaultPlane(1, false)
+	Renderer.enableDefaultPlane(2, false)
+	Renderer.enableDefaultPlane(3, false)
+	for (u8 view = 0; view < 4; ++view)
+	{
+		u16 x = (view & 1) ? width : 0
+		u16 y = (view & 2) ? height : 0
+		u8 band = view
+		u8 scroll = view * 2
+		u16 cameraY = DropIn.partyViewCameraY(view)
+		u16 bgY = view == 0 ? camera.background.y.u16 : view == 1 ? dropin.view2.bg_y : view == 2 ? dropin.view3.bg_y : dropin.view4.bg_y
+		u16 fgY = view == 0 ? camera.foreground.y.u16 : view == 1 ? dropin.view2.fg_y : view == 2 ? dropin.view3.fg_y : dropin.view4.fg_y
+		u32 scrollBase = view == 0 ? DropIn.PARTY_SCROLL1 : view == 1 ? DropIn.PARTY_SCROLL2 : view == 2 ? DropIn.PARTY_SCROLL3 : DropIn.PARTY_SCROLL4
+		for (u16 line = 0; line < height; ++line)
+		{
+			u32 entry = u32[scrollBase + line * 4]
+			// Plane coordinates use absolute screen x. Shift the right half by
+			// 256px in the table, offset by its 160px viewport origin.
+			u16 horizontalBand = (view & 1) ? 0x60 : 0
+			Renderer.setScrollOffsetH(scroll, y + line, (horizontalBand - s16(entry >> 16)) & 0x0fff)
+			Renderer.setScrollOffsetH(scroll + 1, y + line, (horizontalBand - s16(entry & 0xffff)) & 0x0fff)
+		}
+		for (u8 column = 0; column < 0x20; ++column)
+		{
+			u16 verticalBand = (view >> 1) * 0x80
+			Renderer.setScrollOffsetV(scroll, column, verticalBand - y + (bgY & 0x0f))
+			Renderer.setScrollOffsetV(scroll + 1, column, verticalBand - y + (fgY & 0x0f))
+		}
+		u16 planeQueue = 0x1000 + view * 0x400
+		Renderer.setupPlane(x, y, width, height, 0x00, scroll, planeQueue)
+		Renderer.setupPlane(x, y, width, height, 0x01, scroll + 1, planeQueue + 0x80)
+		Renderer.setupPlane(x, y, width, height, 0x10, scroll, planeQueue + 0x100)
+		Renderer.setupPlane(x, y, width, height, 0x11, scroll + 1, planeQueue + 0x180)
+	}
+}
+
+function void DropIn.drawFourPlayerHud()
+{
+	for (u8 view = 0; view < 4; ++view)
+	{
+		u32 player = DropIn.partyViewPlayer(view)
+		if (player == 0)
+			continue
+		u16 x = (view & 1) ? getScreenWidth() / 2 + 4 : 4
+		u16 y = (view & 2) ? getScreenHeight() / 2 + 3 : 3
+		Renderer.drawText(DropIn.FONT, x, y, stringformat("P%d  %d RINGS", view + 1, view == 0 ? ring_counter : view == 1 ? ring_counter.player2 : DropIn.partyRings(view - 1)), 0xffffffff, 1, 0, 0x7fff + view * 0x10, false)
+	}
+}
+
+
+// Conditions without which there can be no split screen at all; these end it right away
+function bool DropIn.splitPossible()
+{
+	if (DropIn.partyCount() > 2 && (!DropIn.fourViewRequested() || !DropIn.fourViewSceneSupported() || !DropIn.allPartyPlayersActive()))
+		return false
+	if (option.dropin.split == 0 || !dropin.joined)
+		return false
+
+	// The "Screen Zoom-in" mod resizes the screen every frame, which the split screen cannot work with (single screen then)
+	if (Mods.isModActive("screen-zoom-in"))
+	{
+		dropin.dbg_reason = 8
+		return false
+	}
+	if (global.game_mode != 0x0c || competition_mode.active != 0)
+		return false
+	if (u32[DropIn.P2] == 0)
+		return false
+
+	// Only zones that were verified to work so far, and only in regular gameplay
+	if (!DropIn.isZoneSupported())
+		return false
+	// The intro of Angel Island 1 is not a started level yet, but player 2 gets his own view there already (see "DropIn.getScrollProfile")
+	if (global.level_started <= 0 && DropIn.getScrollProfile() != DropIn.PROFILE_AIZ1_INTRO)
+		return false
+
+	// AIZ 1 starts with the burnt intro area, which uses different level graphics; the regular ones get loaded once player 1's camera
+	// gets past it (at the same time, the camera routine advances to 0x04) -- a lower view further ahead could not be drawn before that
+	if (global.zone_act == 0x0000 && camera.update_routine < 0x04 && DropIn.getScrollProfile() != DropIn.PROFILE_AIZ1_INTRO)
+	{
+		dropin.dbg_reason = 1
+		return false
+	}
+
+	// Special scrolling (like the fire in AIZ 1 or the airship in AIZ 2) can only be shown in a single view
+	if (!DropIn.isScrollingSupported())
+	{
+		dropin.dbg_reason = 6
+		return false
+	}
+	// Water palette changes are driven by one global scanline interrupt. A four-way
+	// layout cannot give each quadrant its own waterline/palette yet.
+	if (DropIn.partyCount() > 2 && level.water_present != 0)
+	{
+		dropin.dbg_reason = 6
+		return false
+	}
+
+	// Player 1 is dying or drowning: the level restarts soon
+	if (u8[DropIn.P1 + 0x05] >= base_state.DIED || u8[0xffffee30] != 0)
+	{
+		dropin.dbg_reason = 5
+		return false
+	}
+	return true
+}
+
+// Conditions that pause the split screen (cutscenes, camera locks)
+function bool DropIn.splitPaused()
+{
+	// Player 2 alone not being controllable does not matter here: that happens during regular play too (e.g. on a mushroom)
+	if (player1.camera_lock != 0 || camera.use_forced_target != 0 || player1.control_override != 0)
+	{
+		dropin.dbg_reason = 3
+		return true
+	}
+	return false
+}
+
+// Is player 2 playing right now (i.e. not dead and not respawning)?
+function bool DropIn.isPlayer2Active()
+{
+	if (u8[DropIn.P2 + 0x05] >= base_state.DIED)
+		return false
+	return (tails.ai_routine == 0x04 || tails.ai_routine == 0x06 || tails.ai_routine == 0x08)
+}
+
+// Forget everything about player 2's view, so it gets set up again from player 2's position
+function void DropIn.resetView2()
+{
+	dropin.panning2 = 0
+	dropin.view2.state_valid = false
+	dropin.camera2_initialized = false
+	dropin.om2.valid = false
+	dropin.rings2.valid = false
+	if (DropIn.partyCount() > 2)
+		DropIn.resetPartyViews()
+}
+
+// Enlarges the screen (and the plane memory the two views are built in) while the two-player split screen is on, and puts it back afterwards.
+// A taller screen makes each view show more of the level, which is the same as zooming out.
+function void DropIn.applyViewSize()
+{
+	// The intro of Angel Island 1 stays at the original size: the game's own intro code depends on the screen height
+	bool wantBig = dropin.split_active && !DropIn.net() && DropIn.partyCount() <= 2 && DropIn.chosenViewHeight() != 112 && DropIn.getScrollProfile() != DropIn.PROFILE_AIZ1_INTRO
+	u16 wanted = wantBig ? DropIn.chosenViewHeight() * 2 : 0
+	if (wanted != dropin.big_h && dropin.split_active)
+		DropIn.resetView2()			// The views change size: player 2's camera and the plane bands get set up again
+	if (wantBig)
+	{
+		if (dropin.big_h == 0)
+		{
+			dropin.base_w = getScreenWidth()
+			dropin.base_h = getScreenHeight()
+		}
+		if (getScreenHeight() != wanted)
+			Renderer.setScreenSize(dropin.base_w, wanted)
+		VDP.Config.setPlayfieldSizeInPatterns(64, 64)
+		dropin.big_h = wanted
+		VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
+	}
+	else if (dropin.big_h != 0)
+	{
+		Renderer.setScreenSize(dropin.base_w, dropin.base_h)
+		VDP.Config.setPlayfieldSizeInPixels(512, 256)
+		VDP.Config.setNameTableBasePlaneB(0xe000)
+		dropin.big_h = 0
+	}
+}
+
+function void DropIn.startSplit()
+{
+	++dropin.dbg_toggle
+	dropin.near_timer = 0
+	dropin.split_active = true
+	dropin.split_timer = 0
+	dropin.respawn_timer = 0
+	dropin.camera2_frozen = false
+	DropIn.resetView2()
+	DropIn.applyViewSize()
+}
+
+function void DropIn.endSplit()
+{
+	++dropin.dbg_toggle
+	dropin.near_timer = 0
+	dropin.split_active = false
+	dropin.split_timer = 0
+	dropin.respawn_timer = 0
+	dropin.camera2_frozen = false
+	DropIn.resetView2()
+	DropIn.applyViewSize()
+}
+
+function bool DropIn.arePlayersApart()
+{
+	s32 dx = abs(s16(u16[DropIn.P1 + 0x10] - u16[DropIn.P2 + 0x10]))
+	s32 dy = abs(s16(u16[DropIn.P1 + 0x14] - u16[DropIn.P2 + 0x14]))
+	return dx > DropIn.FAR_X || dy > DropIn.FAR_Y
+}
+
+function bool DropIn.arePlayersNear()
+{
+	s32 dx = abs(s16(u16[DropIn.P1 + 0x10] - u16[DropIn.P2 + 0x10]))
+	s32 dy = abs(s16(u16[DropIn.P1 + 0x14] - u16[DropIn.P2 + 0x14]))
+	return dx < DropIn.NEAR_X && dy < DropIn.NEAR_Y
+}
+
+// Decides whether the split screen is on in this frame
+function void DropIn.updateSplitState()
+{
+	dropin.dbg_reason = 0
+	bool possible = DropIn.splitPossible()
+
+	if (!dropin.split_active)
+	{
+		// Start only after everything was fine for a moment
+		bool ready = possible && !DropIn.splitPaused()
+		if (ready && DropIn.partyCount() <= 2 && tails.ai_routine != 0x06 && tails.ai_routine != 0x08)
+		{
+			dropin.dbg_reason = 2
+			ready = false
+		}
+		if (ready && DropIn.partyCount() <= 2 && !DropIn.isPlayer2Active())
+		{
+			dropin.dbg_reason = 2
+			ready = false
+		}
+		if (ready && option.dropin.split_mode != 0 && !DropIn.arePlayersApart())
+		{
+			// The players are close together: one big screen is clearer than two small ones
+			dropin.dbg_reason = 7
+			ready = false
+		}
+
+		dropin.split_timer = ready ? (dropin.split_timer + 1) : 0
+		if (dropin.split_timer >= DropIn.SPLIT_ON_DELAY)
+			DropIn.startSplit()
+		return
+	}
+
+	if (!possible)
+	{
+		DropIn.endSplit()
+		return
+	}
+
+	// Pauses only end the split screen if they last for a while
+	dropin.split_timer = DropIn.splitPaused() ? (dropin.split_timer + 1) : 0
+	dropin.respawn_timer = (DropIn.partyCount() > 2 ? DropIn.allPartyPlayersActive() : DropIn.isPlayer2Active()) ? 0 : (dropin.respawn_timer + 1)
+	if (dropin.split_timer >= DropIn.SPLIT_OFF_DELAY || dropin.respawn_timer >= DropIn.RESPAWN_TIMEOUT)
+		DropIn.endSplit()
+	else if (option.dropin.split_mode != 0)
+	{
+		// Back to one screen once the players stayed close together for a while (or while player 2 flies back in)
+		bool near = !DropIn.isPlayer2Active() || DropIn.arePlayersNear()
+		dropin.near_timer = near ? (dropin.near_timer + 1) : 0
+		if (dropin.near_timer >= DropIn.NEAR_DELAY)
+			DropIn.endSplit()
+	}
+}
+
+
+// Level bottom border for player 2's camera
+//  -> The game changes the bottom border depending on the camera position; it gets evaluated for player 2's camera here where possible
+function u16 DropIn.getBottomTarget2()
+{
+	if (global.zone_act == 0x0000 && (camera.update_routine == 0x04 || camera.update_routine == 0x06))
+	{
+		// Same as "fn01caae" in AIZ 1, with player 2's camera
+		u16 x = camera.position.x.u16.player2 + getScreenExtend()
+		u32 address = 0x01c60a
+		u32 entry = 0
+		while (true)
+		{
+			entry = u32[address]
+			address += 4
+			if (x <= u16(entry))
+			{
+				// Additional check for the area at the first Giant Ring
+				if (address == 0x01c612 && u16[DropIn.P2 + 0x10] >= 0x1b80)
+					continue
+				break
+			}
+		}
+		return u16(entry >> 16) & 0x7fff
+	}
+	return move_area.bottom.target
+}
+
+// Moves player 2's bottom border towards its target (same as in "UpdateCameraBoundsInLevel")
+function void DropIn.updateBounds2()
+{
+	u16 target = DropIn.getBottomTarget2()
+	if (!dropin.camera2_initialized)
+	{
+		dropin.bottom2 = target
+	}
+	else if (target > dropin.bottom2)
+	{
+		u16 speed = 2
+		if (camera.position.y.u16.player2 + 8 >= dropin.bottom2 && (u8[DropIn.P2 + 0x2a] & char.flag.IN_AIR))
+			speed = 8
+		u16 raised = dropin.bottom2 + speed
+		dropin.bottom2 = (raised < target) ? raised : target
+	}
+	else if (target < dropin.bottom2)
+	{
+		if (camera.position.y.u16.player2 > target)
+			dropin.bottom2 = camera.position.y.u16.player2 & 0xfffe
+		u16 lowered = dropin.bottom2 - 2
+		dropin.bottom2 = (s16(lowered) > s16(target)) ? lowered : target
+	}
+
+	// Player 2's set of camera bounds (only used in Competition mode otherwise)
+	move_area.left.player2 = move_area.left
+	move_area.right.player2 = move_area.right
+	level.vertical_wrap.player2 = level.vertical_wrap
+	move_area.bottom.current.player2 = dropin.bottom2
+}
+
+
+function void DropIn.initCamera2()
+{
+	DropIn.updateBounds2()
+
+	s16 left = s16(move_area.left)
+	s16 right = max(left, s16(move_area.right) - s16(getScreenWidth() - 320))
+	// Same limits as for the camera code in split screen (see "UpdateCameraPositionY" below)
+	s16 top = s16(level.vertical_wrap)
+	s16 bottom = max(top, s16(dropin.bottom2) + s16(DropIn.baseScreenH() - DropIn.viewH()))
+
+	s16 x = clamp(s16(u16[DropIn.P2 + 0x10]) - s16(getScreenWidth() / 2 - 8), left, right)
+	s16 y = clamp(s16(u16[DropIn.P2 + 0x14]) - 0x30, top, bottom)
+	camera.position.x.player2 = u32(u16(x)) << 16
+	camera.position.y.player2 = u32(u16(y)) << 16
+	camera.locktime.player2 = 0
+	dropin.camera2_initialized = true
+}
+
+
+// Runs the game's own camera logic for player 2, using the player 2 camera variables
+function void DropIn.updateCamera2()
+{
+	if (!dropin.camera2_initialized)
+		DropIn.initCamera2()
+	else
+		DropIn.updateBounds2()
+
+	if (dropin.test_mirror)
+	{
+		camera.position.x.u16.player2 = camera.position.x.u16
+		camera.position.y.u16.player2 = camera.position.y.u16
+		return
+	}
+
+	// These two globals are state of player 1's camera, so protect them
+	//  -> Player 2 gets its own camera panning (the "Extended Camera" setting of the game, which looks ahead in the running direction)
+	s16 backupOffsetX = globalCameraOffsetX
+	s16 backupPanning = currentCameraPanning
+	globalCameraOffsetX = 0
+	currentCameraPanning = dropin.panning2
+
+	// The game holds the camera for a moment after a spindash, by looking up the character's earlier positions in a history that only exists
+	// for player 1 (and for player 2 in Competition mode). Without it, the camera would jump to a random place, so this is not used for player 2.
+	camera.locktime.player2 = 0
+
+	A0 = DropIn.P2
+	A1 = 0xffffee60
+	A2 = 0xffffee1c
+	A4 = 0xffffee04
+	A5 = 0xffffee28
+	A6 = 0xffffe400
+	UpdateCameraPositionX()
+	dropin.panning2 = currentCameraPanning
+
+	A0 = DropIn.P2
+	A1 = 0xffffee64
+	A2 = 0xffffee1c
+	A4 = 0xffffee06
+	D3.u16 = camera.yoffset.tails
+	UpdateCameraPositionY()
+
+	globalCameraOffsetX = backupOffsetX
+	currentCameraPanning = backupPanning
+}
+
+
+// Camera with half-height views: the character is held higher up on the screen
+//# address-hook(0x01c11e)
+function void UpdateCameraPositionY()
+{
+	if (dropin.split_active && !dropin.test_mirror && !DropIn.net())
+	{
+		D3.u16 = DropIn.scaleCameraOffset(D3.u16)
+
+		// The level bottom limit assumes a full-height screen; let the camera go lower by the height difference,
+		// so that the lowest visible line of the level is the same as with a full screen
+		//  -> "A2" points to the camera bounds, with the bottom border at offset 6
+		u32 bottomAddress = A2 + 6
+		u16 backupBottom = u16[bottomAddress]
+		u16[bottomAddress] = backupBottom + (DropIn.baseScreenH() - DropIn.localViewHeight())
+		base.UpdateCameraPositionY()
+		u16[bottomAddress] = backupBottom
+	}
+	else
+	{
+		base.UpdateCameraPositionY()
+	}
+}
+
+
+// When the screen splits, player 1's view gets only half as high, and the camera holds player 1 higher up in it.
+// Move the camera there right away: otherwise player 1 may be out of view for a moment, while the camera scrolls there.
+function void DropIn.snapCamera1()
+{
+	if (dropin.test_mirror || player1.camera_lock != 0 || level.vertical_wrap == 0xff00)
+		return
+
+	// Same target as in "UpdateCameraPositionY", with the halved offset
+	s16 offset = s16(DropIn.scaleCameraOffset(isMainCharacter(CHARACTER_TAILS) ? camera.yoffset.tails : camera.yoffset.player))
+	s16 target = s16(u16[DropIn.P1 + 0x14]) - offset
+	if (u8[DropIn.P1 + 0x2a] & char.flag.ROLLING)
+		target -= 5
+	if (u8[DropIn.P1 + 0x2a] & char.flag.IN_AIR)
+		target = clamp(s16(camera.position.y.u16), target - 0x20, target + 0x20)
+
+	s16 top = s16(level.vertical_wrap)
+	s16 bottom = s16(move_area.bottom.current) + s16(DropIn.baseScreenH() - DropIn.localViewHeight())
+	camera.position.y.u16 = u16(clamp(target, top, max(top, bottom)))
+}
+
+
+// Player 1's position after the objects update, before any camera code ran
+//# address-hook(0x01aada)
+function void UpdateGameObjects()
+{
+	DropIn.forceNetSettings()
+	if (u8[0x8fff01] == 1)		// Developer test harness only
+		Renderer.drawText(DropIn.FONT, 4, 80, stringformat("toggles %d why %d aj %d sp %d sm %d rj %d", dropin.dbg_toggle, dropin.dbg_reason, option.dropin.debug_autojoin, option.dropin.split, option.dropin.split_mode, option.dropin.require_join), 0xffffffff, 1, 0, 0xe100, false)
+	if (DropIn.net() != dropin.was_net)
+	{
+		// Going online or coming back offline: the screen layout is different, start over
+		dropin.was_net = DropIn.net()
+		if (dropin.split_active)
+			DropIn.endSplit()
+	}
+	base.UpdateGameObjects()
+	DropIn.updateBossTracking()
+	DropIn.updateTeamwork()
+	DropIn.updateParty()
+	DropIn.updateTeamFeatures()
+	DropIn.drawTeamFeatures()
+	dropin.p1_x = u16[DropIn.P1 + 0x10]
+	dropin.p1_y = u16[DropIn.P1 + 0x14]
+}
+
+//# address-hook(0x01bfb0)
+function void UpdateCamera()
+{
+	if (DropIn.partyCount() > 2 && (!DropIn.fourViewRequested() || !DropIn.fourViewSceneSupported()))
+	{
+		if (dropin.split_active)
+			DropIn.endSplit()
+		u16 savedX = u16[DropIn.P1 + 0x10]
+		u16 savedY = u16[DropIn.P1 + 0x14]
+		s32 minX = savedX
+		s32 maxX = savedX
+		s32 minY = savedY
+		s32 maxY = savedY
+		for (u8 index = 1; index < 4; ++index)
+		{
+			u32 player = index == 1 ? DropIn.P2 : DropIn.partyPlayer(index)
+			if (player != 0 && u8[player + 5] < base_state.DIED && (index != 1 || (u8[player + 0x2e] & control_flag.DISABLE_INTERACTION) == 0) && abs(s16(u16[player + 0x10] - savedX)) < getScreenWidth() && abs(s16(u16[player + 0x14] - savedY)) < getScreenHeight())
+			{
+				minX = min(minX, u16[player + 0x10])
+				maxX = max(maxX, u16[player + 0x10])
+				minY = min(minY, u16[player + 0x14])
+				maxY = max(maxY, u16[player + 0x14])
+			}
+		}
+		if (!DropIn.bossViewActive())
+		{
+			u16[DropIn.P1 + 0x10] = (minX + maxX) / 2
+			u16[DropIn.P1 + 0x14] = (minY + maxY) / 2
+		}
+		base.UpdateCamera()
+		u16[DropIn.P1 + 0x10] = savedX
+		u16[DropIn.P1 + 0x14] = savedY
+		return
+	}
+	bool wasActive = dropin.split_active
+	DropIn.updateSplitState()
+
+	// Other mods with a shared camera (like Co-op Deluxe) move player 1's position towards player 2 while the camera updates,
+	// so that the camera shows both. In split screen, player 1's camera must follow only player 1: use player 1's real position,
+	// and put player 2 at the same spot, so that a shared camera called from here has nothing to move towards.
+	bool positionsReplaced = dropin.split_active
+	u16 backupX1 = u16[DropIn.P1 + 0x10]
+	u16 backupY1 = u16[DropIn.P1 + 0x14]
+	u16 backupX2 = u16[DropIn.P2 + 0x10]
+	u16 backupY2 = u16[DropIn.P2 + 0x14]
+	if (positionsReplaced)
+	{
+		u16[DropIn.P1 + 0x10] = dropin.p1_x
+		u16[DropIn.P1 + 0x14] = dropin.p1_y
+		u16[DropIn.P2 + 0x10] = dropin.p1_x
+		u16[DropIn.P2 + 0x14] = dropin.p1_y
+	}
+
+	if (dropin.split_active && !wasActive && !DropIn.net())
+		DropIn.snapCamera1()
+
+	base.UpdateCamera()
+
+	if (positionsReplaced)
+	{
+		u16[DropIn.P1 + 0x10] = backupX1
+		u16[DropIn.P1 + 0x14] = backupY1
+		u16[DropIn.P2 + 0x10] = backupX2
+		u16[DropIn.P2 + 0x14] = backupY2
+	}
+
+	if (dropin.split_active)
+	{
+		if (DropIn.isPlayer2Active())
+		{
+			// Back from a respawn: jump to player 2's new position right away, instead of scrolling all the way there
+			if (dropin.camera2_frozen)
+			{
+				dropin.camera2_frozen = false
+				DropIn.resetView2()
+			}
+
+			// Preserve the player 1 state that the camera code touches
+			u32 backupA0 = A0
+			DropIn.updateCamera2()
+			A0 = backupA0
+		}
+		else
+		{
+			// Player 2 is dead or respawning: the lower view stays where it is
+			dropin.camera2_frozen = true
+		}
+		if (DropIn.partyCount() > 2 && DropIn.fourViewRequested())
+			DropIn.updatePartyCameras()
+	}
+
+	if (dropin.test_cam2_valid)
+	{
+		camera.position.x.u16.player2 = dropin.test_cam2_x
+		camera.position.y.u16.player2 = dropin.test_cam2_y
+	}
+}
+
+
+// Sets up plane rects and vertical scroll offsets for the split screen; called each frame after the level display update
+function void DropIn.setupSplitScreen()
+{
+	u16 width = getScreenWidth()
+	u16 height = getScreenHeight()
+	u16 split = DropIn.lowerTop()
+
+	// Taller views: keep the larger plane and plane B's moved name table in place (the game may set its own values at any time)
+	if (dropin.big_h != 0)
+	{
+		VDP.Config.setPlayfieldSizeInPatterns(64, 64)
+		VDP.Config.setNameTableBasePlaneB(DropIn.planeBaseB())
+	}
+
+	// Zones may have set up their own plane rects for the single view (e.g. to keep the background from blurring); remove those
+	Renderer.resetCustomPlaneConfigurations()
+
+	// Line scroll offsets of the lower view, see "DropIn.prepareView2"
+	for (u16 line = 0; line < height - split; ++line)
+	{
+		u32 entry = u32[DropIn.SCRATCH_SCROLL2 + line * 4]
+		Renderer.setScrollOffsetH(3, split + line, (-s16(entry >> 16)) & 0x0fff)
+		Renderer.setScrollOffsetH(2, split + line, (-s16(entry & 0xffff)) & 0x0fff)
+	}
+
+	// Replace the default planes by one set of rects per view
+	Renderer.enableDefaultPlane(0, false)
+	Renderer.enableDefaultPlane(1, false)
+	Renderer.enableDefaultPlane(2, false)
+	Renderer.enableDefaultPlane(3, false)
+
+	// Upper view (player 1): scroll sets 0 (plane B) and 1 (plane A); there is none while playing online (player 2 gets the whole screen)
+	if (split > 0)
+	{
+		Renderer.setupPlane(0, 0, width, split, 0x00, 0, 0x1000)
+		Renderer.setupPlane(0, 0, width, split, 0x01, 1, 0x2000)
+		Renderer.setupPlane(0, 0, width, split, 0x10, 0, 0x3000)
+		Renderer.setupPlane(0, 0, width, split, 0x11, 1, 0x4000)
+	}
+
+	// Lower view (player 2): scroll sets 2 (plane B) and 3 (plane A)
+	Renderer.setupPlane(0, split, width, height - split, 0x00, 2, 0x1000)
+	Renderer.setupPlane(0, split, width, height - split, 0x01, 3, 0x2000)
+	Renderer.setupPlane(0, split, width, height - split, 0x10, 2, 0x3000)
+	Renderer.setupPlane(0, split, width, height - split, 0x11, 3, 0x4000)
+
+	// Vertical scroll offsets (one per 16 pixel column), each pointing to the start of the view's band
+	//  -> Horizontal scroll offsets: the upper view uses the game's own ones, the lower view's got set in "DropIn.prepareView2"
+	u16 band2 = (split == 0) ? 0 : DropIn.bandRows() * 16			// Online, the lower view is the only one and uses the first band
+	for (u8 column = 0; column < 0x20; ++column)
+	{
+		Renderer.setScrollOffsetV(0, column, camera.background.y.u16 & 0x0f)					// Plane B, band 0
+		Renderer.setScrollOffsetV(1, column, camera.foreground.y.u16 & 0x0f)					// Plane A, band 0
+		Renderer.setScrollOffsetV(2, column, band2 - split + (dropin.view2.bg_y & 0x0f))		// Plane B, band of the lower view
+		Renderer.setScrollOffsetV(3, column, band2 - split + (dropin.view2.fg_y & 0x0f))		// Plane A, band of the lower view
+	}
+}
+
+
+//# address-hook(0x04e408)
+function void UpdateLevelDisplay()
+{
+	// Lower view first: this runs the zone's scrolling code with player 2's camera, the regular update below then does the same for player 1
+	bool fourViews = dropin.split_active && DropIn.partyCount() > 2 && DropIn.fourViewRequested()
+	DropIn.applyViewSize()
+
+	// The game's line scroll table (0xffffe000) has room for 224 lines; the data right behind it (list of dynamic objects at 0xffffe380,
+	// the position history of player 1 at 0xffffe500) must stay as it is. Zones that write one scroll offset per screen line would
+	// overwrite it while the screen is taller, so keep a copy and put it back after the scrolling code ran.
+	bool guardMemory = dropin.big_h != 0
+	if (guardMemory)
+		copyMemory(DropIn.SCRATCH_GUARD, 0xffffe380, 0x280)
+
+	if (dropin.split_active && !fourViews)
+		DropIn.prepareView2()
+
+	base.UpdateLevelDisplay()
+
+	if (guardMemory)
+		copyMemory(0xffffe380, DropIn.SCRATCH_GUARD, 0x280)
+
+	// The regular display update can rewrite rows in the shared name tables. Rebuild
+	// every independent band afterward so all four camera views survive that pass.
+	if (dropin.split_active && fourViews)
+	{
+		u16 viewHeight = getScreenHeight() / 2
+		// Each extra-view scrolling pass overwrites the shared engine buffer.
+		// Preserve P1/P2 before calculating P3/P4 so every viewport keeps its
+		// own line-scroll data for the final render.
+		copyMemory(DropIn.PARTY_SCROLL1, 0xffffe000, viewHeight * 4)
+		DropIn.prepareView2()
+		copyMemory(DropIn.PARTY_SCROLL2, DropIn.SCRATCH_SCROLL2, viewHeight * 4)
+		DropIn.preparePartyExtraView(2)
+		DropIn.preparePartyExtraView(3)
+	}
+
+	// The level display update may have just started something the split screen does not support (e.g. the fire in AIZ 1)
+	if (dropin.split_active && !DropIn.isScrollingSupported())
+		DropIn.endSplit()
+
+	// Online, the host keeps seeing the regular single view (the planes are not touched at all), only the friend sees player 2's view
+	if (dropin.split_active && DropIn.role() != 1)
+	{
+		if (!DropIn.net())
+		{
+			if (fourViews)
+				copyMemory(0xffffe000, DropIn.PARTY_SCROLL1, (getScreenHeight() / 2) * 4)
+			DropIn.prepareView1()
+		}
+		if (DropIn.partyCount() > 2 && DropIn.fourViewRequested())
+			DropIn.setupFourViewPlanes()
+		else
+			DropIn.setupSplitScreen()
+		if (option.dropin.debug_autojoin >= 2)
+			DropIn.drawDebugOverlay()
+		if (option.dropin.debug_autojoin >= 2)
+			DropIn.drawDebugOverlay2()
+		dropin.split_was_active = true
+	}
+	else if (dropin.split_was_active)
+	{
+		dropin.split_was_active = false
+		DropIn.restoreSingleViewPlanes()
+	}
+
+	if (!dropin.split_active && option.dropin.debug_autojoin >= 2)
+		DropIn.drawStateOverlay()
+}
+
+
+// Developer overlay (enabled by "Developer: Join Automatically" = 2)
+function void DropIn.drawDebugOverlay()
+{
+	string text = stringformat("C1 %04x,%04x  P1 %04x,%04x", camera.position.x.u16, camera.position.y.u16, u16[DropIn.P1 + 0x10], u16[DropIn.P1 + 0x14])
+	Renderer.drawText(DropIn.FONT, 4, 84, text, 0xffff80ff, 1, 0, 0xe100, false)
+	text = stringformat("C2 %04x,%04x  P2 %04x,%04x  B %04x/%04x", camera.position.x.u16.player2, camera.position.y.u16.player2, u16[DropIn.P2 + 0x10], u16[DropIn.P2 + 0x14], move_area.bottom.current, dropin.bottom2)
+	Renderer.drawText(DropIn.FONT, 4, 94, text, 0x80ffffff, 1, 0, 0xe100, false)
+}
+
+
+// Hide the small "ghost" that shows where player 2 is when he is off screen, as long as player 2 has joined (it comes back when he leaves)
+function bool Standalone.drawCharacterSprite(u8 character, u8 variant, s16 px, s16 py, bool asSmallGhost)
+{
+	if (asSmallGhost && dropin.joined)
+		return true
+	return base.Standalone.drawCharacterSprite(character, variant, px, py, asSmallGhost)
+}
+
+function void DropIn.drawDebugOverlay2()
+{
+	string text = stringformat("water %04x  line %d  swap %d  full %d", water.height.current, h_int.line, dropin.water_swap, water.fullscreen)
+	Renderer.drawText(DropIn.FONT, 4, 104, text, 0xffffffff, 1, 0, 0xe100, false)
+}
+
+function void DropIn.drawStateOverlay()
+{
+	string text = stringformat("joined %d split %d why %d ai %02x st %02x/%02x cam %04x z %04x", dropin.joined, dropin.split_active, dropin.dbg_reason, tails.ai_routine, u8[DropIn.P1 + 0x05], u8[DropIn.P2 + 0x05], camera.position.x.u16, global.zone_act)
+	Renderer.drawText(DropIn.FONT, 4, 60, text, 0xffffffff, 1, 0, 0xe100, false)
+}
+
+
+
+
+

@@ -1,0 +1,513 @@
+//# script-feature-level(2)
+
+global u8 option.dropin.rescue
+global u8 option.dropin.checkpoints
+global u8 option.dropin.regroup
+global u8 option.dropin.team_moves
+global u16 dropin.rescue_hold1
+global u16 dropin.rescue_hold2
+global u16 dropin.rescue_cooldown
+global bool dropin.team_boss
+global u16 dropin.regroup_pending
+global bool dropin.team_checkpoint_valid
+global u16 dropin.team_checkpoint_zone
+global u8 dropin.team_checkpoint_number
+global u16 dropin.team_checkpoint_x
+global u16 dropin.team_checkpoint_y
+global u16 dropin.team_checkpoint_layer
+global u16 dropin.team_checkpoint_sprite
+global u8 dropin.team_checkpoint_height
+global bool dropin.team_checkpoint_gravity
+global u8 dropin.team_checkpoint_profile
+global u32 dropin.checkpoint_activator
+global u16 dropin.team_combo
+global u16 dropin.team_combo_timer
+global u16 dropin.team_card_timer
+global u8 dropin.team_card
+global u8 dropin.team_rescues
+global u8 dropin.team_launches
+global u8 dropin.team_insurance_saves
+global u8 dropin.team_insurance_charges
+global u16 dropin.team_insurance_progress
+global u16 dropin.team_last_rings
+global u16 dropin.team_launch_cooldown
+global bool dropin.team_was_boss
+global bool dropin.team_was_results
+global u16 dropin.team_boss_pose_timer
+global u8 dropin.team_pose_mask
+global u16 dropin.team_feature_zone
+global u8 dropin.team_boss_mask
+global u16 dropin.team_boss_window
+global u8 dropin.team_boss_phases
+
+function bool DropIn.spendTeamInsurance()
+{
+	if (option.dropin.team_features == 0 || dropin.team_insurance_charges == 0)
+		return false
+	--dropin.team_insurance_charges
+	++dropin.team_insurance_saves
+	DropIn.addTeamCombo(20)
+	return true
+}
+
+function void DropIn.addTeamCombo(u16 amount)
+{
+	if (option.dropin.team_features == 0)
+		return
+	dropin.team_combo = min(dropin.team_combo + amount, 999)
+	dropin.team_combo_timer = 300
+	dropin.team_card = 1
+	dropin.team_card_timer = 100
+}
+
+function u32 DropIn.teamPlayer(u8 index)
+{
+	if (index == 0)
+		return DropIn.P1
+	if (index == 1)
+		return dropin.joined ? DropIn.P2 : 0
+	return DropIn.partyPlayer(index)
+}
+
+function u16 DropIn.teamRingsTotal()
+{
+	u32 total = ring_counter
+	if (dropin.joined && (DropIn.ownRings() || DropIn.hasSeparateRings()))
+		total += ring_counter.player2
+	for (u8 index = 2; index < 4; ++index)
+		if (DropIn.partyPlayer(index) != 0)
+			total += DropIn.partyRings(index)
+	return min(total, 65535)
+}
+
+function void DropIn.updateTeamFeatures()
+{
+	if (option.dropin.team_features == 0 || !DropIn.isActiveContext() || (!dropin.joined && DropIn.partyCount() <= 2))
+		return
+	if (dropin.team_feature_zone != global.zone_act)
+	{
+		dropin.team_feature_zone = global.zone_act
+		dropin.team_rescues = 0
+		dropin.team_launches = 0
+		dropin.team_insurance_saves = 0
+		dropin.team_boss_phases = 0
+		dropin.team_combo = 0
+		dropin.team_combo_timer = 0
+		dropin.team_card_timer = 0
+		dropin.team_was_results = level.results_done != 0
+		dropin.team_was_boss = DropIn.bossViewActive()
+	}
+	if (dropin.team_launch_cooldown > 0)
+		--dropin.team_launch_cooldown
+	if (dropin.team_boss_window > 0)
+	{
+		--dropin.team_boss_window
+		if (dropin.team_boss_window == 0)
+			dropin.team_boss_mask = 0
+	}
+	if (dropin.team_combo_timer > 0)
+	{
+		--dropin.team_combo_timer
+		if (dropin.team_combo_timer == 0)
+			dropin.team_combo = 0
+	}
+	if (dropin.team_card_timer > 0)
+		--dropin.team_card_timer
+	if (dropin.team_boss_pose_timer > 0)
+	{
+		--dropin.team_boss_pose_timer
+		if (dropin.team_boss_pose_timer == 0)
+		{
+			// Release every player that was frozen for the pose. The freeze is lifted even if the game moved the player out of the win
+			// pose meanwhile (otherwise that player would stay frozen), but only while the flags still are exactly the ones set here.
+			for (u8 index = 0; index < 4; ++index)
+			{
+				u32 player = DropIn.teamPlayer(index)
+				if (player == 0 || (dropin.team_pose_mask & u8(1 << index)) == 0)
+					continue
+				if (u8[player + 5] < base_state.DIED && u8[player + 0x20] == char.state.WIN_POSE)
+					u8[player + 0x20] = char.state.STANDING
+				if (u8[player + 0x2e] == (control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE))
+					u8[player + 0x2e] = 0
+			}
+			dropin.team_pose_mask = 0
+		}
+	}
+
+	// Earn one shared insurance charge for each 50 rings collected; cap the reserve at three.
+	u16 currentRings = DropIn.teamRingsTotal()
+	if (currentRings > dropin.team_last_rings)
+	{
+		dropin.team_insurance_progress += currentRings - dropin.team_last_rings
+		while (dropin.team_insurance_progress >= 50)
+		{
+			dropin.team_insurance_progress -= 50
+			dropin.team_insurance_charges = min(dropin.team_insurance_charges + 1, 3)
+		}
+	}
+	dropin.team_last_rings = currentRings
+
+	bool bossNow = DropIn.bossViewActive()
+	if (dropin.team_was_boss && !bossNow && global.level_started > 0)
+	{
+		dropin.team_boss_pose_timer = 90
+		dropin.team_card = 2
+		dropin.team_card_timer = 180
+		for (u8 index = 0; index < 4; ++index)
+		{
+			u32 player = DropIn.teamPlayer(index)
+			if (player != 0 && u8[player + 5] < base_state.DIED)
+			{
+				dropin.team_pose_mask |= u8(1 << index)
+				u8[player + 0x20] = char.state.WIN_POSE
+				u16[player + 0x18] = 0
+				u16[player + 0x1a] = 0
+				u16[player + 0x1c] = 0
+				u8[player + 0x2e] = control_flag.DISABLE_INTERACTION | control_flag.DISABLE_UPDATE
+			}
+		}
+	}
+	dropin.team_was_boss = bossNow
+
+	if (!dropin.team_was_results && level.results_done != 0 && global.level_started > 0)
+	{
+		dropin.team_card = (dropin.team_rescues >= 3) ? 3 : (dropin.team_launches >= 3) ? 4 : (dropin.team_insurance_saves > 0) ? 5 : (dropin.team_boss_phases > 0) ? 10 : (currentRings <= 5) ? 6 : 7
+		dropin.team_card_timer = 240
+	}
+	dropin.team_was_results = level.results_done != 0
+}
+
+function void DropIn.drawTeamFeatures()
+{
+	if (option.dropin.team_features == 0 || (!dropin.joined && DropIn.partyCount() <= 2) || debug_mode.state)
+		return
+	Renderer.setSpriteTagWithPosition(1, 0, 0)
+	Renderer.setLogicalSpriteSpace(Space.SCREEN)
+	s16 centerX = getScreenWidth() / 2
+	if (dropin.team_combo > 0 && dropin.team_combo_timer > 0)
+		Renderer.drawText(DropIn.FONT, centerX, 28, stringformat("TEAM COMBO x%d", dropin.team_combo), 0x80ffffff, 5, 0, 0xee00, false)
+	if (dropin.team_insurance_charges > 0)
+		Renderer.drawText(DropIn.FONT, centerX, 40, stringformat("RING INSURANCE x%d", dropin.team_insurance_charges), 0x80ffffff, 5, 0, 0xee01, false)
+	if (dropin.team_card_timer > 0)
+	{
+		string card = dropin.team_card == 1 ? "TEAM COMBO!" : dropin.team_card == 2 ? "BOSS TEAM VICTORY!" : dropin.team_card == 3 ? "RESCUE SQUAD!" : dropin.team_card == 4 ? "BUDDY LAUNCH CREW!" : dropin.team_card == 5 ? "RING INSURANCE SAVED YOU!" : dropin.team_card == 6 ? "ACT BLOOPER: RINGS? WHAT RINGS?" : dropin.team_card == 8 ? "TEAM POWER UP!" : dropin.team_card == 9 ? "TEAM BOSS PHASE!" : dropin.team_card == 10 ? "BOSS BUDDIES AWARD!" : "TEAMWORK AWARD!"
+		s16 cardY = dropin.split_active ? 54 : getScreenHeight() / 2 - 8
+		Renderer.drawText(DropIn.FONT, centerX, cardY, card, 0xffffd060, 5, 0, 0xee10, false)
+	}
+	Renderer.clearSpriteTag()
+	Renderer.setLogicalSpriteSpace(Space.WORLD)
+}
+
+// A rescue uses a real character on ordinary terrain, never a moving platform,
+// scripted attachment, death animation or airborne position.
+function bool DropIn.safeAnchor(u32 player)
+{
+	return u32[player] != 0 && u8[player + 5] == base_state.NORMAL && u8[player + 0x2e] == 0 && u8[player + 0x2d] == 0 && (u8[player + 0x2a] & (char.flag.IN_AIR | char.flag.ON_OBJECT | char.flag.ROLLING)) == 0 && u8[player + 0x26] == 0 && s16[player + 0x1a] == 0
+}
+
+function u16 DropIn.alignedPlayerY(u32 player, u16 py, u8 anchorHeight)
+{
+	s16 height = u8[player + 0x38] == CHARACTER_TAILS ? char.hitbox.y.UPRIGHT_TAILS : char.hitbox.y.UPRIGHT
+	s16 delta = s16(anchorHeight) - height
+	return py + (global.inv_gravity ? -delta : delta)
+}
+
+function void DropIn.placePlayer(u32 player, u16 px, u16 py, u16 layer, u16 sprite)
+{
+	pushAll()
+	A0 = player
+	char.base_state = base_state.NORMAL
+	char.position.x = u32(px) << 16
+	char.position.y = u32(py) << 16
+	char.velocity.x = 0
+	char.velocity.y = 0
+	char.groundspeed = 0
+	char.control_flags = 0
+	char.flags2d = 0
+	char.flags = char.flag.IN_AIR
+	char.rotation.both = 0
+	char.object_standing_on = 0
+	char.state = char.state.STANDING
+	char.hitbox_extends.x = char.hitbox.x.UPRIGHT
+	char.hitbox_extends.y = char.character == CHARACTER_TAILS ? char.hitbox.y.UPRIGHT_TAILS : char.hitbox.y.UPRIGHT
+	char.hlock_countdown = 0
+	char.spindash = 0
+	char.spindash_charge = 0
+	char.jumping = 0
+	char.double_jump_state = 0
+	char.layer_flags = layer
+	// Keep the receiving character's graphics; copy only the scene priority bit.
+	char.sprite_attributes = (char.sprite_attributes & ~sprite_attribute.PRIORITY) | (sprite & sprite_attribute.PRIORITY)
+	char.invuln.countdown = 60
+	char.drown_countdown = 30
+	// A rescue can leave water without the usual surface-crossing update.
+	setSpeedCapProperties(player == DropIn.P2 ? addressof(global.move.speedcap.tails) : addressof(global.move.speedcap))
+	if (player == DropIn.P2)
+	{
+		tails.ai_routine = 0x06
+		tails.respawn_counter = 0
+		player2.camera_lock = 0
+		camera.locktime.player2 = 0
+		dropin.camera2_initialized = false
+	}
+	else
+		player1.camera_lock = 0
+	popAll()
+}
+
+function bool DropIn.rescuePlayer(u32 player, u32 partner)
+{
+	if (!DropIn.isActiveContext() || !dropin.joined || !DropIn.safeAnchor(partner) || u8[player + 5] != base_state.NORMAL || u8[player + 0x2e] != 0 || tails.carrying || player1.control_override || player2.control_override)
+		return false
+	DropIn.placePlayer(player, u16[partner + 0x10], DropIn.alignedPlayerY(player, u16[partner + 0x14], u8[partner + 0x1e]), u16[partner + 0x46], u16[partner + 0x0a])
+	if (option.dropin.team_features)
+	{
+		pushAll()
+		A0 = player
+		char.velocity.y = -0x500
+		char.flags |= char.flag.IN_AIR
+		popAll()
+		++dropin.team_rescues
+		DropIn.addTeamCombo(10)
+	}
+	return true
+}
+
+function bool DropIn.partnerOutsideBossView()
+{
+	s32 dx = s16(u16[DropIn.P2 + 0x10] - camera.position.x.u16)
+	s32 dy = s16(u16[DropIn.P2 + 0x14] - camera.position.y.u16)
+	return dx < 16 || dx > getScreenWidth() - 16 || dy < 0 || dy > getScreenHeight() - 24 || u16[DropIn.P1 + 0x46] != u16[DropIn.P2 + 0x46]
+}
+
+function bool InitBoss(u32 returnAddress, bool useScreenExtend)
+{
+	bool waiting = base.InitBoss(returnAddress, useScreenExtend)
+	// Once the original arena bounds accept entry, regroup before the caller's
+	// remaining boss initialization runs. Custom bosses also use the frame hook.
+	if (!waiting && option.dropin.regroup && DropIn.isActiveContext() && dropin.joined && DropIn.partnerOutsideBossView())
+		DropIn.rescuePlayer(DropIn.P2, DropIn.P1)
+	return waiting
+}
+
+function void DropIn.updateTeamwork()
+{
+	u16 input1 = Input.getController(0)
+	u16 input2 = Input.getController(1)
+	u16 pressed = (input1 & ~Input.getControllerPrevious(0)) | (input2 & ~Input.getControllerPrevious(1))
+	DropIn.updateTeamworkInputs(input1, input2, pressed)
+}
+
+function u16 DropIn.teamMoveInput(u8 character)
+{
+	return character == CHARACTER_KNUCKLES ? (CONTROL_DOWN | CONTROL_X) : character == CHARACTER_SONIC ? (CONTROL_RIGHT | CONTROL_X) : (CONTROL_UP | CONTROL_X)
+}
+
+function bool DropIn.teamMovePressed(u16 pad, u16 previous, u16 required)
+{
+	return (pad & required) == required && (previous & required) != required
+}
+
+function s16 DropIn.teamMoveSpeedY(u8 character)
+{
+	return (character == CHARACTER_KNUCKLES || character == CHARACTER_TAILS) ? -0x900 : -0x500
+}
+
+function s16 DropIn.teamMoveSpeedX(u8 character, bool facingLeft)
+{
+	return character == CHARACTER_SONIC ? (facingLeft ? -0x600 : 0x600) : character == CHARACTER_KNUCKLES ? (facingLeft ? -0x300 : 0x300) : 0
+}
+
+function bool DropIn.launchTeamPlayer(u32 sourcePlayer, u32 targetPlayer, u8 sourceCharacter)
+{
+	if (sourcePlayer == 0 || targetPlayer == 0 || sourcePlayer == targetPlayer || !DropIn.safeAnchor(targetPlayer) || abs(s16(u16[sourcePlayer + 0x10] - u16[targetPlayer + 0x10])) > 36 || abs(s16(u16[sourcePlayer + 0x14] - u16[targetPlayer + 0x14])) > 40)
+		return false
+	pushAll()
+	A0 = targetPlayer
+	bool facingLeft = (u8[sourcePlayer + 0x2a] & char.flag.FACING_LEFT) != 0
+	char.velocity.y = DropIn.teamMoveSpeedY(sourceCharacter)
+	char.velocity.x = DropIn.teamMoveSpeedX(sourceCharacter, facingLeft)
+	char.flags |= char.flag.IN_AIR
+	char.groundspeed = 0
+	popAll()
+	dropin.team_launch_cooldown = 45
+	++dropin.team_launches
+	DropIn.addTeamCombo(15)
+	return true
+}
+
+function void DropIn.updateTeamworkInputs(u16 input1, u16 input2, u16 pressed)
+{
+	if (!DropIn.isActiveContext() || (!dropin.joined && DropIn.partyCount() <= 2) || debug_mode.state != 0 || global.level_started <= 0)
+	{
+		dropin.rescue_hold1 = 0
+		dropin.rescue_hold2 = 0
+		dropin.team_boss = false
+		dropin.regroup_pending = 0
+		return
+	}
+	bool boss = DropIn.bossViewActive()
+	if (dropin.joined && option.dropin.regroup && boss && !dropin.team_boss)
+		dropin.regroup_pending = 180
+	if (!dropin.joined || !boss || !option.dropin.regroup)
+		dropin.regroup_pending = 0
+	if (dropin.regroup_pending > 0)
+	{
+		--dropin.regroup_pending
+		if (!DropIn.partnerOutsideBossView() || DropIn.rescuePlayer(DropIn.P2, DropIn.P1))
+			dropin.regroup_pending = 0
+	}
+	dropin.team_boss = boss
+	if (option.dropin.team_features && option.dropin.team_moves && dropin.team_launch_cooldown == 0)
+	{
+		for (u8 source = 0; source < 4; ++source)
+		{
+			u32 sourcePlayer = DropIn.teamPlayer(source)
+			if (sourcePlayer == 0)
+				continue
+			u16 pad = Input.getController(source)
+			u16 previous = Input.getControllerPrevious(source)
+			u8 sourceCharacter = u8[sourcePlayer + 0x38]
+			if (sourceCharacter == CHARACTER_TAILS && source == 1)
+				continue // The main Tails slot uses the existing carry/release move instead.
+			u16 moveInput = DropIn.teamMoveInput(sourceCharacter)
+			if (!DropIn.teamMovePressed(pad, previous, moveInput))
+				continue
+			for (u8 target = 0; target < 4; ++target)
+			{
+				u32 targetPlayer = DropIn.teamPlayer(target)
+				if (target == source)
+					continue
+				if (DropIn.launchTeamPlayer(sourcePlayer, targetPlayer, sourceCharacter))
+					break
+			}
+			if (dropin.team_launch_cooldown != 0)
+				break
+		}
+	}
+	if (dropin.rescue_cooldown > 0)
+		--dropin.rescue_cooldown
+	bool allowed = dropin.joined && option.dropin.rescue != 0 && !boss && dropin.rescue_cooldown == 0
+	dropin.rescue_hold1 = allowed && (input1 & (CONTROL_DOWN | CONTROL_Y)) == (CONTROL_DOWN | CONTROL_Y) ? min(dropin.rescue_hold1 + 1, 120) : 0
+	dropin.rescue_hold2 = allowed && (input2 & (CONTROL_DOWN | CONTROL_Y)) == (CONTROL_DOWN | CONTROL_Y) ? min(dropin.rescue_hold2 + 1, 120) : 0
+	if (dropin.rescue_hold1 == 120 && DropIn.rescuePlayer(DropIn.P1, DropIn.P2))
+		dropin.rescue_cooldown = 300
+	else if (dropin.rescue_hold2 == 120 && DropIn.rescuePlayer(DropIn.P2, DropIn.P1))
+		dropin.rescue_cooldown = 300
+	if (dropin.joined && option.dropin.team_moves && tails.carrying && (pressed & CONTROL_X))
+	{
+		pushAll()
+		A0 = DropIn.P2
+		Tails.CheckDropSonic()
+		tails.catch_timeout = 60
+		popAll()
+	}
+}
+
+// Retain the game's carry collision checks and flight stamina. Hold Up as Sonic
+// beneath a flying Tails to request a grab; either player can press X to release.
+//# address-hook(0x014534)
+function void Tails.CheckCatchSonic()
+{
+	if (DropIn.isActiveContext() && dropin.joined)
+	{
+		if (!option.dropin.team_moves || (control.pad1.state & CONTROL_UP) == 0)
+			return
+	}
+	base.Tails.CheckCatchSonic()
+}
+
+// The original checkpoint routine already supports an arbitrary character at A3.
+//# address-hook(0x02d012)
+function void fn02d012()
+{
+	base.fn02d012()
+	if (option.dropin.checkpoints && DropIn.isActiveContext() && dropin.joined && debug_mode.state == 0 && u32[A0] == addressof(Checkpoint.BaseUpdate) && objA0.base_state == 0x02 && u8[DropIn.P2 + 5] == base_state.NORMAL && u8[DropIn.P2 + 0x2e] == 0)
+	{
+		pushAll()
+		A3 = DropIn.P2
+		D1.u8 = checkpoint.number
+		fn02d028()
+		popAll()
+	}
+	if (option.dropin.checkpoints && DropIn.isActiveContext() && dropin.joined && u32[A0] == addressof(Checkpoint.BaseUpdate) && objA0.base_state == 0x02)
+	{
+		pushAll()
+		for (u8 index = 2; index < 4; ++index)
+		{
+			u32 player = DropIn.partyPlayer(index)
+			if (player != 0 && u8[player + 5] == base_state.NORMAL && u8[player + 0x2e] == 0)
+			{
+				A3 = player
+				D1.u8 = checkpoint.number
+				fn02d028()
+			}
+		}
+		popAll()
+	}
+}
+
+//# address-hook(0x02d164)
+function void fn02d164()
+{
+	dropin.checkpoint_activator = A3
+	u16 oldX = camera.position.x.u16
+	u16 oldY = camera.position.y.u16
+	if (option.dropin.checkpoints && A3 == DropIn.P2 && DropIn.isActiveContext() && dropin.joined)
+	{
+		camera.position.x.u16 = camera.position.x.u16.player2
+		camera.position.y.u16 = camera.position.y.u16.player2
+	}
+	base.fn02d164()
+	camera.position.x.u16 = oldX
+	camera.position.y.u16 = oldY
+	if (option.dropin.checkpoints && DropIn.isActiveContext() && dropin.joined)
+	{
+		u32 player = dropin.checkpoint_activator
+		dropin.team_checkpoint_valid = DropIn.safeAnchor(player)
+		dropin.team_checkpoint_zone = global.zone_act
+		dropin.team_checkpoint_number = checkpoint.number
+		dropin.team_checkpoint_x = u16[player + 0x10]
+		dropin.team_checkpoint_y = u16[player + 0x14]
+		dropin.team_checkpoint_layer = u16[player + 0x46]
+		dropin.team_checkpoint_sprite = u16[player + 0x0a]
+		dropin.team_checkpoint_height = u8[player + 0x1e]
+		dropin.team_checkpoint_gravity = global.inv_gravity != 0
+		dropin.team_checkpoint_profile = DropIn.getScrollProfile()
+		checkpoint.layer_flags = u16[player + 0x46]
+		checkpoint.sprite_attr = u16[player + 0x0a]
+	}
+	dropin.checkpoint_activator = 0
+}
+
+function bool DropIn.canCheckpointRespawn()
+{
+	return option.dropin.checkpoints && DropIn.isActiveContext() && dropin.joined && dropin.team_checkpoint_valid && dropin.team_checkpoint_zone == global.zone_act && dropin.team_checkpoint_number == checkpoint.number && dropin.team_checkpoint_gravity == (global.inv_gravity != 0) && dropin.team_checkpoint_profile == DropIn.getScrollProfile() && !DropIn.bossViewActive() && !Game.isTimeAttack() && global.time_over == 0 && player1.control_override == 0 && player2.control_override == 0
+}
+
+//# address-hook(0x0123c2)
+function void Character.CheckDiedStateEnd()
+{
+	if (DropIn.partyIndex(A0) != 0)
+		return
+	// Only intercept the same off-screen boundary at which vanilla commits death.
+	bool offscreen = global.inv_gravity ? s16(char.position.y.u16) <= s16(camera.position.y.u16 - 0x10) : s16(char.position.y.u16) > s16(camera.position.y.u16 + 0x100)
+	u32 partner = A0 == DropIn.P1 ? DropIn.P2 : DropIn.P1
+	if ((A0 == DropIn.P1 || A0 == DropIn.P2) && offscreen && DropIn.canCheckpointRespawn() && u8[partner + 5] < base_state.DIED && (A0 == DropIn.P2 || lives_counter > 1 || Game.getSetting(SETTING_INFINITE_LIVES)))
+	{
+		if (!Game.onCharacterDied(A0 == DropIn.P1 ? 0 : 1))
+			return
+		if (A0 == DropIn.P1)
+		{
+			if (!Game.getSetting(SETTING_INFINITE_LIVES))
+				--lives_counter
+			++hud.dirty.lives
+			ring_counter = 0
+		}
+		else
+			ring_counter.player2 = 0
+		DropIn.placePlayer(A0, dropin.team_checkpoint_x, DropIn.alignedPlayerY(A0, dropin.team_checkpoint_y, dropin.team_checkpoint_height), dropin.team_checkpoint_layer, dropin.team_checkpoint_sprite)
+		return
+	}
+	base.Character.CheckDiedStateEnd()
+}

@@ -1,0 +1,152 @@
+//# script-feature-level(2)
+include queuechecks
+include teamchecks
+constant bool Checks.THREE_PLAYER_PROBE = false
+
+// Automated checks for Drop-In Co-op, run by checks/run_checks.ps1. Each check writes "CHECK|name|PASS-or-FAIL|detail" to the log file.
+// Not part of the release: this mod is only active while the check run is going on.
+
+global u32 checks.frame
+global u8 checks.introCamera
+global u8 checks.introTails
+global u16 checks.p1xStart
+global u32 checks.scoreP1
+global u32 checks.scoreP2
+global bool checks.done
+global u8 checks.p2State
+global u8 checks.p2Invuln
+global u8 checks.p2Protection
+
+function void scriptMainEntryPoint()
+{
+	global.zone_act = 0x0000
+	levelselect.characters = 0
+	System.setupCallFrame("EntryFunctions.actSelect")
+}
+
+function void UpdateGameObjects()
+{
+	if (global.game_mode == 0x0c && !checks.done)
+	{
+		++checks.frame
+
+		// The game applies the mod settings only when a game is started from the menu, and the checks start the level directly.
+		// So the checks set the defaults of the release package themselves (split screen on, player 2 can be hurt, join by the button)
+		if (checks.frame == 1)
+		{
+			Checks.testEmptyPlaneQueue()
+			option.dropin.split = 1
+			option.dropin.split_mode = 0
+			option.dropin.view_size = 1
+			option.dropin.p2_hurt = 1
+			option.dropin.require_join = 1
+			option.dropin.idle_seconds = 0
+			option.dropin.debug_autojoin = 0
+			option.dropin.hints = 1
+			option.dropin.leave_hold = 60
+		}
+
+		// Frame 150: the state at the start of Angel Island 1, before player 2 asks to join (nobody moves in this test)
+		if (checks.frame == 150)
+		{
+			checks.introCamera = camera.update_routine
+			checks.introTails = tails.ai_routine
+		}
+
+		// Frame 200: player 2 presses Start, the normal join button. Sonic has not moved yet.
+		if (checks.frame == 200)
+		{
+			checks.p1xStart = u16[DropIn.P1 + 0x10]
+			control.pad2.pressed |= CONTROL_START
+		}
+
+		// Frame 260: player 2 joined right at the start of the level, and Tails is no longer under the CPU's control
+		if (checks.frame == 260)
+		{
+			bool preconditionOk = (checks.introCamera < 0x04)
+			bool joined = dropin.joined
+			bool tailsActive = (tails.ai_routine != 0x0a)
+			string detail = stringformat("before: camera routine %d, Tails routine %02x; after: joined %d, Tails routine %02x, level started %d, Sonic control %02x", checks.introCamera, checks.introTails, joined, tails.ai_routine, global.level_started, player1.control_override)
+			Checks.report("aiz start join", (preconditionOk && joined && tailsActive), detail)
+		}
+
+		// Frame 280: score. Points for player 2 must not change player 1's score, and the other way round
+		if (checks.frame == 280)
+		{
+			checks.scoreP1 = player.score
+			checks.scoreP2 = player2.score
+			A0 = DropIn.P2
+			addScore(50)
+			A0 = DropIn.P1
+		}
+		if (checks.frame == 282)
+		{
+			bool separate = (player.score == checks.scoreP1) && (player2.score == checks.scoreP2 + 50)
+			string detail = stringformat("player 1 %d -> %d, player 2 %d -> %d", checks.scoreP1, player.score, checks.scoreP2, player2.score)
+			Checks.report("score separate per player", separate, detail)
+		}
+
+		// Frame 360: the small "ghost" that shows where player 2 is is hidden while player 2 is playing
+		if (checks.frame == 360)
+		{
+			bool hidden = Standalone.drawCharacterSprite(CHARACTER_TAILS, 0, 0, 0, true)
+			Checks.report("off screen ghost hidden while joined", (dropin.joined && hidden), stringformat("joined %d, hidden %d", dropin.joined, hidden))
+		}
+
+		// Frame 620: own view from the start. The camera must still be in the intro, and the screen must be split for both players
+		if (checks.frame == 620)
+		{
+			if (Checks.THREE_PLAYER_PROBE)
+			{
+				bool sonic = u32[DropIn.P1] == addressof(Character.BaseUpdate.Sonic) && u8[DropIn.P1 + 0x38] == CHARACTER_SONIC && u8[DropIn.P1 + 5] == base_state.NORMAL
+				bool tails = dropin.joined && u32[DropIn.P2] == addressof(Character.BaseUpdate.Tails) && u8[DropIn.P2 + 0x38] == CHARACTER_TAILS && tails.ai_routine == 0x06
+				u16 knucklesCount = 0
+				for (u32 object = 0xffffb000; object < 0xffffcc00; object += 0x4a)
+					if (u32[object] == addressof(Character.BaseUpdate.Knuckles) && u8[object + 0x38] == CHARACTER_KNUCKLES && u8[object + 5] == base_state.NORMAL)
+						++knucklesCount
+				Checks.report("three player Sonic", sonic, "Player 1 is a live Sonic character")
+				Checks.report("three player Tails", tails, "Player 2 is a joined Tails in normal control")
+				Checks.report("three player Knuckles", sonic && tails && knucklesCount == 1, stringformat("Playable Knuckles objects alongside Sonic and Tails: %d", knucklesCount))
+			}
+			bool stillInIntro = (camera.update_routine < 0x04)
+			bool split = dropin.split_active
+			string detail = stringformat("still in intro %d, split %d, split possible %d, Tails routine %02x, Tails base state %02x, split reason %d", stillInIntro, split, DropIn.splitPossible(), tails.ai_routine, u8[DropIn.P2 + 0x05], dropin.dbg_reason)
+			Checks.report("own view from the start", (stillInIntro && split), detail)
+		}
+
+		// Frame 640: rings. Player 2 gets hurt: only player 2's rings may be lost. This runs after the own view check (frame 620), because a hurt
+		// during the intro makes player 2 fall and die, and a dead player 2 cannot have a split screen
+		if (checks.frame == 640)
+		{
+			ring_counter = 40
+			ring_counter.player2 = 25
+			A0 = DropIn.P2
+			char.invuln.countdown = 0
+			char.bonus_effect = 0
+			A2 = DropIn.P1
+			Character.GettingHurt()
+		}
+		if (checks.frame == 641)
+		{
+			A0 = DropIn.P2
+			checks.p2State = char.state
+			checks.p2Invuln = char.invuln.countdown
+			checks.p2Protection = char.protection_flag
+		}
+		if (checks.frame == 665)
+		{
+			// Player 1 may collect a ring that spilled nearby, so only require that he did not lose any
+			bool separate = (ring_counter >= 40) && (ring_counter.player2 == 0)
+			string detail = stringformat("player 1 rings %d (was 40), player 2 rings %d (was 25); player 2 state after the hit %02x, invulnerability %d, protection %02x", ring_counter, ring_counter.player2, checks.p2State, checks.p2Invuln, checks.p2Protection)
+			Checks.report("rings separate per player", separate, detail)
+		}
+
+		if (checks.frame == 680)
+		{
+			Checks.testTeamwork()
+			checks.done = true
+			Checks.report("run complete", 1, "")
+		}
+	}
+	base.UpdateGameObjects()
+}

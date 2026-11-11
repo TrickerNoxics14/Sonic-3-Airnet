@@ -1,0 +1,358 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: second sprite pass for the lower (player 2) view.
+//
+// The game collects all objects to draw in eight priority lists (starting at 0xffffac00) and renders them in "RenderSprites".
+// For the split screen, the original function runs as usual (upper view, clipped by a viewport), and afterwards the very same lists
+// are rendered a second time with player 2's camera, a vertical offset of one view height, and render queue values shifted down,
+// so that the two passes end up in different render queue ranges which can be clipped by different viewports.
+//
+// The per-object rendering below is a modified copy of "renderNextObject" in general/rendering.lemon.
+
+constant u16 DropIn.QUEUE_SHIFT = 0x1400		// Lower view uses render queues 0x8800 to 0x8bff
+
+global u16 dropin.listcount0
+global u16 dropin.listcount1
+global u16 dropin.listcount2
+global u16 dropin.listcount3
+global u16 dropin.listcount4
+global u16 dropin.listcount5
+global u16 dropin.listcount6
+global u16 dropin.listcount7
+
+
+function void DropIn.renderObject2(u16 cameraX, u16 cameraY)
+{
+	u16 renderQueue = 0xa000 - (A4 - 0xffffac00) - dropin.party_render_view * 0x1400
+
+	u32 objAddress = 0xffff0000 + u16[A4]
+	A0 = objAddress
+	A4 += 2
+
+	// Only objects in world space are drawn in the second pass (the HUD and similar objects are drawn once, in the first pass)
+	if ((objA0.render_flags & render_flag.WORLD) == 0)
+		return
+
+	// Shift the sprite priority, which is used by some of the replacement sprite renderers to calculate a render queue
+	u16 backupPriority = objA0.sprite_priority
+	objA0.sprite_priority = backupPriority + dropin.party_render_view * 0x1400
+
+	DropIn.renderObject2Inner(cameraX, cameraY, renderQueue)
+
+	A0 = objAddress
+	objA0.sprite_priority = backupPriority
+}
+
+
+function void DropIn.renderObject2Inner(u16 cameraX, u16 cameraY, u16 renderQueue)
+{
+	u32 objAddress = A0
+
+	// Note that the visibility flag is not reset here; it stays set if the object was visible in the first pass
+	D6.u8 = objA0.render_flags
+	D0.u16 = objA0.position.x.u16
+	D1.u16 = objA0.position.y.u16
+
+	if (objA0.render_flags & render_flag.COMPOUND)
+	{
+		D2 = objA0.box_size.x
+		D0.u16 -= cameraX
+		if (D0.s16 + D2.s16 < 0 || D0.s16 - D2.s16 >= getScreenWidth())
+			return
+
+		D0.u16 += 0x80
+		D1.u16 = (D1.u16 + objA0.box_size.y - cameraY) & level.height.bitmask
+		D2.u16 = objA0.box_size.y * 2 + getScreenHeight()
+		if (D1.u16 >= D2.u16)
+			return
+
+		D1.u16 += 0x80 - objA0.box_size.y
+
+		objA0.render_flags |= render_flag.VISIBLE
+
+		Renderer.clearSpriteTag()
+		if (Standalone.onWriteToSpriteTable(D0.u16 - 0x80, D1.u16 - 0x80, renderQueue))
+			return
+
+		A2 = objA0.mapping_offset
+		D5.u16 = objA0.sprite_attributes
+		if (objA0.animation.sprite != 0)
+		{
+			A1 = tableLookupAddress(A2, s16(objA0.animation.sprite) * 2)
+			D4.u16 = u16[A1] - 1
+			A1 += 2
+			if (D4.s16 >= 0)
+			{
+				u16 backup = D6.u16
+				writeToSpriteTableCompound(renderQueue)
+				D6.u16 = backup
+			}
+		}
+
+		D3.u16 = objA0.compound.count - 1	// Number of compound sprites
+		if (D3.s16 < 0)
+			return
+
+		A0 += 0x18	// Start of compound sprite data
+
+		while (D3.s16 >= 0)
+		{
+			D0.u16 = u16[A0]		// Compound sprite X position
+			D1.u16 = u16[A0 + 2]	// Compound sprite Y position
+			if (D6 & render_flag.WORLD)
+			{
+				D0.u16 = (D0.u16 + 0x80 - cameraX)
+				D1.u16 = (D1.u16 + 0x80 - cameraY) & level.height.bitmask
+			}
+
+			D4 = u8[A0 + 5]		// Compound sprite map frame id
+			A0 += 6				// To next compound sprite
+
+			A1 = tableLookupAddress(A2, D4.u16 * 2)
+			D4.u16 = u16[A1] - 1
+			A1 += 2
+			if (D4.s16 >= 0)
+			{
+				u16 backup = D6.u16
+				Renderer.clearSpriteTag()
+				writeToSpriteTableCompound(renderQueue)
+				D6.u16 = backup
+			}
+
+			--D3.s16
+		}
+	}
+	else
+	{
+		D2 = objA0.box_size.x
+		D0.u16 -= cameraX
+		if (D0.s16 + D2.s16 < 0 || D0.s16 - D2.s16 >= getScreenWidth())
+			return
+
+		D1.u16 = (D1.u16 + objA0.box_size.y - cameraY) & level.height.bitmask
+		D2.u16 = objA0.box_size.y * 2 + getScreenHeight()
+		if (D1.u16 >= D2.u16)
+			return
+
+		D0.u16 += 0x80
+		D1.u16 += 0x80 - objA0.box_size.y
+
+		objA0.render_flags |= render_flag.VISIBLE
+
+		Renderer.clearSpriteTag()
+		if (Standalone.onWriteToSpriteTable(D0.u16 - 0x80, D1.u16 - 0x80, renderQueue))
+			return
+
+		A1 = objA0.mapping_offset
+		D4 = 0
+		if ((objA0.render_flags & render_flag.STATIC_MAPPING) == 0)
+		{
+			A1 = tableLookupAddress(A1, u16(objA0.animation.sprite) * 2)
+			D4.u16 = u16[A1] - 1
+			A1 += 2
+			if (D4.s16 < 0)
+				return
+		}
+
+		D5.u16 = objA0.sprite_attributes
+		writeToSpriteTable(renderQueue)
+	}
+}
+
+
+function void DropIn.saveListCounts()
+{
+	dropin.listcount0 = u16[0xffffac00]
+	dropin.listcount1 = u16[0xffffac80]
+	dropin.listcount2 = u16[0xffffad00]
+	dropin.listcount3 = u16[0xffffad80]
+	dropin.listcount4 = u16[0xffffae00]
+	dropin.listcount5 = u16[0xffffae80]
+	dropin.listcount6 = u16[0xffffaf00]
+	dropin.listcount7 = u16[0xffffaf80]
+}
+
+function void DropIn.restoreListCounts()
+{
+	u16[0xffffac00] = dropin.listcount0
+	u16[0xffffac80] = dropin.listcount1
+	u16[0xffffad00] = dropin.listcount2
+	u16[0xffffad80] = dropin.listcount3
+	u16[0xffffae00] = dropin.listcount4
+	u16[0xffffae80] = dropin.listcount5
+	u16[0xffffaf00] = dropin.listcount6
+	u16[0xffffaf80] = dropin.listcount7
+}
+
+
+// Some zones draw extra sprites in world space from their scrolling code (always relative to player 1's camera);
+// these get drawn again here for the lower view, in the render queue range 0x7800 (the same as the original ones at 0x8000, shifted down)
+function void DropIn.drawDarkSandPit2(u16 px, u16 py, u16 width, u16 cameraX, u16 cameraY)
+{
+	for (u16 i = 0; i < width; i += 0x80)
+	{
+		Renderer.drawCustomSprite("obj_dark_sand_pit_overlay", px + i - cameraX, py + 0x38 - cameraY, 0, SPRITE_FLAG_PRIO, 0x7800)
+	}
+}
+
+function void DropIn.drawZoneOverlays2(u16 cameraX, u16 cameraY)
+{
+	if (global.zone_act == 0x0800)
+	{
+		// SOZ 1: dark sand pits, same list as in "UpdateLevelScrolling.SOZ1"
+		DropIn.drawDarkSandPit2(0x0b00, 0x0b50, 0x200, cameraX, cameraY)
+		DropIn.drawDarkSandPit2(0x1280, 0x0ad0, 0x180, cameraX, cameraY)
+		DropIn.drawDarkSandPit2(0x1880, 0x0b40, 0x280, cameraX, cameraY)
+		DropIn.drawDarkSandPit2(0x2680, 0x0ad0, 0x200, cameraX, cameraY)
+		DropIn.drawDarkSandPit2(0x2d00, 0x0b50, 0x280, cameraX, cameraY)
+	}
+	else if (global.zone_act == 0x0801)
+	{
+		DropIn.drawDarkSandPit2(0x0580, 0x03d0, 0x100, cameraX, cameraY)
+		DropIn.drawDarkSandPit2(0x3200, 0x06d0, 0x100, cameraX, cameraY)
+	}
+}
+
+
+function void DropIn.renderSpritesPass2()
+{
+	dropin.party_render_view = 1
+	u16 cameraX = camera.position.x.u16.player2 - (DropIn.partyCount() > 2 && DropIn.fourViewRequested() ? getScreenWidth() / 2 : 0)
+	u16 cameraY = camera.position.y.u16.player2 - (DropIn.partyCount() > 2 && DropIn.fourViewRequested() ? 0 : DropIn.lowerTop())		// The lower view starts one view height further down (online: at the top)
+
+	if (global.level_started != 0)
+	{
+		DropIn.renderRings2(cameraX, cameraY)
+		DropIn.drawZoneOverlays2(cameraX, cameraY)
+	}
+
+	D7 = 0xffff			// No legacy sprite table entries
+	D6 = 0
+	A6 = 0xfffff800
+	A5 = 0xffffac00
+	while (A5 < 0xffffb000)
+	{
+		if (u16[A5] > 0)
+		{
+			A4 = A5 + 2
+			while (u16[A5] > 0)
+			{
+				DropIn.renderObject2(cameraX, cameraY)
+				u16[A5] -= 2
+			}
+		}
+		A5 += 0x80
+	}
+}
+
+function void DropIn.renderSpritesPassParty(u8 view)
+{
+	if (view == 1)
+	{
+		DropIn.renderSpritesPass2()
+		return
+	}
+	dropin.party_render_view = view
+	u16 cameraX = DropIn.partyViewCameraX(view) - ((view & 1) ? getScreenWidth() / 2 : 0)
+	u16 cameraY = DropIn.partyViewCameraY(view) - ((view & 2) ? getScreenHeight() / 2 : 0)
+	D7 = 0xffff
+	D6 = 0
+	A6 = 0xfffff800
+	A5 = 0xffffac00
+	while (A5 < 0xffffb000)
+	{
+		if (u16[A5] > 0)
+		{
+			A4 = A5 + 2
+			while (u16[A5] > 0)
+			{
+				DropIn.renderObject2(cameraX, cameraY)
+				u16[A5] -= 2
+			}
+		}
+		A5 += 0x80
+	}
+}
+
+function void DropIn.setupFourViewSpriteClips()
+{
+	for (u8 view = 0; view < 4; ++view)
+	{
+		u16 x = (view & 1) ? getScreenWidth() / 2 : 0
+		u16 y = (view & 2) ? getScreenHeight() / 2 : 0
+		u16 width = getScreenWidth() / 2
+		u16 height = getScreenHeight() / 2
+		u16 shift = view * 0x1400
+		// Four per-view ranges below 0x4000 intersect the custom plane queue. Keep
+		// viewport commands after every plane and clip the normal object lists only.
+		Renderer.setViewport(x, y, width, height, 0x9bff - shift)
+		Renderer.resetViewport(0xa001 - shift)
+	}
+}
+
+
+//# address-hook(0x01ad20)
+function void RenderSprites()
+{
+	if (!dropin.split_active)
+	{
+		base.RenderSprites()
+		return
+	}
+	if (DropIn.partyCount() > 2 && DropIn.fourViewRequested())
+	{
+		DropIn.saveListCounts()
+		base.RenderSprites()
+		DropIn.restoreListCounts()
+		DropIn.renderSpritesPassParty(1)
+		DropIn.restoreListCounts()
+		DropIn.renderSpritesPassParty(2)
+		DropIn.restoreListCounts()
+		DropIn.renderSpritesPassParty(3)
+		DropIn.setupFourViewSpriteClips()
+		DropIn.drawFourPlayerHud()
+		return
+	}
+
+	DropIn.saveListCounts()
+	base.RenderSprites()			// Upper view, using player 1's camera
+	DropIn.restoreListCounts()
+	DropIn.renderSpritesPass2()		// Lower view, using player 2's camera
+
+	// Clip each pass to its view, by way of render queue ranges
+	//  - Local split screen: the upper view is the top part of the screen, the lower view the bottom part
+	//  - Online: the host only sees the upper pass (whole screen), the friend only the lower pass (whole screen);
+	//    the pass that is not shown gets clipped away to a spot outside of the screen
+	u16 width = getScreenWidth()
+	u16 height = getScreenHeight()
+	u16 upperY = 0
+	u16 upperH = DropIn.localViewHeight()
+	u16 lowerY = DropIn.localViewHeight()
+	u16 lowerH = height - DropIn.localViewHeight()
+	if (DropIn.role() == 1)
+	{
+		upperH = height
+		lowerY = 0x2000
+		lowerH = 8
+	}
+	else if (DropIn.role() == 2)
+	{
+		upperY = 0x2000
+		upperH = 8
+		lowerY = 0
+		lowerH = height
+	}
+	Renderer.setViewport(0, upperY, width, upperH, 0x4001)									// Extra sprites of the zone for the upper view (queue 0x8000)
+	Renderer.resetViewport(0x77fe)
+	Renderer.setViewport(0, lowerY, width, lowerH, 0x77ff)									// ... and for the lower view (queue 0x7800)
+	Renderer.resetViewport(0x7c01)
+	Renderer.setViewport(0, upperY, width, upperH, 0x7c02)
+	Renderer.resetViewport(0x87fe)
+	Renderer.setViewport(0, lowerY, width, lowerH, 0x87ff)									// Lower view sprites
+	Renderer.resetViewport(0x8c01)
+	Renderer.setViewport(0, upperY, width, upperH, 0x9bff)									// Upper view sprites
+	Renderer.resetViewport(0xa001)
+
+	if (!DropIn.net())
+		DropIn.drawSplitHud()
+}

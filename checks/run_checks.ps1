@@ -1,0 +1,1365 @@
+# Automated checks for Sonic 3 A.I.R. Drop-In Co-op (split screen and online play).
+# The list of checks and what each one proves is in checks\CHECKLIST.md.
+#
+#   checks\run_checks.bat                 everything (uses the current build and package)
+#   checks\run_checks.bat -Build          compile the engine first (a few minutes), then everything
+#   checks\run_checks.bat -Package        rebuild the release package first, then everything
+#   checks\run_checks.bat -Quick          static checks and the engine self test only (no game windows)
+#
+# Result: a table on screen and checks\last_report.txt. Exit code 0 only if every check passed.
+# While the game checks run, the game is started and closed by this script. Close the game before starting.
+# Your mod list, config.json and the Drop-In Co-op settings are restored afterwards.
+
+param(
+	[switch]$Build,
+	[switch]$Package,
+	[switch]$Quick,
+	[switch]$RuntimeOnly,
+	[string]$EngineRoot = '',
+	[string[]]$Only = @()	# Only some of the game stages D, E, F, for example: -Only D,F
+)
+
+$ErrorActionPreference = "Stop"
+# All runs share game configuration and logs; acquire ownership before touching either.
+$checkRunMutex = New-Object System.Threading.Mutex($false, "Local\S3AIRDropInChecks")
+if (-not $checkRunMutex.WaitOne(0)) {
+	$checkRunMutex.Dispose()
+	throw "Another co-op check run owns the game and logs. Wait for it to finish."
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# Accept "-Only D,F" as well as "-Only D F"
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToUpper() } | Where-Object { $_ })
+
+$checksDir = $PSScriptRoot
+$root = Split-Path -Parent $checksDir
+$sourceRoot = if ($EngineRoot) { [IO.Path]::GetFullPath($EngineRoot) } else { Join-Path $root "sonic3air_source" }
+$game = Join-Path $sourceRoot "Oxygen\sonic3air"
+$bin = Join-Path $game "bin\Release_x64"
+$exe = Join-Path $bin "Sonic3AIR.exe"
+$appdata = Join-Path $env:APPDATA "Sonic3AIR"
+$logFile = Join-Path $appdata "logfile.txt"
+$hostLogFile = Join-Path $appdata "logfile_host.txt"		# Two game windows on this computer each write their own log (see S3AIR_LOGNAME)
+$friendLogFile = Join-Path $appdata "logfile_friend.txt"
+$onlineLog = Join-Path $appdata "online_log.txt"
+$onlineHostLog = Join-Path $appdata 'online_log_host.txt'
+$onlineFriendLog = Join-Path $appdata 'online_log_friend.txt'
+$selfTestFile = Join-Path $appdata "selftest_results.txt"
+$zipPath = Join-Path $root "Sonic3AIR_Online.zip"
+$sourceScripts = Join-Path $game "scripts"
+# The release zip is built from the stable online fork, not from the older test tree used for the local game stages (F/G/Q...).
+# The A-stage package comparisons must look at the tree the package was actually built from.
+$pkgRoot = if ($EngineRoot) { $sourceRoot } else { Join-Path $root "sonic3air_online_stable_source" }
+$pkgGame = Join-Path $pkgRoot "Oxygen\sonic3air"
+$pkgExe = Join-Path $pkgGame "bin\Release_x64\Sonic3AIR.exe"
+$pkgScripts = Join-Path $pkgGame "scripts"
+$sourceMod = Join-Path $root "DropInCoop"
+$harnessSource = Join-Path $checksDir "harness\ChecksHarness"
+$reportPath = if ($RuntimeOnly -and $EngineRoot) { Join-Path $checksDir "online_stable_runtime_report.txt" } else { Join-Path $checksDir "last_report.txt" }
+$recoveryPath = Join-Path $checksDir '.run-recovery.json'
+$gameExitCode = 0
+
+$results = New-Object System.Collections.ArrayList
+$startedProcesses = New-Object System.Collections.ArrayList
+
+function Add-Result([string]$id, [string]$title, [bool]$passed, [string]$detail)
+{
+	[void]$results.Add([pscustomobject]@{ Id = $id; Title = $title; Passed = $passed; Detail = $detail })
+	$mark = if ($passed) { "PASS" } else { "FAIL" }
+	$color = if ($passed) { "Green" } else { "Red" }
+	Write-Host ("  [" + $mark + "] " + $id + "  " + $title + $(if ($detail) { "  -- " + $detail } else { "" })) -ForegroundColor $color
+}
+
+function Write-Step([string]$text)
+{
+	Write-Host ""
+	Write-Host $text -ForegroundColor Cyan
+}
+
+function Read-SharedText([string]$path)
+{
+	# The game keeps its log files open while it runs, so read them without locking them
+	if (-not (Test-Path $path)) { return "" }
+	try
+	{
+		$stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+		try
+		{
+			$reader = New-Object IO.StreamReader($stream)
+			return $reader.ReadToEnd()
+		}
+		finally
+		{
+			$stream.Dispose()
+		}
+	}
+	catch
+	{
+		return ""
+	}
+}
+
+function Wait-Until([scriptblock]$condition, [int]$seconds)
+{
+	$deadline = (Get-Date).AddSeconds($seconds)
+	while ((Get-Date) -lt $deadline)
+	{
+		if (& $condition) { return $true }
+		Start-Sleep -Milliseconds 500
+	}
+	return $false
+}
+
+function Start-GameProcess([hashtable]$variables)
+{
+	$variables['S3AIR_CHECKS'] = '1'
+	foreach ($key in $variables.Keys)
+	{
+		[Environment]::SetEnvironmentVariable($key, [string]$variables[$key], "Process")
+	}
+	try
+	{
+		$process = Start-Process -FilePath $exe -WorkingDirectory $game -PassThru
+	}
+	finally
+	{
+		foreach ($key in $variables.Keys)
+		{
+			[Environment]::SetEnvironmentVariable($key, $null, "Process")
+		}
+	}
+	[void]$startedProcesses.Add($process)
+	return $process
+}
+
+function Stop-StartedProcesses
+{
+	foreach ($process in $startedProcesses)
+	{
+		if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+	}
+	$startedProcesses.Clear()
+	Start-Sleep -Milliseconds 800
+}
+
+function Assert-NoGameRunning
+{
+	if (Get-Process -Name "Sonic3AIR" -ErrorAction SilentlyContinue)
+	{
+		throw "Sonic 3 A.I.R. is still running. Close it first, the checks start and stop their own game windows."
+	}
+}
+
+function Set-ActiveMods([string[]]$mods)
+{
+	$items = ($mods | ForEach-Object { '"' + $_ + '"' }) -join ", "
+	$json = "{`n`t`"ActiveMods`" : [" + $items + "],`n`t`"UseLegacyLoading`" : false`n}"
+	Set-Content -Path (Join-Path $appdata "mods\active-mods.json") -Value $json -Encoding utf8
+}
+
+function Get-TextHash([string]$text)
+{
+	$sha = [Security.Cryptography.SHA256]::Create()
+	return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))).Replace("-", "")
+}
+
+function Get-FileHashHex([string]$path)
+{
+	return (Get-FileHash -Path $path -Algorithm SHA256).Hash
+}
+
+function Get-EntryHashHex($entry)
+{
+	$stream = $entry.Open()
+	try
+	{
+		$sha = [Security.Cryptography.SHA256]::Create()
+		return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "")
+	}
+	finally
+	{
+		$stream.Dispose()
+	}
+}
+
+function Get-EntryText($entry)
+{
+	$stream = $entry.Open()
+	try
+	{
+		$reader = New-Object IO.StreamReader($stream)
+		return $reader.ReadToEnd()
+	}
+	finally
+	{
+		$stream.Dispose()
+	}
+}
+
+function New-SessionCode
+{
+	$alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	$chars = @(1..8 | ForEach-Object { $alphabet[(Get-Random -Maximum 32)] })
+	return ((-join $chars[0..3]) + "-" + (-join $chars[4..7]))
+}
+
+function Get-OnlineLines
+{
+	$text = (Read-SharedText $onlineHostLog) + "`n" + (Read-SharedText $onlineFriendLog)
+	return @($text -split "`r?`n" | Where-Object { $_ -match '^\[(host|friend)\]' })
+}
+
+function Get-FriendFps
+{
+	# Only the lines from inside the game (state 5); the lines before are the join itself
+	$lines = @(Get-OnlineLines | Where-Object { $_ -match '^\[friend\].* state=5 ' })
+	$values = @()
+	for ($i = 2; $i -lt $lines.Count; $i++)		# The first seconds in the game are skipped as well
+	{
+		$match = [regex]::Match($lines[$i], 'fps=([\d.]+)')
+		if ($match.Success) { $values += [double]$match.Groups[1].Value }
+	}
+	return $values
+}
+
+function Get-FriendRepairs
+{
+	$max = 0
+	foreach ($line in @(Get-OnlineLines | Where-Object { $_ -match '^\[friend\]' }))
+	{
+		$match = [regex]::Match($line, 'repairs=(\d+)')
+		if ($match.Success -and [int]$match.Groups[1].Value -gt $max) { $max = [int]$match.Groups[1].Value }
+	}
+	return $max
+}
+
+function Save-RunLogs([string]$tag)
+{
+	# The logs of the last run stay next to the report, so a failed check can be looked into afterwards
+	$logsFolder = Join-Path $checksDir "last_logs"
+	New-Item -ItemType Directory -Path $logsFolder -Force | Out-Null
+	if (Test-Path $friendLogFile) { Copy-Item $friendLogFile (Join-Path $logsFolder ($tag + "-logfile_friend.txt")) -Force }
+	if (Test-Path $hostLogFile) { Copy-Item $hostLogFile (Join-Path $logsFolder ($tag + "-logfile_host.txt")) -Force }
+	if (Test-Path $onlineLog) { Copy-Item $onlineLog (Join-Path $logsFolder ($tag + "-online_log.txt")) -Force }
+	if (Test-Path $onlineHostLog) { Copy-Item $onlineHostLog (Join-Path $logsFolder ($tag + '-online_log_host.txt')) -Force }
+	if (Test-Path $onlineFriendLog) { Copy-Item $onlineFriendLog (Join-Path $logsFolder ($tag + '-online_log_friend.txt')) -Force }
+}
+
+# Screenshots of the game window (the picture is checked by reading the PNG files in checks\last_logs)
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class GameWindowCapture
+{
+	[StructLayout(LayoutKind.Sequential)]
+	public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+	[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+	[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
+
+# The whole screen (for error windows, which are separate windows of their own)
+function Save-ScreenPicture([string]$path)
+{
+	$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+	$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+	$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+	$graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
+	$bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+	$graphics.Dispose()
+	$bitmap.Dispose()
+}
+
+function Save-GameScreenshot([System.Diagnostics.Process]$process, [string]$path)
+{
+	$process.Refresh()
+	$handle = $process.MainWindowHandle
+	if ($handle -eq [IntPtr]::Zero) { return $false }
+	[void][GameWindowCapture]::SetForegroundWindow($handle)
+	Start-Sleep -Milliseconds 400
+	$rect = New-Object GameWindowCapture+RECT
+	[void][GameWindowCapture]::GetWindowRect($handle, [ref]$rect)
+	$width = $rect.Right - $rect.Left
+	$height = $rect.Bottom - $rect.Top
+	if ($width -le 0 -or $height -le 0) { return $false }
+	$bitmap = New-Object System.Drawing.Bitmap $width, $height
+	$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+	$graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bitmap.Size)
+	$bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+	$graphics.Dispose()
+	$bitmap.Dispose()
+	return $true
+}
+
+function Get-QuadCaptureStats([string]$path)
+{
+	if (-not (Test-Path $path)) { return $null }
+	$bitmap = [System.Drawing.Bitmap]::FromFile($path)
+	try
+	{
+		$halfWidth = [int]($bitmap.Width / 2)
+		$halfHeight = [int]($bitmap.Height / 2)
+		$counts = @()
+		for ($view = 0; $view -lt 4; ++$view)
+		{
+			$x0 = ($view % 2) * $halfWidth
+			$y0 = [int]([math]::Floor($view / 2)) * $halfHeight
+			$yStart = $y0 + $(if ($view -lt 2) { [math]::Min(24, $halfHeight / 3) } else { 0 })
+			$yEnd = $y0 + $halfHeight - $(if ($view -ge 2) { [math]::Min(12, $halfHeight / 6) } else { 0 })
+			$count = 0
+			for ($y = $yStart; $y -lt $yEnd; $y += 2)
+			{
+				for ($x = $x0; $x -lt ($x0 + $halfWidth); $x += 2)
+				{
+					$pixel = $bitmap.GetPixel($x, $y)
+					if (($pixel.R + $pixel.G + $pixel.B) -gt 100) { ++$count }
+				}
+			}
+			$counts += $count
+		}
+		return [pscustomobject]@{ Width=$bitmap.Width; Height=$bitmap.Height; Quadrants=$counts }
+	}
+	finally { $bitmap.Dispose() }
+}
+
+function Wants([string]$stage)
+{
+	return ($Only.Count -eq 0) -or ($Only -contains $stage)
+}
+
+function Invoke-OnlineJoin([string]$code, [hashtable]$extraVariables, [int]$secondsAfterJoin, [string]$tag)
+{
+	# Host and friend on this computer, joined only by the code (the same network path as two laptops on one network)
+	Set-ActiveMods @('DropInCoop')
+	Stop-StartedProcesses
+	Remove-Item $onlineLog -ErrorAction SilentlyContinue
+	Remove-Item $onlineHostLog, $onlineFriendLog -ErrorAction SilentlyContinue
+	Remove-Item $hostLogFile -ErrorAction SilentlyContinue
+	Remove-Item $friendLogFile -ErrorAction SilentlyContinue
+
+	$hostVariables = @{}
+	$friendVariables = @{}
+	foreach ($key in $extraVariables.Keys) { $hostVariables[$key] = $extraVariables[$key]; $friendVariables[$key] = $extraVariables[$key] }
+	$hostVariables["S3AIR_NETPLAY"] = "hostlan:" + $code
+	$friendVariables["S3AIR_NETPLAY"] = "joinlan:" + $code
+	$hostVariables["S3AIR_LOGNAME"] = "_host"
+	$friendVariables["S3AIR_LOGNAME"] = "_friend"
+
+	[void](Start-GameProcess $hostVariables)
+	Start-Sleep -Seconds 10
+	[void](Start-GameProcess $friendVariables)
+
+	$reached = Wait-Until { (@(Get-OnlineLines | Where-Object { $_ -match '^\[friend\].* state=5 ' })).Count -gt 0 } 90
+	if ($reached) { Start-Sleep -Seconds $secondsAfterJoin }
+
+	$logText = (Read-SharedText $friendLogFile) + "`n" + (Read-SharedText $hostLogFile)
+	$lines = Get-OnlineLines
+	Stop-StartedProcesses
+	Set-Content -Path $onlineLog -Value $lines -Encoding utf8
+	Save-RunLogs $tag
+	return [pscustomobject]@{ Reached = $reached; Log = $logText; Lines = $lines }
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Start
+
+Write-Host ""
+Write-Host "Sonic 3 A.I.R. Drop-In Co-op: automated checks" -ForegroundColor White
+Write-Host ("Project: " + $root)
+Write-Host ""
+
+try
+{
+	Assert-NoGameRunning
+	if (Test-Path -LiteralPath $recoveryPath) {
+		$recovery = Get-Content -Raw -LiteralPath $recoveryPath | ConvertFrom-Json
+		[IO.File]::WriteAllText((Join-Path $game 'config.json'), $recovery.Config)
+		$modsRecoveryPath = Join-Path $appdata 'mods\active-mods.json'
+		if ($recovery.HadMods) { [IO.File]::WriteAllText($modsRecoveryPath, $recovery.Mods) }
+		elseif (Test-Path -LiteralPath $modsRecoveryPath) { Remove-Item -LiteralPath $modsRecoveryPath -Force }
+		Remove-Item -LiteralPath $recoveryPath -Force
+		Write-Host 'Recovered player configuration from an interrupted check run.'
+	}
+
+	if ($Build)
+	{
+		Write-Step "Building the engine (this takes a few minutes)..."
+		& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $sourceRoot "build_game.ps1") *> (Join-Path $sourceRoot "build_game.log")
+		if ((Read-SharedText (Join-Path $sourceRoot 'build_game.log')) -notmatch '(?m)^exit=0\s*$') {
+			throw 'Engine build failed. See sonic3air_source/build_game.log; no package or game checks will be run.'
+		}
+	}
+	if ($Build -or $Package)
+	{
+		Write-Step "Building the release package..."
+		& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "make_package.ps1")
+	}
+
+	if (-not $RuntimeOnly)
+	{
+	# -----------------------------------------------------------------------------------------------------------
+	Write-Step "A. Build and package (static)"
+
+	$buildLog = Join-Path $pkgRoot "build_game.log"
+	if (-not (Test-Path -LiteralPath $buildLog)) { $buildLog = Join-Path $checksDir "stable-build.log" }
+	$buildLogText = Read-SharedText $buildLog
+	$buildSucceeded = ($buildLogText -match "exit=0") -or (($buildLogText -match "Sonic3AIR\.exe") -and ($buildLogText -notmatch "(?i)error"))
+	$sourceFiles = @(Get-ChildItem -Path (Join-Path $pkgRoot "Oxygen\oxygenengine\source"), (Join-Path $pkgRoot "Oxygen\sonic3air\source") -Recurse -Include *.cpp, *.h -File)
+	$newestSource = ($sourceFiles | Measure-Object -Property LastWriteTime -Maximum).Maximum
+	$exeExists = Test-Path $pkgExe
+	$exeTime = if ($exeExists) { (Get-Item $pkgExe).LastWriteTime } else { [DateTime]::MinValue }
+	Add-Result "A1" "Engine is built from the current C++ source" ($exeExists -and $buildSucceeded -and ($exeTime -ge $newestSource)) `
+		("build log ok: " + $buildSucceeded + ", exe newer than newest source file: " + ($exeTime -ge $newestSource) + " (run with -Build if not)")
+
+	if (-not (Test-Path $zipPath))
+	{
+		Add-Result "A2" "Release package exists" $false "Sonic3AIR_Online.zip is missing (run with -Package)"
+	}
+	else
+	{
+		$zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
+		try
+		{
+			$entries = @{}
+			foreach ($entry in $zip.Entries) { $entries[$entry.FullName.Replace('\', '/')] = $entry }
+			$prefix = "Sonic3AIR_Online/"
+			Add-Result "A2" "Release package exists and can be opened" $true ("" + $entries.Count + " files")
+
+			$packagedExe = $entries[$prefix + "Sonic3AIR.exe"]
+			$exeMatches = ($null -ne $packagedExe) -and $exeExists -and ((Get-EntryHashHex $packagedExe) -eq (Get-FileHashHex $pkgExe))
+			Add-Result "A3" "Packaged engine is the same file as the build" $exeMatches ""
+
+			$missingScripts = @()
+			$scriptFiles = @(Get-ChildItem -Path $pkgScripts -Recurse -File)
+			foreach ($file in $scriptFiles)
+			{
+				$relative = $file.FullName.Substring($pkgScripts.Length + 1).Replace('\', '/')
+				$entry = $entries[$prefix + "scripts/" + $relative]
+				if ($null -eq $entry -or (Get-EntryHashHex $entry) -ne (Get-FileHashHex $file.FullName)) { $missingScripts += $relative }
+			}
+			$packagedScriptCount = @($entries.Keys | Where-Object { $_.StartsWith($prefix + "scripts/") }).Count
+			Add-Result "A4" "Packaged game scripts are the current scripts" (($missingScripts.Count -eq 0) -and ($packagedScriptCount -eq $scriptFiles.Count)) `
+				("" + $scriptFiles.Count + " files, " + $missingScripts.Count + " differ, " + $packagedScriptCount + " packaged")
+
+			$missingMod = @()
+			$modFiles = @(Get-ChildItem -Path $sourceMod -Recurse -File)
+			foreach ($file in $modFiles)
+			{
+				$relative = $file.FullName.Substring($sourceMod.Length + 1).Replace('\', '/')
+				$entry = $entries[$prefix + "bundled_mods/DropInCoop/" + $relative]
+				if ($null -eq $entry -or (Get-EntryHashHex $entry) -ne (Get-FileHashHex $file.FullName)) { $missingMod += $relative }
+			}
+			Add-Result "A5" "Packaged co-op mod is the current DropInCoop" ($missingMod.Count -eq 0) ("" + $modFiles.Count + " files, " + $missingMod.Count + " differ")
+
+			$cacheEntries = @($entries.Keys | Where-Object { $_ -match '/saves/|scripts\.bin$|/states/' })
+			Add-Result "A6" "No saves, script caches or save states in the package" ($cacheEntries.Count -eq 0) ($cacheEntries -join ", ")
+
+			$romLike = @($entries.Values | Where-Object { $_.FullName -match '(?i)sonic_knuckles|sonic_3_and|\.(md|gen|smd)$' -or (($_.FullName -match '\.bin$') -and ($_.Length -gt 512KB)) })
+			$engineDataOk = ($null -ne $entries[$prefix + "data/oxygen_icon.png"]) -and ($null -ne $entries[$prefix + "data/shader"] -or @($entries.Keys | Where-Object { $_ -like ($prefix + "data/shader/*") }).Count -gt 0)
+			Add-Result "A11" "Package contains the engine data the game needs at start" $engineDataOk "data/oxygen_icon.png and data/shader must be present"
+			Add-Result "A7" "No game ROM in the package" ($romLike.Count -eq 0) (($romLike | ForEach-Object { $_.FullName }) -join ", ")
+
+			$configEntry = $entries[$prefix + "config.json"]
+			$configText = if ($configEntry) { Get-EntryText $configEntry } else { "" }
+			$configOk = ($configText -match '"StartPhase": "2"') -and -not ($configText -match '(?m)^\s*"LoadSaveState"') -and -not ($configText -match '(?m)^\s*"LoadLevel"')
+			Add-Result "A8" "Packaged config starts the normal way (no test start)" $configOk ""
+
+			$readmeEntry = $entries[$prefix + "README_ONLINE.txt"]
+			$readmeText = if ($readmeEntry) { Get-EntryText $readmeEntry } else { "" }
+			$readmeOk = ($readmeText -match "Host \(works anywhere\)") -and ($readmeText -match "online_log\.txt")
+			Add-Result "A9" "Readme explains the join code and the log file" $readmeOk ""
+
+			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|_devtools|DropInTest' })
+			Add-Result "A10" "No developer test mods in the package" ($testLeftovers.Count -eq 0) ($testLeftovers -join ", ")
+		}
+		finally
+		{
+			$zip.Dispose()
+		}
+	}
+
+	# -----------------------------------------------------------------------------------------------------------
+	Write-Step "B. Scripts (static)"
+
+	$modScripts = @(Get-ChildItem -Path (Join-Path $sourceMod "scripts") -Filter *.lemon -File)
+	$unbalanced = @()
+	foreach ($file in $modScripts)
+	{
+		# Strings and comments are removed first, so that brackets inside them do not count
+		$text = Get-Content $file.FullName -Raw
+		$text = [regex]::Replace($text, '"(?:\\.|[^"\\\r\n])*"', '""')
+		$text = [regex]::Replace($text, '(?s)/\*.*?\*/', '')
+		$text = [regex]::Replace($text, '//[^\r\n]*', '')
+		$parens = ($text.ToCharArray() | Where-Object { $_ -eq '(' }).Count - ($text.ToCharArray() | Where-Object { $_ -eq ')' }).Count
+		$braces = ($text.ToCharArray() | Where-Object { $_ -eq '{' }).Count - ($text.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+		if ($parens -ne 0 -or $braces -ne 0) { $unbalanced += ($file.Name + " (parentheses " + $parens + ", braces " + $braces + ")") }
+	}
+	Add-Result "B1" "Co-op scripts have balanced brackets" ($unbalanced.Count -eq 0) ($unbalanced -join "; ")
+
+	$hookHits = @(Select-String -Path (Join-Path $sourceMod "scripts\*.lemon") -Pattern 'test\.frame|S3AIR_|Checks\.report' | ForEach-Object { $_.Filename + ":" + $_.LineNumber })
+	Add-Result "B2" "Co-op scripts contain no test hooks" ($hookHits.Count -eq 0) ($hookHits -join ", ")
+	$signatures = @{}
+	foreach ($file in $modScripts) {
+		foreach ($definition in [regex]::Matches((Get-Content -Raw $file.FullName), '(?m)^function\s+\w+\s+([\w.]+)\(([^)]*)\)')) {
+			$types = @($definition.Groups[2].Value -split ',' | ForEach-Object { ($_.Trim() -split '\s+')[0] }) -join ','
+			$key = $definition.Groups[1].Value + '(' + $types + ')'
+			if (-not $signatures.ContainsKey($key)) { $signatures[$key] = @() }
+			$signatures[$key] += $file.Name
+		}
+	}
+	$duplicates = @($signatures.Keys | Where-Object { $signatures[$_].Count -gt 1 })
+	Add-Result 'B3' 'Each mod override has exactly one implementation per signature' ($duplicates.Count -eq 0) ($duplicates -join ', ')
+	}
+	else
+	{
+		Write-Host "Runtime-only audit: static package and source checks skipped; using $game" -ForegroundColor DarkGray
+	}
+
+	# -----------------------------------------------------------------------------------------------------------
+	if (-not (Test-Path $exe))
+	{
+		throw "No engine build found. Run checks\run_checks.bat -Build first."
+	}
+
+	# Make sure the game uses the current co-op mod: the game installs the copy from its own folder at each start
+	$binMod = Join-Path $bin "bundled_mods\DropInCoop"
+	if (Test-Path $binMod) { Remove-Item $binMod -Recurse -Force }
+	New-Item -ItemType Directory -Path (Split-Path $binMod) -Force | Out-Null
+	Copy-Item $sourceMod $binMod -Recurse
+
+	# Save the player's own setup, the checks change it and put it back afterwards
+	$savedMods = Join-Path $appdata "mods\active-mods.json"
+	$savedModsText = if (Test-Path $savedMods) { Read-SharedText $savedMods } else { $null }
+	$savedConfigText = Read-SharedText (Join-Path $game "config.json")
+	$configPath = Join-Path $game "config.json"
+	@{ Config=$savedConfigText; Mods=$savedModsText; HadMods=($null -ne $savedModsText) } | ConvertTo-Json | Set-Content -LiteralPath $recoveryPath -Encoding utf8
+
+	try
+	{
+		if (-not $RuntimeOnly)
+		{
+		# -------------------------------------------------------------------------------------------------------
+		Write-Step "C. Engine self test (join codes)"
+
+		Set-ActiveMods @("DropInCoop")
+		if (Test-Path $selfTestFile) { Remove-Item $selfTestFile -Force }
+		[void](Start-GameProcess @{ "S3AIR_SELFTEST" = "1" })
+		$finished = Wait-Until { (Read-SharedText $selfTestFile) -match "SELFTEST COMPLETE" } 90
+		Stop-StartedProcesses
+		if (-not $finished)
+		{
+			Add-Result "C1" "Engine self test ran" $false "no result file after 90 seconds"
+		}
+		else
+		{
+			$selfLines = @((Read-SharedText $selfTestFile) -split "`r?`n" | Where-Object { $_ -match '^(PASS|FAIL) ' })
+			$selfNumber = 0
+			foreach ($line in $selfLines)
+			{
+				$selfNumber++
+				$passed = $line.StartsWith("PASS ")
+				$text = $line.Substring(5)
+				Add-Result ("C" + $selfNumber) $text.Split(":")[0] $passed $(if ($text.Contains(":")) { $text.Substring($text.IndexOf(":") + 1).Trim() } else { "" })
+			}
+			if ($selfLines.Count -eq 0) { Add-Result "C1" "Engine self test produced results" $false "" }
+		}
+		}
+		else
+		{
+			Write-Host 'Stable fork runtime mode: engine self-test hook not present in this upstream base; code-level tests run separately.' -ForegroundColor DarkGray
+		}
+
+		if ($Quick)
+		{
+			Write-Host ""
+			Write-Host "Quick run: the game and online checks (L, U, D, E, F, M, N, R) were skipped." -ForegroundColor Yellow
+		}
+		else
+		{
+			# ---------------------------------------------------------------------------------------------------
+			# ---------------------------------------------------------------------------------------------------
+			if ($Only -contains "L")	# The lobby is part of the online fork only: run it with the stable engine, see run_online_backend_checks.ps1
+			{
+			Write-Step "L. Online lobby: a friend joins by the code and presses Ready, the host sees it"
+
+			$lobby = Invoke-OnlineJoin (New-SessionCode) @{ "S3AIR_LOBBY_AUTOREADY" = "1" } 5 "L1"
+			$hostSawReady = $lobby.Log -match "lobby: player 2 is ready"
+			$hostAllReady = $lobby.Log -match "lobby: all players are ready"
+			$friendSawLobby = $lobby.Log -match "lobby: you are slot 2"
+			Add-Result "L1" "The friend joins and the host sees the Ready press" ($lobby.Reached -and $hostSawReady) ("joined: " + $lobby.Reached + ", host saw ready: " + $hostSawReady)
+			Add-Result "L2" "The host knows when every friend is ready" $hostAllReady ""
+			Add-Result "L3" "The friend receives the lobby list from the host" $friendSawLobby ""
+
+			# The same through the lobby menu of the released package: two copies start at the main menu, one creates a lobby, one joins it with the code
+			$lobbyDir = Join-Path ([IO.Path]::GetTempPath()) ("s3air_lobbycheck_" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+			try
+			{
+				Stop-StartedProcesses
+				Add-Type -AssemblyName System.IO.Compression.FileSystem
+				Add-Type -AssemblyName System.Drawing
+				[IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $lobbyDir)
+				$lobbyExe = Get-ChildItem -LiteralPath $lobbyDir -Filter "Sonic3AIR.exe" -Recurse -File | Select-Object -First 1
+				Set-ActiveMods @('DropInCoop')
+				Remove-Item $hostLogFile, $friendLogFile -ErrorAction SilentlyContinue
+				$uiCode = New-SessionCode
+
+				function Start-LobbyInstance([hashtable]$vars)
+				{
+					foreach ($key in $vars.Keys) { [Environment]::SetEnvironmentVariable($key, [string]$vars[$key], "Process") }
+					try { $proc = Start-Process -FilePath $exe -WorkingDirectory $lobbyExe.DirectoryName -PassThru }		# The engine file that is allowed through the firewall, with the unzipped package's data
+					finally { foreach ($key in $vars.Keys) { [Environment]::SetEnvironmentVariable($key, $null, "Process") } }
+					[void]$startedProcesses.Add($proc)
+					return $proc
+				}
+				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWin { [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hgt, bool repaint); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; } }' -ErrorAction SilentlyContinue
+				$uiHost = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "hostlan"; "S3AIR_LOGNAME" = "_host" }
+				Start-Sleep -Seconds 12
+				$uiHost.Refresh(); [void][LobbyWin]::MoveWindow($uiHost.MainWindowHandle, 0, 0, 760, 480, $true)
+				$uiFriend = Start-LobbyInstance @{ "S3AIR_LOBBY_OPEN" = "join"; "S3AIR_LOBBY_CODE" = "127.0.0.1"; "S3AIR_LOBBY_AUTOREADY" = "1"; "S3AIR_LOGNAME" = "_friend" }
+				Start-Sleep -Seconds 8
+				$uiFriend.Refresh(); [void][LobbyWin]::MoveWindow($uiFriend.MainWindowHandle, 780, 0, 760, 480, $true)
+				$uiReady = Wait-Until { (Read-SharedText $hostLogFile) -match "lobby: all players are ready" } 90
+				Start-Sleep -Seconds 4
+
+				# Pictures of both lobby screens (of the windows, as a player sees them)
+				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWin { [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r); [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int hgt, bool repaint); [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; } }' -ErrorAction SilentlyContinue
+				foreach ($pair in @(@($uiHost, "lobby-host.png"), @($uiFriend, "lobby-friend.png")))
+				{
+					try
+					{
+						$pair[0].Refresh()
+						$rect = New-Object LobbyWin+RECT
+						[void][LobbyWin]::GetWindowRect($pair[0].MainWindowHandle, [ref]$rect)
+						$bitmap = New-Object System.Drawing.Bitmap ($rect.R - $rect.L), ($rect.B - $rect.T)
+						$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+						$graphics.CopyFromScreen($rect.L, $rect.T, 0, 0, $bitmap.Size)
+						$bitmap.Save((Join-Path (Join-Path $checksDir "last_logs") $pair[1]))
+						$graphics.Dispose(); $bitmap.Dispose()
+					}
+					catch { }
+				}
+
+				$uiHostLog = Read-SharedText $hostLogFile
+				$uiFriendLog = Read-SharedText $friendLogFile
+				Add-Result "L4" "Through the lobby menu: the friend joins the host's lobby with the code" (($uiHostLog -match "lobby: player 2 is ready") -and ($uiFriendLog -match "lobby: you are slot 2")) ""
+				Add-Result "L5" "Through the lobby menu: the host sees that everybody is ready" $uiReady ""
+			}
+			catch
+			{
+				Add-Result "L4" "Through the lobby menu: the friend joins the host's lobby with the code" $false $_.Exception.Message
+			}
+			finally
+			{
+				Stop-StartedProcesses
+				if ((Split-Path -Leaf $lobbyDir) -like "s3air_lobbycheck_*" -and (Test-Path -LiteralPath $lobbyDir)) { Remove-Item -LiteralPath $lobbyDir -Recurse -Force -ErrorAction SilentlyContinue }
+			}
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			if (Wants "U")
+			{
+			Write-Step "U. The release zip, unzipped to a fresh folder and started as a player would start it"
+
+			$unzipDir = Join-Path ([IO.Path]::GetTempPath()) ("s3air_pkgcheck_" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+			try
+			{
+				if (-not (Test-Path -LiteralPath $zipPath)) { throw "Sonic3AIR_Online.zip is missing (run with -Package)" }
+				Add-Type -AssemblyName System.IO.Compression.FileSystem
+				[IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $unzipDir)
+				$packageExe = Get-ChildItem -LiteralPath $unzipDir -Filter "Sonic3AIR.exe" -Recurse -File | Select-Object -First 1
+				if ($null -eq $packageExe) { throw "no Sonic3AIR.exe inside the zip" }
+				$packageDir = $packageExe.DirectoryName
+				$gameLog = Join-Path $appdata "logfile.txt"
+				if (Test-Path -LiteralPath $gameLog) { Remove-Item -LiteralPath $gameLog -Force }
+
+				# No test variables: this is the product as shipped (it installs its bundled co-op mod by itself)
+				$packageProcess = Start-Process -FilePath $packageExe.FullName -WorkingDirectory $packageDir -PassThru
+				[void]$startedProcesses.Add($packageProcess)
+				$ready = Wait-Until { ((Read-SharedText $gameLog) -match "Ready to go") -or $packageProcess.HasExited } 45
+				$logText = Read-SharedText $gameLog
+				$startedOk = $ready -and ($logText -match "Ready to go") -and -not ($logText -match "(?i)Could not find engine data|Failed to load")
+				$title = ""
+				if (-not $packageProcess.HasExited) { $packageProcess.Refresh(); $title = $packageProcess.MainWindowTitle }
+				Add-Result "U1" "The unzipped package starts without an error message" ($startedOk -and $title -notmatch "(?i)error") ("ready: " + ($logText -match "Ready to go") + ", window: '" + $title + "'")
+
+				$ranFromPackage = $logText -match [regex]::Escape($packageExe.FullName)
+				Add-Result "U2" "That run used the unzipped copy, not the build folder" $ranFromPackage ""
+
+				Start-Sleep -Seconds 5
+				$stillRunning = -not $packageProcess.HasExited
+				Add-Result "U3" "The unzipped package keeps running for 5 seconds after start" $stillRunning ""
+			}
+			catch
+			{
+				Add-Result "U1" "The unzipped package starts without an error message" $false $_.Exception.Message
+			}
+			finally
+			{
+				Stop-StartedProcesses
+				if ((Split-Path -Leaf $unzipDir) -like "s3air_pkgcheck_*" -and (Test-Path -LiteralPath $unzipDir)) { Remove-Item -LiteralPath $unzipDir -Recurse -Force -ErrorAction SilentlyContinue }
+			}
+			}
+
+			if (Wants "D")
+			{
+			Write-Step "D. Online play, two game windows on this computer, joined only by the code"
+
+			$session = New-SessionCode
+
+			$good = Invoke-OnlineJoin $session @{} 15 "D1"
+			$foundInNetwork = $good.Log -match "found the host in the same network"
+			$loadedGame = $good.Log -match "client loaded the game state"
+			$aborted = $good.Log -match "aborting"
+			$onlineHost = @($good.Lines | Where-Object { $_ -match '^\[host\]' }).Count -gt 0
+			$onlineFriend = @($good.Lines | Where-Object { $_ -match '^\[friend\]' }).Count -gt 0
+			Add-Result "D1" "Friend joins with the code over the same network" ($good.Reached -and $foundInNetwork -and $loadedGame -and -not $aborted) `
+				("in game: " + $good.Reached + ", found by code: " + $foundInNetwork + ", game state received: " + $loadedGame + ", aborted: " + $aborted)
+			Add-Result "D2" "Online log is written by both host and friend" ($onlineHost -and $onlineFriend) ("host lines: " + $onlineHost + ", friend lines: " + $onlineFriend)
+			$repairs = Get-FriendRepairs
+			Add-Result "D3" "Game stays in sync during 15 seconds of play (no repairs)" ($good.Reached -and ($repairs -eq 0)) ("repairs: " + $repairs)
+
+			$wrong = New-SessionCode
+			Stop-StartedProcesses
+			Remove-Item $friendLogFile -ErrorAction SilentlyContinue
+			[void](Start-GameProcess @{ "S3AIR_NETPLAY" = "joinlan:" + $wrong; "S3AIR_LOGNAME" = "_friend" })
+			$gaveUp = Wait-Until { (Read-SharedText $friendLogFile) -match "giving up" } 60
+			Stop-StartedProcesses
+			Save-RunLogs "D4"
+			Add-Result "D4" "A wrong or unknown code ends with a message, not a hang" $gaveUp ""
+			}
+
+			if (Wants 'M')
+			{
+				Write-Step 'M. Public matchmaking server registration and code join'
+				$randomBytes = New-Object byte[] 5
+				$random = [Security.Cryptography.RandomNumberGenerator]::Create()
+				try { $random.GetBytes($randomBytes) } finally { $random.Dispose() }
+				$serverSession = ([BitConverter]::ToString($randomBytes)).Replace('-', '').ToLowerInvariant()
+				$serverHostLog = Join-Path $appdata 'logfile_serverhost.txt'
+				$serverFriendLog = Join-Path $appdata 'logfile_serverfriend.txt'
+				$serverHostOnline = Join-Path $appdata 'online_log_serverhost.txt'
+				$serverFriendOnline = Join-Path $appdata 'online_log_serverfriend.txt'
+				Remove-Item $serverHostLog, $serverFriendLog, $serverHostOnline, $serverFriendOnline -ErrorAction SilentlyContinue
+				Stop-StartedProcesses
+				$serverHost = Start-GameProcess @{ 'S3AIR_NETPLAY'="hostserver:$serverSession"; 'S3AIR_LOGNAME'='_serverhost' }
+				$hostRegistered = Wait-Until { (Read-SharedText $serverHostLog) -match 'game server answered, success = 1' -or $serverHost.HasExited } 60
+				$hostRegistered = $hostRegistered -and (Read-SharedText $serverHostLog) -match 'game server answered, success = 1'
+				Add-Result 'M1' 'Host registers its temporary session with the public matchmaking server' $hostRegistered $(if ($hostRegistered) { "session $serverSession" } else { 'no successful registration response within 60 seconds' })
+				$serverJoinReached = $false
+				$serverJoinDetail = 'host did not register; friend join was not attempted'
+				if ($hostRegistered)
+				{
+					$serverFriend = Start-GameProcess @{ 'S3AIR_NETPLAY'="joinserver:$serverSession"; 'S3AIR_LOGNAME'='_serverfriend' }
+					$serverJoinReached = Wait-Until { (Read-SharedText $serverFriendOnline) -match '^\[friend\].* state=5 ' -or (Read-SharedText $serverFriendLog) -match 'giving up|Could not reach the matchmaking server' -or $serverFriend.HasExited } 120
+					$friendText = Read-SharedText $serverFriendLog
+					$friendOnlineText = Read-SharedText $serverFriendOnline
+					$loadedByCode = $friendText -match 'connected to host' -and $friendText -match 'game state loaded, now at frame' -and $friendOnlineText -match '^\[friend\].* state=5 '
+					$serverJoinReached = $serverJoinReached -and $loadedByCode
+					$serverJoinDetail = "connected through server and loaded game: $loadedByCode"
+				}
+				Add-Result 'M2' 'Friend joins the host through public matchmaking by session code' $serverJoinReached $serverJoinDetail
+				Stop-StartedProcesses
+				Save-RunLogs 'M'
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			if (Wants 'N') {
+				Write-Step 'N. Four online players and reconnecting a middle player'
+				$netPartyTarget = Join-Path $appdata 'mods\NetPartyHarness'
+				if (Test-Path $netPartyTarget) { Remove-Item -LiteralPath $netPartyTarget -Recurse -Force }
+				Copy-Item (Join-Path $checksDir 'harness\NetPartyHarness') $netPartyTarget -Recurse
+				# The harness imports DropInCoop globals and functions; load the production mod first.
+				Set-ActiveMods @('DropInCoop', 'NetPartyHarness')
+				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+				Set-Content -Path $configPath -Value $configText -Encoding utf8
+				$code = New-SessionCode
+				$networkLogs = @()
+				foreach ($slot in 1..4) {
+					$networkLogs += (Join-Path $appdata "logfile_party$slot.txt")
+					Remove-Item (Join-Path $appdata "logfile_party$slot.txt"), (Join-Path $appdata "online_log_party$slot.txt") -ErrorAction SilentlyContinue
+				}
+				[void](Start-GameProcess @{ 'S3AIR_NETPLAY'="hostlan:$code"; 'S3AIR_LOGNAME'='_party1'; 'S3AIR_NETPLAY_DEBUG'='1'; 'S3AIR_CHECK_CAPTURE_DIR'=(Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX'='N4' })
+				Start-Sleep -Seconds 8
+				foreach ($slot in 2..4) {
+					$inputMask = if ($slot -eq 2) { '128' } elseif ($slot -eq 3) { '136' } else { '132' }
+					$variables = @{ 'S3AIR_NETPLAY'="joinlan:$code"; 'S3AIR_LOGNAME'="_party$slot"; 'S3AIR_NETPLAY_DEBUG'='1'; 'S3AIR_NETPLAY_TEST_INPUT'=$inputMask }
+					if ($slot -eq 3) { $variables['S3AIR_NETPLAY_RECONNECT_TEST']='1' }
+					[void](Start-GameProcess $variables)
+					$slotLog = $networkLogs[$slot - 1]
+					$joined = Wait-Until { (Read-SharedText $slotLog) -match 'game state loaded, now at frame|Script compile error|giving up' } 90
+					$slotText = Read-SharedText $slotLog
+					Add-Result "N$slot" "Online friend receives player slot $slot and a running-game snapshot" ($joined -and $slotText -match "assigned player $slot" -and $slotText -match 'game state loaded, now at frame') ''
+				}
+				$fourReady = Wait-Until { (Read-SharedText $networkLogs[0]) -match 'CHECK\|network party\|PASS\|players4 input20080 input30088 input40084' } 60
+				if ($fourReady) { Start-Sleep -Seconds 20 }
+				$allNetworkText = ''
+				for ($slot = 1; $slot -le 4; ++$slot) {
+					$slotText = Read-SharedText $networkLogs[$slot - 1]
+					$allNetworkText += $slotText
+					Set-Content -Path (Join-Path $checksDir "last_logs\N4-player$slot.txt") -Value $slotText -Encoding utf8
+				}
+				$middleReconnected = (Read-SharedText $networkLogs[2]) -match 'reconnected and restored the existing session'
+				$hostText = Read-SharedText $networkLogs[0]
+				$lastInputs = @([regex]::Matches($hostText, 'CHECK\|network party\|PASS\|([^\r\n]*)'))
+				$keptSlot4 = $lastInputs.Count -gt 0 -and $lastInputs[-1].Groups[1].Value -match 'players4 input20080 input30088 input40084'
+				$featureReplicas = 0
+				foreach ($slotText in $networkLogs) { if ((Read-SharedText $slotText) -match 'CHECK\|network shared monitor\|PASS\|net 1 features 1 players 4 allocated 1 clones 3') { ++$featureReplicas } }
+				$moveReplicas = 0
+				$bossReplicas = 0
+				foreach ($slotText in $networkLogs) {
+					$peerText = Read-SharedText $slotText
+					if ($peerText -match 'CHECK\|network team move\|PASS\|net 1 enabled 1 launched 1 velocity 1 award 1') { ++$moveReplicas }
+					if ($peerText -match 'CHECK\|network boss phase\|PASS\|net 1 allocated 1 first 1 duplicate 1 partner 1') { ++$bossReplicas }
+				}
+				$desync = $allNetworkText -match "game drifted away|fingerprint mismatch|Script assertion failed|Invalid memory access|Script compile error"
+				Add-Result 'N5' 'All four real input slots drive the shared running game' $fourReady ''
+				Add-Result 'N6' 'Player three reconnects while player four retains their own input slot' ($middleReconnected -and $keptSlot4) ("middle reconnected: $middleReconnected, final slot inputs correct: $keptSlot4")
+				Add-Result 'N7' 'Four-player simulation runs without synchronization repair or script failure' ($fourReady -and -not $desync) ''
+				Add-Result 'N8' 'The online team feature creates three deterministic teammate monitor effects' ($fourReady -and $featureReplicas -eq 4) ("peer copies reporting three clones: $featureReplicas/4")
+				Add-Result 'N9' 'The online team move launches a teammate with synchronized velocity' ($fourReady -and $moveReplicas -eq 4) ("peer copies reporting a launch: $moveReplicas/4")
+				Add-Result 'N10' 'Two online players complete a coordinated boss phase' ($fourReady -and $bossReplicas -eq 4) ("peer copies reporting a boss phase: $bossReplicas/4")
+				Stop-StartedProcesses
+			}
+
+			if ((Wants 'P') -or ($Only -contains 'P3') -or ($Only -contains 'P4') -or ($Only -contains 'T'))
+			{
+				Write-Step 'P. Three/four-player characters, independent movement, jumping and rendering'
+				$partyCounts = @(3, 4)
+				if ($Only -contains 'P3' -or $Only -contains 'T') { $partyCounts = @(3) }
+				elseif ($Only -contains 'P4') { $partyCounts = @(4) }
+				foreach ($count in $partyCounts) {
+					$partyTarget = Join-Path $appdata 'mods\PartyHarness'
+					if (Test-Path $partyTarget) { Remove-Item -LiteralPath $partyTarget -Recurse -Force }
+					Copy-Item (Join-Path $checksDir 'harness\PartyHarness') $partyTarget -Recurse
+					$partyMain = Join-Path $partyTarget 'scripts\main.lemon'
+					Set-Content -Path $partyMain -Value (Get-Content -Raw $partyMain).Replace('__PLAYER_COUNT__', [string]$count) -Encoding utf8 -NoNewline
+					Set-ActiveMods @('PartyHarness', 'DropInCoop')
+					$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+					$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+					Set-Content -Path $configPath -Value $configText -Encoding utf8
+					Remove-Item $logFile -ErrorAction SilentlyContinue
+					$partyGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = "P$count" }
+					[void](Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid memory access|Script assertion failed|Script compile error' -or $partyGame.HasExited } 90)
+					$partyLog = Read-SharedText $logFile
+					Stop-StartedProcesses
+					Set-Content -Path (Join-Path $checksDir "last_logs\P$count-logfile.txt") -Value $partyLog -Encoding utf8
+					$errors = [regex]::Match($partyLog, '(?im)^.*(compile error|Unable to resolve|Invalid memory access|Script assertion failed|Invalid VRAM access).*$')
+					Add-Result "P${count}L" "$count-player scripts load and finish without errors" (-not $errors.Success -and $partyLog -match 'CHECK\|run complete\|') $(if ($errors.Success) { $errors.Value } else { '' })
+					$number = 0
+					foreach ($name in @('party actors', 'party control3', 'party control4', 'party jumping', 'party camera', 'party picture', 'party alive', 'party platforms', 'party score', 'party damage', 'party respawn')) {
+						++$number
+						$entry = [regex]::Match($partyLog, ('CHECK\|' + [regex]::Escape($name) + '\|(PASS|FAIL)\|(.*)'))
+						Add-Result "P${count}.$number" "$count players: $name" ($entry.Success -and $entry.Groups[1].Value -eq 'PASS') $(if ($entry.Success) { $entry.Groups[2].Value } else { 'not reported' })
+					}
+				}
+			}
+
+			if (Wants 'Q')
+			{
+				Write-Step 'Q. Four-player quadrant split-screen (extended local engine)'
+				$quadTarget = Join-Path $appdata 'mods\PartyHarness'
+				if (Test-Path $quadTarget) { Remove-Item -LiteralPath $quadTarget -Recurse -Force }
+				Copy-Item (Join-Path $checksDir 'harness\PartyHarness') $quadTarget -Recurse
+				$quadMain = Join-Path $quadTarget 'scripts\main.lemon'
+				$quadText = (Get-Content -Raw $quadMain).Replace('__PLAYER_COUNT__', '4').Replace('constant bool PARTY_QUAD_TEST = false', 'constant bool PARTY_QUAD_TEST = true')
+				Set-Content -Path $quadMain -Value $quadText -Encoding utf8 -NoNewline
+				Set-ActiveMods @('PartyHarness', 'DropInCoop')
+				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+				Set-Content -Path $configPath -Value $configText -Encoding utf8
+				Remove-Item $logFile -ErrorAction SilentlyContinue
+				$quadGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = 'Q4' }
+				[void](Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier' -or $quadGame.HasExited } 100)
+				$quadLog = Read-SharedText $logFile
+				Stop-StartedProcesses
+				Set-Content -Path (Join-Path $checksDir 'last_logs\Q4-logfile.txt') -Value $quadLog -Encoding utf8
+				$errors = [regex]::Match($quadLog, '(?im)^.*(compile error|Unable to resolve|Invalid memory access|Script assertion failed|Invalid VRAM access).*$')
+				Add-Result 'Q1' 'Four-view scripts load and complete without engine errors' (-not $errors.Success -and $quadLog -match 'CHECK\|run complete\|') $(if ($errors.Success) { $errors.Value } else { '' })
+				$quadChecks = @(@{ Name='party actors'; Id='Q2'; Title='All four actors are active' }, @{ Name='party camera'; Id='Q3'; Title='Four-way split is active' }, @{ Name='four independent cameras'; Id='Q4'; Title='Players three and four have independent cameras' }, @{ Name='party players spaced'; Id='Q5'; Title='Four-player visual capture has readable character spacing' }, @{ Name='party picture'; Id='Q6'; Title='Engine framebuffer captured' }, @{ Name='party alive'; Id='Q7'; Title='All four players remain alive' }, @{ Name='quad per-view scroll data'; Id='Q9'; Title='Each viewport retains its own line-scroll data' })
+				foreach ($contract in $quadChecks) {
+					$entry = [regex]::Match($quadLog, ('CHECK\|' + [regex]::Escape($contract.Name) + '\|(PASS|FAIL)\|(.*)'))
+					Add-Result $contract.Id $contract.Title ($entry.Success -and $entry.Groups[1].Value -eq 'PASS') $(if ($entry.Success) { $entry.Groups[2].Value } else { 'not reported' })
+				}
+				$captureStats = Get-QuadCaptureStats (Join-Path $checksDir 'last_logs\Q4-party-quad.bmp')
+				$allQuadrantsVisible = $null -ne $captureStats -and $captureStats.Width -ge 320 -and $captureStats.Height -ge 200 -and @($captureStats.Quadrants | Where-Object { $_ -lt 200 }).Count -eq 0
+				Add-Result 'Q8' 'Captured frame has visible level pixels in all four quadrants' $allQuadrantsVisible $(if ($null -ne $captureStats) { 'sampled pixels: ' + ($captureStats.Quadrants -join '/') } else { 'engine framebuffer capture is missing' })
+			}
+
+			if (Wants "R")
+			{
+				Write-Step "R. Reconnect to the existing online session after a transport disconnect"
+				$resumed = Invoke-OnlineJoin (New-SessionCode) @{ 'S3AIR_NETPLAY_RECONNECT_TEST' = '1' } 35 'R'
+				$forced = $resumed.Log -match 'automated check disconnecting the transport'
+				$restored = $resumed.Log -match 'reconnected and restored the existing session'
+				$loadedCount = ([regex]::Matches($resumed.Log, 'game state loaded, now at frame')).Count
+				Add-Result 'R1' 'A dropped friend reconnects and receives a fresh game snapshot' ($resumed.Reached -and $forced -and $restored -and $loadedCount -ge 2) ("forced disconnect: $forced, restored: $restored, snapshots: $loadedCount")
+				$progress = @(Get-FriendFps | Where-Object { $_ -gt 0 })
+				Add-Result 'R2' 'The resumed online game continues advancing without sync repairs' ($restored -and $progress.Count -gt 1 -and (Get-FriendRepairs) -eq 0) ("positive frame samples: " + $progress.Count + ", repairs: " + (Get-FriendRepairs))
+			}
+
+			if (Wants "E")
+			{
+			Write-Step "E. Online play with a bad connection (250 ms delay, 5 percent packet loss)"
+
+			$lagged = Invoke-OnlineJoin (New-SessionCode) @{ "S3AIR_NET_LAG" = "250"; "S3AIR_NET_LOSS" = "5" } 25 "E1"
+			$fps = @(Get-FriendFps)
+			$minFps = if ($fps.Count -gt 0) { ($fps | Measure-Object -Minimum).Minimum } else { 0 }
+			$lagRepairs = Get-FriendRepairs
+			$lagAborted = $lagged.Log -match "aborting"
+			Add-Result "E1" "Connection and game survive a bad connection" ($lagged.Reached -and -not $lagAborted) ("in game: " + $lagged.Reached + ", aborted: " + $lagAborted)
+			Add-Result "E2" "Game keeps at least 30 frames per second with the bad connection" ($fps.Count -gt 0 -and $minFps -ge 30) $(if ($fps.Count -gt 0) { "lowest friend fps: " + [math]::Round($minFps, 1) + "; complete steady-state samples: " + $fps.Count } else { 'No complete steady-state FPS samples; performance could not be measured.' })
+			Add-Result "E3" "No repairs needed with the bad connection" ($lagged.Reached -and ($lagRepairs -eq 0)) ("repairs: " + $lagRepairs)
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			if (Wants "F")
+			{
+			Write-Step "F. Split screen, score, rings and the start of Angel Island (game scripts, one window)"
+
+			$harnessTarget = Join-Path $appdata "mods\ChecksHarness"
+			if (Test-Path $harnessTarget) { Remove-Item $harnessTarget -Recurse -Force }
+			Copy-Item $harnessSource $harnessTarget -Recurse
+			if ($Only -contains 'T') {
+				$probeMain = Join-Path $harnessTarget 'scripts\main.lemon'
+				$probeText = (Get-Content -Raw $probeMain).Replace('constant bool Checks.THREE_PLAYER_PROBE = false', 'constant bool Checks.THREE_PLAYER_PROBE = true')
+				Set-Content -Path $probeMain -Value $probeText -Encoding utf8 -NoNewline
+			}
+			Set-ActiveMods @("ChecksHarness", "DropInCoop")
+			# The checks start Angel Island 1 themselves, so no developer save state may be loaded instead
+			$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+			$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+			Set-Content -Path $configPath -Value $configText -Encoding utf8
+			Remove-Item $logFile -ErrorAction SilentlyContinue
+			Stop-StartedProcesses
+
+			$game1 = Start-GameProcess @{}
+			$finishedRun = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid memory access|Script assertion failed|Script compile error|Unable to resolve identifier' -or $game1.HasExited } 300
+			$logText = Read-SharedText $logFile
+			Stop-StartedProcesses
+
+			$reports = @{}
+			foreach ($line in @($logText -split "`r?`n"))
+			{
+				$match = [regex]::Match($line, 'CHECK\|([^|]*)\|(PASS|FAIL)\|(.*)$')
+				if ($match.Success) { $reports[$match.Groups[1].Value] = [pscustomobject]@{ Passed = ($match.Groups[2].Value -eq "PASS"); Detail = $match.Groups[3].Value } }
+			}
+
+			$compileProblems = @([regex]::Matches($logText, '(?im)^.*(compile error|Unable to resolve|Unknown function|Parenthesis not matching|Caused in file|Failed to load|Invalid memory access|Script assertion failed|Invalid VRAM access).*$') | ForEach-Object { $_.Value.Trim() })
+			Add-Result "F1" "Co-op scripts load in the game without errors" ($finishedRun -and $reports.ContainsKey("run complete") -and ($compileProblems.Count -eq 0)) `
+				$(if ($compileProblems.Count -gt 0) { $compileProblems[0] } elseif (-not $finishedRun) { "the game did not finish the checks (check for an error window)" } else { "" })
+
+			$gameChecks = @(
+				@{ Id = "F2"; Name = "aiz start join"; Title = "Player 2 joins at the start of Angel Island while Sonic has not moved" },
+				@{ Id = "F3"; Name = "own view from the start"; Title = "Player 2 has his own view from the start of Angel Island" },
+				@{ Id = "F4"; Name = "score separate per player"; Title = "Score is kept separately for each player" },
+				@{ Id = "F5"; Name = "rings separate per player"; Title = "Getting hurt only costs the rings of the player who got hurt" },
+				@{ Id = "F6"; Name = "off screen ghost hidden while joined"; Title = "The off screen indicator for player 2 is hidden while he is playing" },
+				@{ Id = "F7"; Name = "empty plane queue"; Title = "A clipped empty tile update emits no malformed queue entry" },
+				@{ Id = "F8"; Name = "partner rescue"; Title = "Both players can request rescue with hold, cancel and cooldown" },
+				@{ Id = "F9"; Name = "rescue safety"; Title = "Rescue rejects airborne, attached and scripted destinations" },
+				@{ Id = "F10"; Name = "shared checkpoint"; Title = "Player 2 saves a shared checkpoint using their camera and layer" },
+				@{ Id = "F11"; Name = "independent respawn"; Title = "Both players independently respawn at the shared checkpoint" },
+				@{ Id = "F12"; Name = "boss regroup"; Title = "Boss entry regroups an off-screen partner once" },
+				@{ Id = "F13"; Name = "team carry"; Title = "Tails carry requires consent and has an explicit release" },
+				@{ Id = "F14"; Name = "character move controls"; Title = "Character moves use the configured inputs and velocity profiles" },
+				@{ Id = "F15"; Name = "shared power-up eligibility"; Title = "Positive monitor effects can be shared without sharing Robotnik effects" },
+				@{ Id = "F16"; Name = "coordinated boss hits"; Title = "Two different players complete a coordinated boss phase" },
+				@{ Id = "F17"; Name = "shared monitor effect applied"; Title = "A shared rings monitor effect is applied only to player two" }
+				@{ Id = "F18"; Name = "player two opens monitor"; Title = "Player two opens a monitor collision and owns its effect" }
+			)
+			if ($Only -contains 'T') {
+				$gameChecks += @(
+					@{ Id = 'T1'; Name = 'three player Sonic'; Title = 'Player 1 is Sonic' },
+					@{ Id = 'T2'; Name = 'three player Tails'; Title = 'Player 2 is Tails' },
+					@{ Id = 'T3'; Name = 'three player Knuckles'; Title = 'A third playable Knuckles exists alongside Sonic and Tails' }
+				)
+			}
+			foreach ($check in $gameChecks)
+			{
+				if ($reports.ContainsKey($check.Name))
+				{
+					Add-Result $check.Id $check.Title $reports[$check.Name].Passed $reports[$check.Name].Detail
+				}
+				else
+				{
+					Add-Result $check.Id $check.Title $false "not reported by the game"
+				}
+			}
+			Save-RunLogs "F"
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			# Vanilla check (stage V): the IceCap 1 end teleport with only the game loaded (no co-op mod). Tells whether a crash there is the game's own.
+			if (Wants "V")
+			{
+			Write-Step "V. Vanilla game (no co-op mod): IceCap 1 end teleport"
+			$vanillaTarget = Join-Path $appdata "mods\TeleportHarness"
+			if (Test-Path $vanillaTarget) { Remove-Item $vanillaTarget -Recurse -Force }
+			Copy-Item (Join-Path $checksDir "harness\TeleportHarness") $vanillaTarget -Recurse
+			$vanillaMain = Join-Path $vanillaTarget "scripts\main.lemon"
+			Set-Content -Path $vanillaMain -Value (Get-Content -Raw $vanillaMain).Replace("__ZONE_ACT__", "0x0500") -Encoding utf8 -NoNewline
+			Set-ActiveMods @("TeleportHarness")
+			$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+			$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+			Set-Content -Path $configPath -Value $configText -Encoding utf8
+			Remove-Item $logFile -ErrorAction SilentlyContinue
+			Stop-StartedProcesses
+
+			$vanillaGame = Start-GameProcess @{}
+			$vanillaFinished = Wait-Until { $t = Read-SharedText $logFile; ($t -match 'CHECK\|run complete\|') -or ($t -match 'Invalid VRAM') -or $vanillaGame.HasExited } 150
+			$vanillaLog = Read-SharedText $logFile
+			Stop-StartedProcesses
+			Set-Content -Path (Join-Path $checksDir "last_logs\V1-logfile.txt") -Value $vanillaLog -Encoding utf8
+			$vanillaCrashed = $vanillaLog -match 'Invalid VRAM'
+			$vanillaDone = $vanillaLog -match 'CHECK\|run complete\|'
+			Add-Result "V1" "Vanilla game: the IceCap 1 end teleport runs without a VRAM error" ($vanillaDone -and -not $vanillaCrashed) $(if ($vanillaCrashed) { "the game itself crashes: " + [regex]::Match($vanillaLog, 'Invalid VRAM[^\r\n]*').Value } elseif (-not $vanillaDone) { "did not finish (an error window?)" } else { "" })
+			}
+
+			# Boss test (stage H): Sonic is moved to the end of each act and runs into the boss. Pass: the boss starts, the screen is one
+			# shared view there, and both players are alive. Screenshots are saved next to the logs for a look at the picture.
+			if ((Wants "H") -or (@($Only | Where-Object { $_ -match '^H\d\d$' }).Count -gt 0))
+			{
+			Write-Step "H. Boss at the end of each act (one game window per act, with screenshots)"
+
+			$bossHarnessSource = Join-Path $checksDir "harness\BossHarness"
+			$bossLogFolder = Join-Path $checksDir "last_logs"
+			New-Item -ItemType Directory -Force -Path $bossLogFolder | Out-Null
+			$bossTargets = @(
+				@{ Id = "H01"; Code = "0x0001"; Name = "Angel Island 1" },
+				@{ Id = "H02"; Code = "0x0001"; Name = "Angel Island 2" },
+				@{ Id = "H03"; Code = "0x0100"; Name = "Hydrocity 1" },
+				@{ Id = "H04"; Code = "0x0101"; Name = "Hydrocity 2" },
+				@{ Id = "H05"; Code = "0x0200"; Name = "Marble Garden 1" },
+				@{ Id = "H06"; Code = "0x0201"; Name = "Marble Garden 2" },
+				@{ Id = "H07"; Code = "0x0300"; Name = "Carnival Night 1" },
+				@{ Id = "H08"; Code = "0x0301"; Name = "Carnival Night 2" },
+				@{ Id = "H09"; Code = "0x0400"; Name = "Flying Battery 1" },
+				@{ Id = "H10"; Code = "0x0401"; Name = "Flying Battery 2" },
+				@{ Id = "H11"; Code = "0x0501"; Apparent = "0x0500"; Name = "IceCap 1" },
+				@{ Id = "H12"; Code = "0x0501"; Name = "IceCap 2" },
+				@{ Id = "H13"; Code = "0x0600"; Name = "Launch Base 1" },
+				@{ Id = "H14"; Code = "0x0601"; Name = "Launch Base 2" },
+				@{ Id = "H15"; Code = "0x0700"; Name = "Mushroom Hill 1" },
+				@{ Id = "H16"; Code = "0x0701"; Name = "Mushroom Hill 2" },
+				@{ Id = "H17"; Code = "0x0800"; Name = "Sandopolis 1" },
+				@{ Id = "H18"; Code = "0x0801"; Name = "Sandopolis 2" },
+				@{ Id = "H19"; Code = "0x0900"; Name = "Lava Reef 1" },
+				@{ Id = "H20"; Code = "0x1600"; Name = "Lava Reef boss" },
+				@{ Id = "H21"; Code = "0x0a00"; Name = "Sky Sanctuary" },
+				@{ Id = "H22"; Code = "0x0b00"; Name = "Death Egg 1" },
+				@{ Id = "H23"; Code = "0x0b01"; Name = "Death Egg 2" }
+			)
+			$bossFilter = @($Only | Where-Object { $_ -match '^H\d\d$' })
+			foreach ($act in $bossTargets)
+			{
+				if ($bossFilter.Count -gt 0 -and -not ($bossFilter -contains $act.Id)) { continue }
+				$bossHarnessTarget = Join-Path $appdata "mods\BossHarness"
+				if (Test-Path $bossHarnessTarget) { Remove-Item $bossHarnessTarget -Recurse -Force }
+				Copy-Item $bossHarnessSource $bossHarnessTarget -Recurse
+				$bossMainPath = Join-Path $bossHarnessTarget "scripts\main.lemon"
+				$bossFixtures = Get-Content -Raw (Join-Path $checksDir 'boss_fixtures.json') | ConvertFrom-Json
+				$bossFixture = $bossFixtures.($act.Id)
+				if (-not $bossFixture) {
+					Add-Result $act.Id ("Boss at the end of " + $act.Name) $false 'No source-derived approach fixture; boss coverage remains incomplete.'
+					continue
+				}
+				Set-Content -Path $bossMainPath -Value (Get-Content -Raw $bossMainPath).Replace("__ZONE_ACT__", $act.Code).Replace("__END_FRAME__", "900").Replace('__BOSS_START_X__', $bossFixture.x).Replace('__BOSS_START_Y__', $bossFixture.y).Replace('__BOSS_ADDRESS__', $bossFixture.address).Replace('__BOSS_TARGET_X__', $bossFixture.targetX).Replace('__BOSS_TARGET_Y__', $bossFixture.targetY) -Encoding utf8 -NoNewline
+				Set-ActiveMods @("BossHarness", "DropInCoop")
+				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+				Set-Content -Path $configPath -Value $configText -Encoding utf8
+				Remove-Item $logFile -ErrorAction SilentlyContinue
+				Stop-StartedProcesses
+
+				$bossGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = $act.Id }
+				$roamShot = $false
+				$bossShot = $false
+				$deadline = (Get-Date).AddSeconds(180)
+				while ((Get-Date) -lt $deadline -and -not $bossGame.HasExited)
+				{
+					$bossText = Read-SharedText $logFile
+					if ($bossText -match 'CHECK\|run complete\|') { break }
+					if (-not $roamShot -and $bossText -match 'diag boss\|PASS\|f300 ')
+					{
+						$roamShot = Save-GameScreenshot $bossGame (Join-Path $bossLogFolder ($act.Id + "-roaming.png"))
+					}
+					if ($bossText -match 'Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier')
+					{
+						# The error window is shown on top of the game: keep its picture, the game cannot continue
+						Start-Sleep -Milliseconds 800
+						Save-ScreenPicture (Join-Path $bossLogFolder ($act.Id + "-error.png"))
+						break
+					}
+					if (-not $bossShot -and $bossText -match 'diag boss\|PASS\|f\d+ boss 1 [^\r\n]*hits[1-9]')
+					{
+						$bossShot = Save-GameScreenshot $bossGame (Join-Path $bossLogFolder ($act.Id + "-boss.png"))
+					}
+					Start-Sleep -Milliseconds 300
+				}
+				$bossFinished = ((Read-SharedText $logFile) -match 'CHECK\|run complete\|')
+				$bossLog = Read-SharedText $logFile
+				Stop-StartedProcesses
+				Set-Content -Path (Join-Path $bossLogFolder ($act.Id + "-logfile.txt")) -Value $bossLog -Encoding utf8
+
+				$bossMatch = [regex]::Match($bossLog, 'CHECK\|boss test\|(PASS|FAIL)\|(.*)')
+				$bossErrors = @([regex]::Matches($bossLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
+				if ($bossMatch.Success)
+				{
+					$bossPassed = ($bossMatch.Groups[1].Value -eq "PASS") -and ($bossErrors.Count -eq 0)
+					$bossDetail = $bossMatch.Groups[2].Value
+					if ($bossErrors.Count -gt 0) { $bossDetail = $bossErrors[0] + " -- " + $bossDetail }
+				}
+				else
+				{
+					$bossPassed = $false
+					$bossDetail = $(if ($bossErrors.Count -gt 0) { $bossErrors[0] } elseif (-not $bossFinished) { "the game did not finish (an error window?)" } else { "no result reported" })
+				}
+					Add-Result $act.Id ("Boss scene in " + $act.Name + " (four players, one shared screen; route not covered)") $bossPassed $bossDetail
+					$captureMatch = [regex]::Match($bossLog, 'CHECK\|boss render capture\|(PASS|FAIL)\|(.*)')
+					Add-Result ($act.Id + 'V') ($act.Name + ': engine framebuffer captured during the boss view') ($captureMatch.Success -and $captureMatch.Groups[1].Value -eq 'PASS') $(if ($captureMatch.Success) { $captureMatch.Groups[2].Value } else { 'boss view capture was not reported' })
+			}
+			}
+
+			# -Only G04,G11 runs just those acts of stage G
+			if ((Wants "G") -or (@($Only | Where-Object { $_ -match '^G\d\d$' }).Count -gt 0))
+			{
+			Write-Step "G. Split screen in every act (one game window per act)"
+
+			$actHarnessSource = Join-Path $checksDir "harness\ActHarness"
+			$actTargets = @(
+				@{ Id = "G01"; Code = "0x0000"; Name = "Angel Island 1" },
+				@{ Id = "G02"; Code = "0x0001"; Name = "Angel Island 2" },
+				@{ Id = "G03"; Code = "0x0100"; Name = "Hydrocity 1" },
+				@{ Id = "G04"; Code = "0x0101"; Name = "Hydrocity 2"; End = 1400; TeleportX = "0x0d00"; TeleportY = "0x0400" },
+				@{ Id = "G05"; Code = "0x0200"; Name = "Marble Garden 1" },
+				@{ Id = "G06"; Code = "0x0201"; Name = "Marble Garden 2" },
+				@{ Id = "G07"; Code = "0x0300"; Name = "Carnival Night 1" },
+				@{ Id = "G08"; Code = "0x0301"; Name = "Carnival Night 2" },
+				@{ Id = "G09"; Code = "0x0400"; Name = "Flying Battery 1" },
+				@{ Id = "G10"; Code = "0x0401"; Name = "Flying Battery 2" },
+				@{ Id = "G11"; Code = "0x0500"; Name = "IceCap 1"; End = 2200 },
+				@{ Id = "G12"; Code = "0x0501"; Name = "IceCap 2" },
+				@{ Id = "G13"; Code = "0x0600"; Name = "Launch Base 1" },
+				@{ Id = "G14"; Code = "0x0601"; Name = "Launch Base 2" },
+				@{ Id = "G15"; Code = "0x0700"; Name = "Mushroom Hill 1" },
+				@{ Id = "G16"; Code = "0x0701"; Name = "Mushroom Hill 2" },
+				@{ Id = "G17"; Code = "0x0800"; Name = "Sandopolis 1" },
+				@{ Id = "G18"; Code = "0x0801"; Name = "Sandopolis 2" },
+				@{ Id = "G19"; Code = "0x0900"; Name = "Lava Reef 1" },
+				@{ Id = "G20"; Code = "0x0901"; Name = "Lava Reef 2" },
+				@{ Id = "G21"; Code = "0x0a00"; Name = "Sky Sanctuary" },
+				@{ Id = "G22"; Code = "0x0b00"; Name = "Death Egg 1" },
+				@{ Id = "G23"; Code = "0x0b01"; Name = "Death Egg 2" },
+				@{ Id = "G24"; Code = "0x1601"; Name = "Hidden Palace" },
+				@{ Id = "G25"; Code = "0x1600"; Name = "Lava Reef boss"; Boss = $true },
+				@{ Id = "G26"; Code = "0x1700"; Name = "Death Egg boss"; Boss = $true }
+			)
+			foreach ($act in $actTargets)
+			{
+				$actFilter = @($Only | Where-Object { $_ -match '^G\d\d$' })
+				if ($actFilter.Count -gt 0 -and -not ($actFilter -contains $act.Id)) { continue }
+				$actHarnessTarget = Join-Path $appdata "mods\ActHarness"
+				if (Test-Path $actHarnessTarget) { Remove-Item $actHarnessTarget -Recurse -Force }
+				Copy-Item $actHarnessSource $actHarnessTarget -Recurse
+				$actMainPath = Join-Path $actHarnessTarget "scripts\main.lemon"
+				Set-Content -Path $actMainPath -Value (Get-Content -Raw $actMainPath).Replace("__ZONE_ACT__", $act.Code).Replace("__EXPECT_SPLIT__", $(if ($act.Boss) { "0" } else { "1" })).Replace("__END_FRAME__", $(if ($act.End) { [string]$act.End } else { "560" })).Replace("__TELEPORT_ON__", $(if ($act.TeleportX) { "1" } else { "0" })).Replace("__TELEPORT_X__", $(if ($act.TeleportX) { $act.TeleportX } else { "0" })).Replace("__TELEPORT_Y__", $(if ($act.TeleportY) { $act.TeleportY } else { "0" })) -Encoding utf8 -NoNewline
+				Set-ActiveMods @("ActHarness", "DropInCoop")
+				# Same start as the F stage: no developer save state, the level is started directly
+				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+				Set-Content -Path $configPath -Value $configText -Encoding utf8
+				Remove-Item $logFile -ErrorAction SilentlyContinue
+				Stop-StartedProcesses
+
+				$actGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = $act.Id }
+				# Waits for the end of the check; takes a screenshot of the roaming part (split screen expected) and of any error window
+				$actFinished = $false
+				$actShot = $false
+				$actDeadline = (Get-Date).AddSeconds(150)
+				while ((Get-Date) -lt $actDeadline -and -not $actGame.HasExited)
+				{
+					$actText = Read-SharedText $logFile
+					if ($actText -match 'CHECK\|run complete\|') { $actFinished = $true; break }
+					if ($actText -match 'Invalid VRAM')
+					{
+						Start-Sleep -Milliseconds 800
+						Save-ScreenPicture (Join-Path $checksDir ("last_logs\" + $act.Id + "-error.png"))
+						break
+					}
+					if (-not $actShot -and $actText -match 'diag level\|PASS\|[^\r\n]* split 1')
+					{
+						$actShot = Save-GameScreenshot $actGame (Join-Path $checksDir ("last_logs\" + $act.Id + "-roaming.png"))
+					}
+					Start-Sleep -Milliseconds 300
+				}
+				$actLog = Read-SharedText $logFile
+				Stop-StartedProcesses
+
+				$actMatch = [regex]::Match($actLog, 'CHECK\|split screen\|(PASS|FAIL)\|(.*)')
+				$actErrors = @([regex]::Matches($actLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|Caused during|compile error|Unable to resolve|Failed to load).*$') | ForEach-Object { $_.Value.Trim() })
+				if ($actMatch.Success)
+				{
+					$actPassed = ($actMatch.Groups[1].Value -eq "PASS") -and ($actErrors.Count -eq 0)
+					$actDetail = $actMatch.Groups[2].Value
+					if ($actErrors.Count -gt 0) { $actDetail = $actErrors[0] + " -- " + $actDetail }
+				}
+				else
+				{
+					$actPassed = $false
+					$actDetail = $(if ($actErrors.Count -gt 0) { $actErrors[0] } elseif (-not $actFinished) { "the game did not finish (an error window?)" } else { "no result reported" })
+				}
+				$actTitle = $(if ($act.Boss) { "Boss arena in " + $act.Name + " is one shared screen, player 2 keeps playing" } else { "Split screen in " + $act.Name })
+				Add-Result $act.Id $actTitle $actPassed $actDetail
+				if (-not $act.Boss) {
+					foreach ($contract in @(@{ Name='boss screen contract'; Id='B'; Title='Encounter input switches to shared screen' }, @{ Name='resume screen contract'; Id='R'; Title='Roaming view resumes after encounter input clears' }, @{ Name='render capture'; Id='P'; Title='Engine framebuffer captured' })) {
+						$contractMatch = [regex]::Match($actLog, ('CHECK\|' + [regex]::Escape($contract.Name) + '\|(PASS|FAIL)\|(.*)'))
+						Add-Result ($act.Id + $contract.Id) ($act.Name + ': ' + $contract.Title) ($contractMatch.Success -and $contractMatch.Groups[1].Value -eq 'PASS') $(if ($contractMatch.Success) { $contractMatch.Groups[2].Value } else { 'not reported by the game' })
+					}
+				}
+				# Each act's own game log (the diagnostics every half second are in it)
+				$actLogFolder = Join-Path $checksDir "last_logs"
+				New-Item -ItemType Directory -Force -Path $actLogFolder | Out-Null
+				Set-Content -Path (Join-Path $actLogFolder ($act.Id + "-logfile.txt")) -Value $actLog -Encoding utf8
+			}
+			}
+
+			if ((Wants 'QG') -or (@($Only | Where-Object { $_ -match '^QG\d\d$' }).Count -gt 0))
+			{
+				Write-Step 'QG. Four-player view coverage in every act (shared-camera fallback where needed)'
+				$quadTargets = @(
+					@{ Id='QG01'; Code='0x0000'; Name='Angel Island 1'; End=2200 }, @{ Id='QG02'; Code='0x0001'; Name='Angel Island 2' },
+					@{ Id='QG03'; Code='0x0100'; Name='Hydrocity 1' }, @{ Id='QG04'; Code='0x0101'; Name='Hydrocity 2'; End=1400; TeleportX='0x0d00'; TeleportY='0x0400' },
+					@{ Id='QG05'; Code='0x0200'; Name='Marble Garden 1' }, @{ Id='QG06'; Code='0x0201'; Name='Marble Garden 2' },
+					@{ Id='QG07'; Code='0x0300'; Name='Carnival Night 1' }, @{ Id='QG08'; Code='0x0301'; Name='Carnival Night 2' },
+					@{ Id='QG09'; Code='0x0400'; Name='Flying Battery 1' }, @{ Id='QG10'; Code='0x0401'; Name='Flying Battery 2' },
+					@{ Id='QG11'; Code='0x0500'; Name='IceCap 1'; End=2200 }, @{ Id='QG12'; Code='0x0501'; Name='IceCap 2' },
+					@{ Id='QG13'; Code='0x0600'; Name='Launch Base 1' }, @{ Id='QG14'; Code='0x0601'; Name='Launch Base 2' },
+					@{ Id='QG15'; Code='0x0700'; Name='Mushroom Hill 1' }, @{ Id='QG16'; Code='0x0701'; Name='Mushroom Hill 2' },
+					@{ Id='QG17'; Code='0x0800'; Name='Sandopolis 1' }, @{ Id='QG18'; Code='0x0801'; Name='Sandopolis 2' },
+					@{ Id='QG19'; Code='0x0900'; Name='Lava Reef 1' }, @{ Id='QG20'; Code='0x0901'; Name='Lava Reef 2' },
+					@{ Id='QG21'; Code='0x0a00'; Name='Sky Sanctuary' }, @{ Id='QG22'; Code='0x0b00'; Name='Death Egg 1' },
+					@{ Id='QG23'; Code='0x0b01'; Name='Death Egg 2' }, @{ Id='QG24'; Code='0x1601'; Name='Hidden Palace' }
+				)
+				$quadActFilter = @($Only | Where-Object { $_ -match '^QG\d\d$' })
+				foreach ($act in $quadTargets)
+				{
+					if ($quadActFilter.Count -gt 0 -and -not ($quadActFilter -contains $act.Id)) { continue }
+					$quadActTarget = Join-Path $appdata 'mods\ActHarness'
+					if (Test-Path $quadActTarget) { Remove-Item -LiteralPath $quadActTarget -Recurse -Force }
+					Copy-Item (Join-Path $checksDir 'harness\ActHarness') $quadActTarget -Recurse
+					$quadActMain = Join-Path $quadActTarget 'scripts\main.lemon'
+					$quadActText = (Get-Content -Raw $quadActMain).Replace('constant bool QUAD_ACT_TEST = false', 'constant bool QUAD_ACT_TEST = true').Replace('__ZONE_ACT__', $act.Code).Replace('__EXPECT_SPLIT__', $(if ($act.Boss) { '0' } else { '1' })).Replace('__END_FRAME__', $(if ($act.End) { [string]$act.End } else { '560' })).Replace('__TELEPORT_ON__', $(if ($act.TeleportX) { '1' } else { '0' })).Replace('__TELEPORT_X__', $(if ($act.TeleportX) { $act.TeleportX } else { '0' })).Replace('__TELEPORT_Y__', $(if ($act.TeleportY) { $act.TeleportY } else { '0' }))
+					Set-Content -Path $quadActMain -Value $quadActText -Encoding utf8 -NoNewline
+					Set-ActiveMods @('ActHarness', 'DropInCoop')
+					$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+					$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+					Set-Content -Path $configPath -Value $configText -Encoding utf8
+					Remove-Item $logFile -ErrorAction SilentlyContinue
+					Stop-StartedProcesses
+					$quadActGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = $act.Id }
+					$quadActFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier' -or $quadActGame.HasExited } 180
+					$quadActLog = Read-SharedText $logFile
+					Stop-StartedProcesses
+					Set-Content -Path (Join-Path $checksDir ('last_logs\' + $act.Id + '-logfile.txt')) -Value $quadActLog -Encoding utf8
+					$quadActMatch = [regex]::Match($quadActLog, 'CHECK\|split screen\|(PASS|FAIL)\|(.*)')
+					$quadActErrors = [regex]::Match($quadActLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
+					$quadActPassed = $quadActMatch.Success -and $quadActMatch.Groups[1].Value -eq 'PASS' -and -not $quadActErrors.Success
+					$quadActDetail = if ($quadActErrors.Success) { $quadActErrors.Value } elseif ($quadActMatch.Success) { $quadActMatch.Groups[2].Value } elseif (-not $quadActFinished) { 'four-player scene run did not finish' } else { 'four-player scene result missing' }
+					Add-Result $act.Id ('Four-player scene: ' + $act.Name) $quadActPassed $quadActDetail
+					if ($quadActMatch.Success -and $quadActMatch.Groups[2].Value -match 'quad 1 req 1 players 4 frames \d+ seen 1')
+					{
+						$quadImage = Join-Path $checksDir ('last_logs\' + $act.Id + '-roaming.bmp')
+						$quadPixels = Get-QuadCaptureStats $quadImage
+						$quadPicturePassed = $null -ne $quadPixels -and @($quadPixels.Quadrants | Where-Object { $_ -lt 200 }).Count -eq 0
+						Add-Result ($act.Id + 'V') ($act.Name + ': four rendered quadrants') $quadPicturePassed $(if ($null -ne $quadPixels) { $quadPixels.Quadrants -join '/' } else { 'missing framebuffer capture' })
+					}
+				}
+			}
+
+			if (Wants 'Z')
+			{
+				Write-Step 'Z. AIZ zip line remains loaded and rendered in P2-only view'
+				$ziplineTarget = Join-Path $appdata 'mods\ActHarness'
+				if (Test-Path -LiteralPath $ziplineTarget) { Remove-Item -LiteralPath $ziplineTarget -Recurse -Force }
+				Copy-Item (Join-Path $checksDir 'harness\ActHarness') $ziplineTarget -Recurse
+				$ziplineMain = Join-Path $ziplineTarget 'scripts\main.lemon'
+				$ziplineText = (Get-Content -Raw $ziplineMain).Replace('constant bool ZIPLINE_TEST = false', 'constant bool ZIPLINE_TEST = true').Replace('__ZONE_ACT__', '0x0000').Replace('__EXPECT_SPLIT__', '1').Replace('__END_FRAME__', '4500').Replace('__TELEPORT_ON__', '0').Replace('__TELEPORT_X__', '0').Replace('__TELEPORT_Y__', '0')
+				Set-Content -Path $ziplineMain -Value $ziplineText -Encoding utf8 -NoNewline
+				Set-ActiveMods @('ActHarness', 'DropInCoop')
+				$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+				$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+				Set-Content -Path $configPath -Value $configText -Encoding utf8
+				Remove-Item $logFile -ErrorAction SilentlyContinue
+				Stop-StartedProcesses
+				$ziplineGame = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = (Join-Path $checksDir 'last_logs'); 'S3AIR_CHECK_CAPTURE_PREFIX' = 'Z1' }
+				$ziplineFinished = Wait-Until { (Read-SharedText $logFile) -match 'CHECK\|run complete\||Invalid VRAM|Script assertion failed|Script compile error|Unable to resolve identifier' -or $ziplineGame.HasExited } 180
+				$ziplineLog = Read-SharedText $logFile
+				Stop-StartedProcesses
+				Set-Content -Path (Join-Path $checksDir 'last_logs\Z1-logfile.txt') -Value $ziplineLog -Encoding utf8
+				$ziplineErrors = [regex]::Match($ziplineLog, '(?im)^.*(Invalid VRAM access|Script assertion failed|compile error|Unable to resolve|Failed to load).*$')
+				$ziplineMatch = [regex]::Match($ziplineLog, 'CHECK\|zipline p2-only view\|(PASS|FAIL)\|(.*)')
+				$ziplinePassed = $ziplineMatch.Success -and $ziplineMatch.Groups[1].Value -eq 'PASS' -and -not $ziplineErrors.Success
+				$ziplineDetail = if ($ziplineErrors.Success) { $ziplineErrors.Value } elseif ($ziplineMatch.Success) { $ziplineMatch.Groups[2].Value } elseif (-not $ziplineFinished) { 'zip-line scene did not finish' } else { 'zip-line result missing' }
+				Add-Result 'Z1' 'AIZ zip-line objects render in P2 view while outside P1 view' $ziplinePassed $ziplineDetail
+				$captureMatch = [regex]::Match($ziplineLog, 'CHECK\|zipline framebuffer\|(PASS|FAIL)\|(.*)')
+				Add-Result 'Z1V' 'Engine framebuffer captured with P2 centered on the zip line' ($captureMatch.Success -and $captureMatch.Groups[1].Value -eq 'PASS') $(if ($captureMatch.Success) { $captureMatch.Groups[2].Value } else { 'framebuffer capture was not reported' })
+			}
+		}
+	}
+	finally
+	{
+		Stop-StartedProcesses
+		if ($null -ne $savedModsText) { Set-Content -Path $savedMods -Value $savedModsText -Encoding utf8 } elseif (Test-Path $savedMods) { Remove-Item $savedMods -Force }
+		Set-Content -Path $configPath -Value $savedConfigText -Encoding utf8 -NoNewline
+		if (Test-Path -LiteralPath $recoveryPath) { Remove-Item -LiteralPath $recoveryPath -Force }
+		$harnessInstalled = Join-Path $appdata "mods\ChecksHarness"
+		if (Test-Path $harnessInstalled) { Remove-Item $harnessInstalled -Recurse -Force }
+		$vanillaInstalled = Join-Path $appdata "mods\TeleportHarness"
+		if (Test-Path $vanillaInstalled) { Remove-Item $vanillaInstalled -Recurse -Force }
+		$bossHarnessInstalled = Join-Path $appdata "mods\BossHarness"
+		if (Test-Path $bossHarnessInstalled) { Remove-Item $bossHarnessInstalled -Recurse -Force }
+		$actHarnessInstalled = Join-Path $appdata "mods\ActHarness"
+		if (Test-Path $actHarnessInstalled) { Remove-Item $actHarnessInstalled -Recurse -Force }
+		$partyHarnessInstalled = Join-Path $appdata 'mods\PartyHarness'
+		if (Test-Path $partyHarnessInstalled) { Remove-Item -LiteralPath $partyHarnessInstalled -Recurse -Force }
+		$netPartyHarnessInstalled = Join-Path $appdata 'mods\NetPartyHarness'
+		if (Test-Path $netPartyHarnessInstalled) { Remove-Item -LiteralPath $netPartyHarnessInstalled -Recurse -Force }
+		Write-Host ""
+		Write-Host "Your mod list, config and settings were put back." -ForegroundColor DarkGray
+	}
+}
+catch
+{
+	Add-Result "X1" "The check run completed" $false $_.Exception.Message
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# Report
+
+$passedCount = @($results | Where-Object { $_.Passed }).Count
+$total = $results.Count
+$allPassed = ($passedCount -eq $total) -and ($total -gt 0)
+
+$lines = @()
+$lines += "Sonic 3 A.I.R. Drop-In Co-op automated checks - " + (Get-Date -Format "yyyy-MM-dd HH:mm")
+$lines += ""
+foreach ($result in $results)
+{
+	$mark = if ($result.Passed) { "PASS" } else { "FAIL" }
+	$lines += ($mark + "  " + $result.Id.PadRight(4) + " " + $result.Title + $(if ($result.Detail) { "  -- " + $result.Detail } else { "" }))
+}
+$lines += ""
+$lines += ("Result: " + $passedCount + " of " + $total + " passed. " + $(if ($allPassed) { "EXECUTED CHECKS PASSED. Coverage limits are listed in CHECKLIST.md." } else { "NOT READY, see the FAIL lines." }))
+Set-Content -Path $reportPath -Value $lines -Encoding utf8
+
+Write-Host ""
+Write-Host ("Result: " + $passedCount + " of " + $total + " checks passed.") -ForegroundColor $(if ($allPassed) { "Green" } else { "Red" })
+Write-Host ("Report: " + $reportPath)
+Write-Host ""
+
+$checkRunMutex.ReleaseMutex()
+$checkRunMutex.Dispose()
+if ($allPassed) { exit 0 } else { exit 1 }

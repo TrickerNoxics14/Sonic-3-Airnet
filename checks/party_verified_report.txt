@@ -1,0 +1,68 @@
+﻿Sonic 3 A.I.R. Drop-In Co-op automated checks - 2026-11-09 12:37
+
+PASS  A1   Engine is built from the current C++ source  -- build log ok: True, exe newer than newest source file: True (run with -Build if not)
+PASS  A2   Release package exists and can be opened  -- 825 files
+PASS  A3   Packaged engine is the same file as the build
+PASS  A4   Packaged game scripts are the current scripts  -- 485 files, 0 differ, 485 packaged
+PASS  A5   Packaged co-op mod is the current DropInCoop  -- 17 files, 0 differ
+PASS  A6   No saves, script caches or save states in the package
+PASS  A7   No game ROM in the package
+PASS  A8   Packaged config starts the normal way (no test start)
+PASS  A9   Readme explains the join code and the log file
+PASS  A10  No developer test mods in the package
+PASS  B1   Co-op scripts have balanced brackets
+PASS  B2   Co-op scripts contain no test hooks
+PASS  B3   Each mod override has exactly one implementation per signature
+PASS  C1   session code round trip
+PASS  C2   session code accepts lower case without dash
+PASS  C3   join code round trip
+PASS  C4   join code rejects an invalid address
+PASS  C5   join code rejects wrong length
+PASS  C6   join code rejects invalid characters
+PASS  C7   join code notices typing mistakes  -- 0 of 2232 single character typos accepted (limit 0.5 percent)
+PASS  C8   four controller slots exposed  -- configured players 4
+PASS  N2   Online friend receives player slot 2 and a running-game snapshot
+PASS  N3   Online friend receives player slot 3 and a running-game snapshot
+PASS  N4   Online friend receives player slot 4 and a running-game snapshot
+PASS  N5   All four real input slots drive the shared running game
+PASS  N6   Player three reconnects while player four retains their own input slot  -- middle reconnected: True, final slot inputs correct: True
+PASS  N7   Four-player simulation runs without synchronization repair or script failure
+PASS  P3L  3-player scripts load and finish without errors
+PASS  P3.1 3 players: party actors  -- players 3 P3 ffffb40c P4 00000000
+PASS  P3.2 3 players: party control3  -- dx P1 0 P2 0 P3 11 P4 0
+PASS  P3.3 3 players: party control4  -- P4 00000000 dx 0
+PASS  P3.4 3 players: party jumping  -- P3 jump 1 P4 jump 0
+PASS  P3.5 3 players: party camera  -- Shared camera while three/four players play
+PASS  P3.6 3 players: party picture  -- Engine framebuffer for visual verification
+PASS  P3.7 3 players: party alive  -- Original terrain physics, no invulnerability or disabled damage fixture
+PASS  P3.8 3 players: party platforms  -- Separate standing pointers, shared helper, original contact bits restored
+PASS  P3.9 3 players: party score  -- Extra players receive only their own points
+PASS  P3.10 3 players: party damage  -- rings P1 46 P2 30 P3 0 P4 17
+PASS  P3.11 3 players: party respawn  -- Extra player's real death and respawn do not restart the leader's game
+PASS  P4L  4-player scripts load and finish without errors
+PASS  P4.1 4 players: party actors  -- players 4 P3 ffffb40c P4 ffffb456
+PASS  P4.2 4 players: party control3  -- dx P1 0 P2 0 P3 11 P4 0
+PASS  P4.3 4 players: party control4  -- P4 ffffb456 dx -12
+PASS  P4.4 4 players: party jumping  -- P3 jump 1 P4 jump 1
+PASS  P4.5 4 players: party camera  -- Shared camera while three/four players play
+PASS  P4.6 4 players: party picture  -- Engine framebuffer for visual verification
+PASS  P4.7 4 players: party alive  -- Original terrain physics, no invulnerability or disabled damage fixture
+PASS  P4.8 4 players: party platforms  -- Separate standing pointers, shared helper, original contact bits restored
+PASS  P4.9 4 players: party score  -- Extra players receive only their own points
+PASS  P4.10 4 players: party damage  -- rings P1 45 P2 37 P3 0 P4 17
+PASS  P4.11 4 players: party respawn  -- Extra player's real death and respawn do not restart the leader's game
+PASS  F1   Co-op scripts load in the game without errors
+PASS  F2   Player 2 joins at the start of Angel Island while Sonic has not moved  -- before: camera routine 0, Tails routine 0a; after: joined 1, Tails routine 06, level started 0, Sonic control 00
+PASS  F3   Player 2 has his own view from the start of Angel Island  -- still in intro 1, split 1, split possible 1, Tails routine 06, Tails base state 02, split reason 0
+PASS  F4   Score is kept separately for each player  -- player 1 0 -> 0, player 2 0 -> 50
+PASS  F5   Getting hurt only costs the rings of the player who got hurt  -- player 1 rings 40 (was 40), player 2 rings 0 (was 25); player 2 state after the hit 1a, invulnerability 120, protection 00
+PASS  F6   The off screen indicator for player 2 is hidden while he is playing  -- joined 1, hidden 1
+PASS  F7   A clipped empty tile update emits no malformed queue entry  -- column 1, row 1, explicit zero 1
+PASS  F8   Both players can request rescue with hold, cancel and cooldown  -- wait 1 reset 1 P1 1 P2 1
+PASS  F9   Rescue rejects airborne, attached and scripted destinations  -- air 1 platform 1 cutscene 1 boss 1
+PASS  F10  Player 2 saves a shared checkpoint using their camera and layer  -- P2 state 1 main camera restored 1
+PASS  F11  Both players independently respawn at the shared checkpoint  -- P1 1 P2 1 zone guard 1
+PASS  F12  Boss entry regroups an off-screen partner once  -- regroup 1 repeated teleport prevented 1
+PASS  F13  Tails carry requires consent and has an explicit release  -- consent 1 carry 1 release 1
+
+Result: 64 of 64 passed. EXECUTED CHECKS PASSED. Coverage limits are listed in CHECKLIST.md.

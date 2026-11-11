@@ -1,0 +1,263 @@
+Sonic 3 A.I.R. Drop-In Co-op automated checks - 2026-11-10 14:20
+
+PASS  A1   Engine is built from the current C++ source  -- build log ok: True, exe newer than newest source file: True (run with -Build if not)
+PASS  A2   Release package exists and can be opened  -- 825 files
+PASS  A3   Packaged engine is the same file as the build
+PASS  A4   Packaged game scripts are the current scripts  -- 485 files, 0 differ, 485 packaged
+FAIL  A5   Packaged co-op mod is the current DropInCoop  -- 17 files, 1 differ
+PASS  A6   No saves, script caches or save states in the package
+PASS  A7   No game ROM in the package
+PASS  A8   Packaged config starts the normal way (no test start)
+PASS  A9   Readme explains the join code and the log file
+PASS  A10  No developer test mods in the package
+PASS  B1   Co-op scripts have balanced brackets
+PASS  B2   Co-op scripts contain no test hooks
+PASS  B3   Each mod override has exactly one implementation per signature
+PASS  C1   session code round trip
+PASS  C2   session code accepts lower case without dash
+PASS  C3   join code round trip
+PASS  C4   join code rejects an invalid address
+PASS  C5   join code rejects wrong length
+PASS  C6   join code rejects invalid characters
+PASS  C7   join code notices typing mistakes  -- 0 of 2232 single character typos accepted (limit 0.5 percent)
+PASS  C8   four controller slots exposed  -- configured players 4
+PASS  P3L  3-player scripts load and finish without errors
+PASS  P3.1 3 players: party actors  -- players 3 P3 ffffb128 P4 00000000
+PASS  P3.2 3 players: party control3  -- dx P1 0 P2 0 P3 11 P4 0
+PASS  P3.3 3 players: party control4  -- P4 00000000 dx 0
+PASS  P3.4 3 players: party jumping  -- P3 jump 1 P4 jump 0
+PASS  P3.5 3 players: party camera  -- Shared camera while three/four players play
+PASS  P3.6 3 players: party picture  -- Engine framebuffer for visual verification
+PASS  P3.7 3 players: party alive  -- Original terrain physics, no invulnerability or disabled damage fixture
+PASS  P3.8 3 players: party platforms  -- Separate standing pointers, shared helper, original contact bits restored
+PASS  P3.9 3 players: party score  -- Extra players receive only their own points
+PASS  P3.10 3 players: party damage  -- rings P1 46 P2 30 P3 0 P4 17
+PASS  P3.11 3 players: party respawn  -- Extra player's real death and respawn do not restart the leader's game
+PASS  P4L  4-player scripts load and finish without errors
+PASS  P4.1 4 players: party actors  -- players 4 P3 ffffb128 P4 ffffb1bc
+PASS  P4.2 4 players: party control3  -- dx P1 0 P2 0 P3 11 P4 0
+PASS  P4.3 4 players: party control4  -- P4 ffffb1bc dx -12
+PASS  P4.4 4 players: party jumping  -- P3 jump 1 P4 jump 1
+PASS  P4.5 4 players: party camera  -- Shared camera while three/four players play
+PASS  P4.6 4 players: party picture  -- Engine framebuffer for visual verification
+PASS  P4.7 4 players: party alive  -- Original terrain physics, no invulnerability or disabled damage fixture
+PASS  P4.8 4 players: party platforms  -- Separate standing pointers, shared helper, original contact bits restored
+PASS  P4.9 4 players: party score  -- Extra players receive only their own points
+PASS  P4.10 4 players: party damage  -- rings P1 45 P2 37 P3 0 P4 17
+PASS  P4.11 4 players: party respawn  -- Extra player's real death and respawn do not restart the leader's game
+PASS  Q1   Four-view scripts load and complete without engine errors
+PASS  Q2   All four actors are active  -- players 4 P3 ffffb128 P4 ffffb172
+PASS  Q3   Four-way split is active  -- split 1 req 1 engine 1 scene 1 water 0
+PASS  Q4   Players three and four have independent cameras  -- P3 0463,08f5 P4 055d,065e
+PASS  Q5   Four-player visual capture has readable character spacing  -- P1 04c4 P2 060a P3 04a5 P4 05a4
+PASS  Q6   Engine framebuffer captured  -- Engine framebuffer with four clipped views
+PASS  Q7   All four players remain alive  -- Original terrain physics, no invulnerability or disabled damage fixture
+PASS  Q9   Each viewport retains its own line-scroll data  -- different lines P1/P2 112 P2/P3 112 P3/P4 112
+PASS  Q8   Captured frame has visible level pixels in all four quadrants  -- sampled pixels: 4400/4400/5000/4992
+PASS  F1   Co-op scripts load in the game without errors
+PASS  F2   Player 2 joins at the start of Angel Island while Sonic has not moved  -- before: camera routine 0, Tails routine 0a; after: joined 1, Tails routine 06, level started 0, Sonic control 00
+PASS  F3   Player 2 has his own view from the start of Angel Island  -- still in intro 1, split 1, split possible 1, Tails routine 06, Tails base state 02, split reason 0
+PASS  F4   Score is kept separately for each player  -- player 1 0 -> 0, player 2 0 -> 50
+PASS  F5   Getting hurt only costs the rings of the player who got hurt  -- player 1 rings 40 (was 40), player 2 rings 0 (was 25); player 2 state after the hit 1a, invulnerability 120, protection 00
+PASS  F6   The off screen indicator for player 2 is hidden while he is playing  -- joined 1, hidden 1
+PASS  F7   A clipped empty tile update emits no malformed queue entry  -- column 1, row 1, explicit zero 1
+PASS  F8   Both players can request rescue with hold, cancel and cooldown  -- wait 1 reset 1 P1 1 P2 1
+PASS  F9   Rescue rejects airborne, attached and scripted destinations  -- air 1 platform 1 cutscene 1 boss 1
+PASS  F10  Player 2 saves a shared checkpoint using their camera and layer  -- P2 state 1 main camera restored 1
+PASS  F11  Both players independently respawn at the shared checkpoint  -- P1 1 P2 1 zone guard 1
+PASS  F12  Boss entry regroups an off-screen partner once  -- regroup 1 repeated teleport prevented 1
+PASS  F13  Tails carry requires consent and has an explicit release  -- consent 1 carry 1 release 1
+PASS  F14  Character moves use the configured inputs and velocity profiles  -- inputs 1 edge-trigger 1 velocity profiles 1
+PASS  F15  Positive monitor effects can be shared without sharing Robotnik effects  -- positive types 1 harmful/unsupported excluded 1 invalid recipients excluded 1
+PASS  F16  Two different players complete a coordinated boss phase  -- first waits 1 duplicate rejected 1 partner completes 1
+PASS  F17  A shared rings monitor effect is applied only to player two  -- source allocated 1 clone found 1 rings P1 11 P2 33
+PASS  F18  Player two opens a monitor collision and owns its effect  -- allocated 1 blocking allows 1 opened 1 ownerP2 1 mode restored 1
+PASS  H01  Boss scene in Angel Island 1 (four players, one shared screen; route not covered)  -- boss frame 3 party 4 split 0/0 P3/P4 1/1
+PASS  H01V Angel Island 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H02  Boss scene in Angel Island 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H02V Angel Island 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H03  Boss scene in Hydrocity 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H03V Hydrocity 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H04  Boss scene in Hydrocity 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H04V Hydrocity 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H05  Boss scene in Marble Garden 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 1/0 P3/P4 1/1
+PASS  H05V Marble Garden 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H06  Boss scene in Marble Garden 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H06V Marble Garden 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H07  Boss scene in Carnival Night 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H07V Carnival Night 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H08  Boss scene in Carnival Night 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H08V Carnival Night 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H09  Boss scene in Flying Battery 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 1/0 P3/P4 1/1
+PASS  H09V Flying Battery 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H10  Boss scene in Flying Battery 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 2 split 0/0 P3/P4 0/0
+PASS  H10V Flying Battery 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H11  Boss scene in IceCap 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H11V IceCap 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H12  Boss scene in IceCap 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H12V IceCap 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H13  Boss scene in Launch Base 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 1/0 P3/P4 1/1
+PASS  H13V Launch Base 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H14  Boss scene in Launch Base 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H14V Launch Base 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H15  Boss scene in Mushroom Hill 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 1/0 P3/P4 1/1
+PASS  H15V Mushroom Hill 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H16  Boss scene in Mushroom Hill 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H16V Mushroom Hill 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H17  Boss scene in Sandopolis 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H17V Sandopolis 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H18  Boss scene in Sandopolis 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H18V Sandopolis 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H19  Boss scene in Lava Reef 1 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H19V Lava Reef 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H20  Boss scene in Lava Reef boss (four players, one shared screen; route not covered)  -- boss frame 182 party 4 split 0/0 P3/P4 1/1
+PASS  H20V Lava Reef boss: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H21  Boss scene in Sky Sanctuary (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 0/0 P3/P4 1/1
+PASS  H21V Sky Sanctuary: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H22  Boss scene in Death Egg 1 (four players, one shared screen; route not covered)  -- boss frame 3 party 4 split 0/0 P3/P4 1/1
+PASS  H22V Death Egg 1: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  H23  Boss scene in Death Egg 2 (four players, one shared screen; route not covered)  -- boss frame 181 party 4 split 1/0 P3/P4 1/1
+PASS  H23V Death Egg 2: engine framebuffer captured during the boss view  -- Engine framebuffer after combat initialized
+PASS  G01  Split screen in Angel Island 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G01B Angel Island 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G01R Angel Island 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G01P Angel Island 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G02  Split screen in Angel Island 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G02B Angel Island 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G02R Angel Island 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G02P Angel Island 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G03  Split screen in Hydrocity 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G03B Hydrocity 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G03R Hydrocity 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G03P Hydrocity 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G04  Split screen in Hydrocity 2  -- expect split 1, joined 1, split frames 1221, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G04B Hydrocity 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G04R Hydrocity 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G04P Hydrocity 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G05  Split screen in Marble Garden 1  -- expect split 1, joined 1, split frames 81, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G05B Marble Garden 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G05R Marble Garden 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G05P Marble Garden 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G06  Split screen in Marble Garden 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G06B Marble Garden 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G06R Marble Garden 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G06P Marble Garden 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G07  Split screen in Carnival Night 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G07B Carnival Night 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G07R Carnival Night 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G07P Carnival Night 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G08  Split screen in Carnival Night 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G08B Carnival Night 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G08R Carnival Night 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G08P Carnival Night 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G09  Split screen in Flying Battery 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G09B Flying Battery 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G09R Flying Battery 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G09P Flying Battery 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G10  Split screen in Flying Battery 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G10B Flying Battery 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G10R Flying Battery 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G10P Flying Battery 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G11  Split screen in IceCap 1  -- expect split 1, joined 1, split frames 464, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G11B IceCap 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G11R IceCap 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G11P IceCap 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G12  Split screen in IceCap 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G12B IceCap 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G12R IceCap 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G12P IceCap 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G13  Split screen in Launch Base 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G13B Launch Base 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G13R Launch Base 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G13P Launch Base 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G14  Split screen in Launch Base 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G14B Launch Base 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G14R Launch Base 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G14P Launch Base 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G15  Split screen in Mushroom Hill 1  -- expect split 1, joined 1, split frames 220, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G15B Mushroom Hill 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G15R Mushroom Hill 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G15P Mushroom Hill 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G16  Split screen in Mushroom Hill 2  -- expect split 1, joined 1, split frames 229, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G16B Mushroom Hill 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G16R Mushroom Hill 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G16P Mushroom Hill 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G17  Split screen in Sandopolis 1  -- expect split 1, joined 1, split frames 351, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G17B Sandopolis 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G17R Sandopolis 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G17P Sandopolis 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G18  Split screen in Sandopolis 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G18B Sandopolis 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G18R Sandopolis 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G18P Sandopolis 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G19  Split screen in Lava Reef 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G19B Lava Reef 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G19R Lava Reef 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G19P Lava Reef 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G20  Split screen in Lava Reef 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G20B Lava Reef 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G20R Lava Reef 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G20P Lava Reef 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G21  Split screen in Sky Sanctuary  -- expect split 1, joined 1, split frames 321, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G21B Sky Sanctuary: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G21R Sky Sanctuary: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G21P Sky Sanctuary: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G22  Split screen in Death Egg 1  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G22B Death Egg 1: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G22R Death Egg 1: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G22P Death Egg 1: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G23  Split screen in Death Egg 2  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G23B Death Egg 2: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G23R Death Egg 2: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G23P Death Egg 2: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G24  Split screen in Hidden Palace  -- expect split 1, joined 1, split frames 381, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G24B Hidden Palace: Encounter input switches to shared screen  -- Fixed roaming scene: encounter input enters shared screen
+PASS  G24R Hidden Palace: Roaming view resumes after encounter input clears  -- Fixed roaming scene: clearing encounter input resumes split
+PASS  G24P Hidden Palace: Engine framebuffer captured  -- Engine framebuffer, previous completed render
+PASS  G25  Boss arena in Lava Reef boss is one shared screen, player 2 keeps playing  -- expect split 0, joined 1, split frames 0, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  G26  Boss arena in Death Egg boss is one shared screen, player 2 keeps playing  -- expect split 0, joined 1, split frames 0, P1 alive 1, P2 alive 1, Tails routine 06
+PASS  QG01 Four-player scene: Angel Island 1  -- quad 0 req 1 players 4 frames 668 seen 0 alive34 1
+PASS  QG02 Four-player scene: Angel Island 2  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG03 Four-player scene: Hydrocity 1  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG04 Four-player scene: Hydrocity 2  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG05 Four-player scene: Marble Garden 1  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG05V Marble Garden 1: four rendered quadrants  -- 4400/4400/4925/4939
+PASS  QG06 Four-player scene: Marble Garden 2  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG06V Marble Garden 2: four rendered quadrants  -- 4400/4400/4934/4939
+PASS  QG07 Four-player scene: Carnival Night 1  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG07V Carnival Night 1: four rendered quadrants  -- 2243/2284/2063/1806
+PASS  QG08 Four-player scene: Carnival Night 2  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG09 Four-player scene: Flying Battery 1  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG09V Flying Battery 1: four rendered quadrants  -- 4400/4393/4943/4943
+PASS  QG10 Four-player scene: Flying Battery 2  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG10V Flying Battery 2: four rendered quadrants  -- 3405/3667/2742/2725
+PASS  QG11 Four-player scene: IceCap 1  -- quad 1 req 1 players 4 frames 598 seen 1 alive34 1
+PASS  QG11V IceCap 1: four rendered quadrants  -- 3376/3094/5000/5000
+PASS  QG12 Four-player scene: IceCap 2  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG13 Four-player scene: Launch Base 1  -- quad 1 req 1 players 4 frames 279 seen 1 alive34 1
+PASS  QG13V Launch Base 1: four rendered quadrants  -- 4246/4262/4875/4758
+PASS  QG14 Four-player scene: Launch Base 2  -- quad 0 req 1 players 4 frames 0 seen 0 alive34 1
+PASS  QG15 Four-player scene: Mushroom Hill 1  -- quad 1 req 1 players 4 frames 220 seen 1 alive34 1
+PASS  QG15V Mushroom Hill 1: four rendered quadrants  -- 3503/3140/3177/3162
+PASS  QG16 Four-player scene: Mushroom Hill 2  -- quad 1 req 1 players 4 frames 211 seen 1 alive34 1
+PASS  QG16V Mushroom Hill 2: four rendered quadrants  -- 3962/4030/4358/4288
+PASS  QG17 Four-player scene: Sandopolis 1  -- quad 1 req 1 players 4 frames 366 seen 1 alive34 1
+PASS  QG17V Sandopolis 1: four rendered quadrants  -- 4400/4298/4695/4771
+PASS  QG18 Four-player scene: Sandopolis 2  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG18V Sandopolis 2: four rendered quadrants  -- 2679/4081/3482/3739
+PASS  QG19 Four-player scene: Lava Reef 1  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG19V Lava Reef 1: four rendered quadrants  -- 4400/4400/4935/4917
+PASS  QG20 Four-player scene: Lava Reef 2  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG20V Lava Reef 2: four rendered quadrants  -- 4400/4400/4930/4933
+PASS  QG21 Four-player scene: Sky Sanctuary  -- quad 1 req 1 players 4 frames 120 seen 1 alive34 0
+PASS  QG21V Sky Sanctuary: four rendered quadrants  -- 4388/4389/4951/4956
+PASS  QG22 Four-player scene: Death Egg 1  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG22V Death Egg 1: four rendered quadrants  -- 1804/1826/2343/2276
+PASS  QG23 Four-player scene: Death Egg 2  -- quad 1 req 1 players 4 frames 170 seen 1 alive34 1
+PASS  QG23V Death Egg 2: four rendered quadrants  -- 2114/1735/2554/2648
+PASS  QG24 Four-player scene: Hidden Palace  -- quad 1 req 1 players 4 frames 381 seen 1 alive34 1
+PASS  QG24V Hidden Palace: four rendered quadrants  -- 4400/4400/4940/4929
+PASS  Z1   AIZ zip-line objects render in P2 view while outside P1 view  -- joined 1 split 1 segments 2 visible only in P2 1
+PASS  Z1V  Engine framebuffer captured with P2 centered on the zip line  -- Engine framebuffer at the P2-only zip-line view
+
+Result: 258 of 259 passed. NOT READY, see the FAIL lines.
