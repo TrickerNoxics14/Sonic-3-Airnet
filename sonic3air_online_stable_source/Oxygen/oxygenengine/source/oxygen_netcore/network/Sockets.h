@@ -195,6 +195,18 @@ public:
 	inline bool consumedLanPacket()  { const bool result = mConsumedLanPacket;  mConsumedLanPacket = false;  return result; }	// The last receive only handled a LAN discovery packet inside the socket
 	static std::vector<std::string> getSubnetBroadcastAddresses();		// Broadcast addresses of the network adapters (empty on platforms where this is not implemented)		// Somebody on the network asked for this host's session code (and got an answer)
 
+	// Relay server (see RelayProtocol.h): all datagrams to and from the other side go through the relay, which makes a connection possible when a direct one is not.
+	// The peers on the other side get made-up addresses (240.0.x.y); everything above this class works with them like with any other address.
+	enum class RelayRole { NONE, HOST, CLIENT };
+	void startRelay(RelayRole role, const SocketAddress& relayAddress, uint64 lobbyID, uint64 key);
+	void stopRelay();
+	void updateRelay();		// Call regularly: (re)sends the registration or join message
+	inline RelayRole getRelayRole() const  { return mRelayRole; }
+	inline bool isRelayReady() const  { return mRelayReady; }		// Host: the relay knows the lobby. Friend: the relay let us in.
+	inline int getRelayRefusal() const  { return mRelayRefusal; }	// 0 = none, 1 = no host registered at the relay, 2 = lobby full
+	inline uint64 getRelayDatagramsIn() const  { return mRelayDatagramsIn; }
+	inline uint64 getRelayDatagramsOut() const  { return mRelayDatagramsOut; }
+
 	// Developer test: pretend to have a bad connection (environment variables S3AIR_NET_LAG in ms and S3AIR_NET_LOSS in percent)
 	void flushDelayedPackets();
 
@@ -202,10 +214,23 @@ private:
 	bool receiveInternal(ReceiveResult& outReceiveResult);
 	bool handleLanPacket(ReceiveResult& outReceiveResult);
 	bool sendDataNow(const uint8* data, size_t length, const SocketAddress& destinationAddress);
+	bool sendViaRelay(const uint8* data, size_t length, const SocketAddress& destinationAddress);
+	bool handleRelayPacket(ReceiveResult& outReceiveResult);
 
 private:
 	struct Internal;
 	Internal* mInternal = nullptr;
+
+	RelayRole mRelayRole = RelayRole::NONE;
+	SocketAddress mRelayAddress;
+	uint64 mRelayLobby = 0;
+	uint64 mRelayKey = 0;
+	uint32 mRelayToken = 0;			// Host: the host token from the relay. Friend: our token
+	bool mRelayReady = false;
+	int mRelayRefusal = 0;
+	double mRelayLastHello = -1000.0;
+	uint64 mRelayDatagramsIn = 0;
+	uint64 mRelayDatagramsOut = 0;
 
 	uint64 mLanHostSession = 0;
 	std::vector<std::string> mLanRequesterIPs;

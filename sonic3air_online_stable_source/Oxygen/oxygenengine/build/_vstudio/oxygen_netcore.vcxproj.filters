@@ -68,6 +68,9 @@
     <ClInclude Include="..\..\source\oxygen_netcore\base\TestHooks.h">
       <Filter>base</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\source\oxygen_netcore\network\RelayProtocol.h">
+      <Filter>network</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\source\oxygen_netcore\serverclient\NetplaySetupPackets.h">
       <Filter>serverclient</Filter>
     </ClInclude>

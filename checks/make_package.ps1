@@ -48,6 +48,16 @@ Set-Content -Path (Join-Path $out "config.json") -Value $config -Encoding utf8
 
 # Readme and the co-op mod, which the game installs by itself at start
 Copy-Item (Join-Path $root "checks\package_files\README_ONLINE.txt") $out
+# The optional relay server: how to run one, and its source (a program for somebody who hosts a server; nothing in the game starts it, and no relay is deployed by us)
+Copy-Item (Join-Path $root "checks\package_files\DEPLOY_RELAY.txt") $out
+$relaySourceOut = Join-Path $out "relay_server_source"
+New-Item -ItemType Directory -Path $relaySourceOut | Out-Null
+$oxygenRoot = Join-Path $root "sonic3air_online_stable_source\Oxygen"
+foreach ($relayFile in @("oxygenserver\source\relay\s3air_relay.cpp", "oxygenserver\source\relay\RelayCore.h", "oxygenengine\source\oxygen_netcore\network\RelayProtocol.h")) {
+	$relayPath = Join-Path $oxygenRoot $relayFile
+	if (-not (Test-Path -LiteralPath $relayPath)) { throw "Relay source file not found: $relayPath" }
+	Copy-Item $relayPath $relaySourceOut
+}
 # The engine is GPL-3.0 software: ship its license text with every binary copy.
 $licenseSource = Join-Path $root "sonic3air_online_stable_source\LICENSE"
 if (-not (Test-Path -LiteralPath $licenseSource)) { throw "Engine LICENSE not found: $licenseSource (a GPL binary must not be packaged without it)" }

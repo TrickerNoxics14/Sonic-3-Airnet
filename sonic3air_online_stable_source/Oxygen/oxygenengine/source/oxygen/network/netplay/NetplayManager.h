@@ -54,7 +54,25 @@ public:
 	inline bool isLanRequester(const std::string& ip) const  { return mUDPSocket.hasLanRequester(ip); }
 	void startJoinViaServer();
 	void startJoinDirect(std::string_view ip, uint16 port, uint32 secret);
+	void startJoinIntroduced(uint64 sessionID, std::string_view ip, uint16 port);		// Developer test: as if the game server had introduced the host at this address (the session code is known, so a relay is possible)
 	void closeConnections();
+
+	// Relay server, an optional fallback (settings.json: Online / RelayServer; empty by default). It is used only if the setting is not empty:
+	//  - a host with a session code registers its lobby at the relay, so friends who cannot reach it directly can still play through the relay
+	//  - a friend whose direct connection does not work after a few seconds (strict NAT, firewall) connects through the relay instead
+	// Direct (IP) join codes never use it. See RelayProtocol.h and DEPLOY_RELAY.txt.
+	enum class RelayState { OFF, CONNECTING, ACTIVE };
+	static const constexpr float RELAY_FALLBACK_SECONDS = 8.0f;		// How long the direct connection gets before the relay is tried
+	std::string getRelayServerSetting() const;
+	bool isRelayConfigured() const;
+	inline bool canUseRelayAsClient() const  { return mRelaySessionKnown && isRelayConfigured(); }
+	bool beginRelayAsClient();										// Starts talking to the relay; false if there is none or its name does not resolve
+	inline bool isRelayJoined() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::CLIENT && mUDPSocket.isRelayReady(); }
+	inline int getRelayRefusal() const  { return mUDPSocket.getRelayRefusal(); }
+	inline bool isRelayHostRegistered() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST && mUDPSocket.isRelayReady(); }
+	inline bool isRelayHostConfigured() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST; }
+	inline uint64 getRelayDatagramsIn() const  { return mUDPSocket.getRelayDatagramsIn(); }
+	inline uint64 getRelayDatagramsOut() const  { return mUDPSocket.getRelayDatagramsOut(); }
 
 	// The name other players see (the option "Online player name", default "Player"); always clean, see NetplayLobby::sanitizeName
 	std::string getLocalPlayerName() const;
@@ -87,9 +105,13 @@ protected:
 
 private:
 	bool restartConnection(bool asHost, uint16 hostPort = 0);
+	bool resolveRelayAddress(SocketAddress& outAddress) const;
+	bool startRelay(UDPSocket::RelayRole role);
 
 private:
 	UDPSocket mUDPSocket;
+	bool mRelaySessionKnown = false;		// This join started from a session code, which is what the relay needs (a direct IP join code has none)
+	bool mRelayReadyLogged = false;
 	float mLanSearchTimer = 0.0f;
 	uint32 mHostSecret = 0;
 	int mInputDelaySetting = NetplayLobby::INPUT_DELAY_AUTO;

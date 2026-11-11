@@ -1,0 +1,79 @@
+Sonic 3 A.I.R. online play: the optional relay server
+======================================================
+
+WHAT IT IS FOR
+Online play connects the players directly (peer to peer). With a strict router (CGNAT, some mobile or
+campus connections) or a strict firewall that does not work, and the friend sees "Connection timed out".
+A relay server is a small program on a computer that everybody can reach. If the direct connection does
+not work, the game sends everything through the relay instead. It is a fallback: it adds delay (the data
+makes a detour), so use it only when the direct way fails. Nothing changes for players who do not set it.
+
+THIS IS A PROGRAM FOR SOMEBODY WHO RUNS A SERVER. Players do not need it, and nothing in the game
+package starts it. It has not been deployed by the people who made this package: there is no public
+relay. Whoever hosts one decides who may use it and carries the traffic costs.
+
+HOW PLAYERS TURN IT ON
+Both the host and the friends need the SAME relay address, otherwise nothing changes for them.
+In settings.json (the game's settings file in %APPDATA%\Sonic3AIR) set:
+
+    "Online" : { "PlayerName" : "Player", "RelayServer" : "relay.example.org:28842" }
+
+"host" or "host:port" (the default port is 28842). Leave it empty (the default) for no relay.
+What the game then does:
+  - The host registers its lobby at the relay when it opens a lobby with a session code.
+  - A friend joins with the session code as usual. If the direct connection has not worked after
+    8 seconds, the friend switches to the relay. The lobby says "Connecting through the relay" and,
+    once in, "Playing through a relay server: expect more lag". The host sees a warning too.
+  - Direct (IP) join codes never use the relay (they carry no session code).
+  - The game's own checks still apply end to end: the friend still has to prove that it knows the
+    code to the host, and the host to the friend. The relay cannot let a stranger into a lobby.
+
+BUILDING IT
+It is one C++ file plus two headers, with no libraries. The source is in the engine source tree:
+Oxygen/oxygenserver/source/relay (s3air_relay.cpp, RelayCore.h) and
+Oxygen/oxygenengine/source/oxygen_netcore/network/RelayProtocol.h. Put the three files in one folder
+(or give the compiler the include folder with -I / /I).
+
+  Windows (Visual Studio developer prompt):
+      cl /nologo /EHsc /O2 /std:c++17 s3air_relay.cpp /Fe:s3air_relay.exe ws2_32.lib
+  Linux:
+      g++ -O2 -std=c++17 s3air_relay.cpp -o s3air_relay
+
+RUNNING IT
+      s3air_relay                         (listens on UDP 28842, all addresses)
+      s3air_relay --port 28842 --bind 0.0.0.0 --stats-seconds 60 --max-lobbies 512
+
+  * Open the UDP port (28842 by default) in the server's firewall and forward it if it is behind a router.
+  * It needs very little: one small thread of work, a few MB of memory. A game uses about 100 to 300
+    kilobytes per second per player through it while playing (more for a few seconds when a friend
+    joins a running game).
+  * Run it as a service (systemd on Linux, a scheduled task or service wrapper on Windows) so that it
+    restarts. It keeps no files and no state on disk; a restart only means that lobbies and friends
+    register again within a few seconds (the game does this by itself every 5 seconds).
+  * Other options: --stats-file PATH (rewrites a counter file once per second), --run-seconds N (ends by
+    itself, for tests), --quiet.
+
+WHAT IT PROTECTS AGAINST (and what it does not)
+  * It never writes player data: no addresses, no codes, no payloads. It prints counters only. Addresses
+    are kept in memory only while a lobby or friend is active.
+  * It does not read the game data it forwards. It sees a one-way hash of the lobby (not the session
+    code) and a key hash, and it forwards only for somebody who knows the key. A wrong key gets no answer
+    at all; 8 wrong keys block that address for a minute.
+  * Rate limits: per sender address for registrations and join requests, per friend and direction for
+    data (packets and bytes per second), a cap on lobbies (512, 4 per address), on friends per lobby (6)
+    and on remembered addresses. Every reply is smaller than the request that caused it, so it cannot
+    be used to amplify traffic. Forged data needs a random 32-bit token that the relay hands out only
+    to somebody who proved the key.
+  * What it cannot do: it does not encrypt the game's traffic (the game does not either). Whoever runs
+    the relay can see that traffic and could, with effort, work out the session code of a lobby (the code
+    is a 40-bit number; the relay sees its hash). Run a relay yourself, or trust the person who does.
+    A relay does not defend against a flood so large that it fills the server's network connection:
+    that needs the hosting provider's protection.
+
+CHECKS THAT EXIST (in the project's checks folder)
+  * Offline: stable_online_core_tests.cpp (protocol, forged data, wrong keys, floods, limits, expiry,
+    the game's socket through a real relay on the loopback).
+  * Game windows: run_checks.ps1 stage Y. A friend whose direct path is a dead end (a proxy that drops
+    everything) still joins and plays in sync through the relay; without the setting it fails with the
+    usual message; the real relay program is attacked with wrong keys, floods and garbage.
+  Not tested: a real internet connection, a real strict NAT, a relay on another computer.

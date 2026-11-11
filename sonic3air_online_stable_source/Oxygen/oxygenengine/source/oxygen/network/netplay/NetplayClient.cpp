@@ -12,6 +12,7 @@
 #include "oxygen/network/netplay/NetplayPackets.h"
 #include "oxygen/network/netplay/NetplayAuth.h"
 #include "oxygen_netcore/base/TestHooks.h"
+#include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
 #include "oxygen/application/input/ControlsIn.h"
@@ -67,6 +68,26 @@ void NetplayClient::fail(NetplayFailure::Reason reason, const std::string& detai
 	RMX_LOG_INFO("Netplay client: giving up, " << NetplayFailure::getName(reason) << (detail.empty() ? "" : ": ") << detail);
 	mNetplayManager.reportFailure(reason, detail);
 	mState = State::FAILED;
+}
+
+bool NetplayClient::startRelayFallback(const char* why)
+{
+	// Only if the player set up a relay server (and joined with a session code, which the relay needs), and only once
+	if (mUsingRelay || !mNetplayManager.canUseRelayAsClient())
+		return false;
+	if (!mNetplayManager.beginRelayAsClient())
+		return false;
+
+	RMX_LOG_INFO("Netplay client: " << why << ", connecting through the relay server instead");
+	mUsingRelay = true;
+	mRelayJoinPending = true;
+	mHostConnection.clear();		// The direct attempt is over
+	mHostVerified = false;
+	mAuthSent = false;
+	mState = State::CONNECT_TO_HOST;
+	mTimedState = State::NONE;		// Restarts the timeout: the relay gets its own time
+	mStateTimer = 0.0f;
+	return true;
 }
 
 void NetplayClient::updateConnection(float deltaSeconds)
@@ -162,17 +183,34 @@ void NetplayClient::updateConnection(float deltaSeconds)
 	mStateTimer += deltaSeconds;
 	if (mState == State::CONNECT_TO_SERVER && mStateTimer > 15.0f)
 	{
+		if (startRelayFallback("the game server did not answer"))
+			return;
 		fail(NetplayFailure::Reason::SERVER_UNREACHABLE);
 		return;
 	}
 	else if (mState == State::REGISTERED && mStateTimer > 30.0f)
 	{
+		if (startRelayFallback("the game server did not introduce the host"))
+			return;
 		fail(NetplayFailure::Reason::WRONG_CODE);
+		return;
+	}
+	else if (mState == State::CONNECT_TO_HOST && !mUsingRelay && mStateTimer > NetplayManager::RELAY_FALLBACK_SECONDS && mReconnectRemaining == 0.0f && !mResumeSession && startRelayFallback("the direct connection did not work"))
+	{
+		return;
+	}
+	else if (mState == State::CONNECT_TO_HOST && mUsingRelay && mRelayJoinPending && mNetplayManager.getRelayRefusal() == 2)
+	{
+		mNetplayManager.reportFailure(NetplayFailure::Reason::LOBBY_FULL);
+		mState = State::FAILED;
 		return;
 	}
 	else if (mState == State::CONNECT_TO_HOST && mStateTimer > 20.0f && mReconnectRemaining == 0.0f)
 	{
-		fail(NetplayFailure::Reason::BLOCKED_OR_TIMEOUT);
+		if (mUsingRelay)
+			fail(mServerKnewNoHost ? NetplayFailure::Reason::WRONG_CODE : NetplayFailure::Reason::BLOCKED_OR_TIMEOUT, mRelayJoinPending ? "The relay server did not answer, or the host is not registered there." : "Not even the relay server could connect you to the host.");
+		else
+			fail(NetplayFailure::Reason::BLOCKED_OR_TIMEOUT);
 		return;
 	}
 	else if (mState == State::CONNECTED && !mHostVerified && mStateTimer > 10.0f)
@@ -220,6 +258,9 @@ void NetplayClient::updateConnection(float deltaSeconds)
 			{
 				if (!mRegistrationRequest.mResponse.mSuccess)
 					{
+						mServerKnewNoHost = true;
+						if (startRelayFallback("the game server does not know this code"))
+							break;
 						fail(NetplayFailure::Reason::WRONG_CODE, "The game server does not know this code.");
 						break;
 					}
@@ -229,6 +270,17 @@ void NetplayClient::updateConnection(float deltaSeconds)
 
 		case State::CONNECT_TO_HOST:
 		{
+			if (mRelayJoinPending)
+			{
+				// Through the relay: first the relay has to let us in, then the normal connection to the host starts (with the host's made-up address)
+				if (mNetplayManager.isRelayJoined())
+				{
+					mRelayJoinPending = false;
+					RMX_LOG_INFO("Netplay client: the relay server let us in, connecting to the host through it");
+					beginConnectTo(SocketAddress(RelayProtocol::hostVirtualIP(), RelayProtocol::VIRTUAL_PORT));
+				}
+				break;
+			}
 			if (mHostConnection.getState() == NetConnection::State::CONNECTED)
 			{
 				RMX_LOG_INFO("Netplay client: connected to host");

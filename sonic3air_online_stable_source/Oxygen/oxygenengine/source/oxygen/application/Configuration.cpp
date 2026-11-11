@@ -608,6 +608,7 @@ void Configuration::serializeStandardSettings(JsonSerializer& serializer)
 	if (serializer.beginObject("Online"))
 	{
 		serializer.serialize("PlayerName", mOnlinePlayerName);
+		serializer.serialize("RelayServer", mOnlineRelayServer);
 		serializer.endObject();
 	}
 

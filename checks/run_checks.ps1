@@ -1198,6 +1198,239 @@ try
 				}
 			}
 
+			if (Wants 'Y')
+			{
+				Write-Step 'Y. Relay fallback: the direct path is a dead end, the session completes through the relay server; abuse against the real relay program'
+				Set-ActiveMods @('DropInCoop')
+				$lastLogs = Join-Path $checksDir 'last_logs'
+				New-Item -ItemType Directory -Path $lastLogs -Force | Out-Null
+				$proxyScript = Join-Path $checksDir 'udp_lag_proxy.ps1'
+				$relayExe = Join-Path $lastLogs 'relay\s3air_relay.exe'
+				if (-not (Test-Path -LiteralPath $relayExe)) { & (Join-Path $checksDir 'build_relay.ps1') | Out-Null }
+				$relayPort = 28850
+
+				function Read-KeyValueFile([string]$path)
+				{
+					$values = @{}
+					foreach ($line in @((Read-SharedText $path) -split "`r?`n")) { if ($line -match '^(\w+)=(.*)$') { $values[$Matches[1]] = $Matches[2] } }
+					return $values
+				}
+
+				function Start-RelayProgram([string]$statsPath, [string]$outPath)
+				{
+					Remove-Item -LiteralPath $statsPath, $outPath -ErrorAction SilentlyContinue
+					$relayArgs = @('--bind', '127.0.0.1', '--port', [string]$relayPort, '--stats-file', ('"' + $statsPath + '"'), '--stats-seconds', '2', '--run-seconds', '600')
+					$process = Start-Process -FilePath $relayExe -ArgumentList $relayArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $outPath
+					[void]$startedProcesses.Add($process)
+					[void](Wait-Until { (Read-SharedText $statsPath) -match 'uptime_s' } 20)
+					return $process
+				}
+
+				function Start-DeadEndProxy([string]$statsPath)
+				{
+					# The direct path: everything the friend sends to the host's address goes into this proxy, which drops 100 percent of it (a connection that cannot be made, like a strict NAT)
+					Remove-Item -LiteralPath $statsPath -ErrorAction SilentlyContinue
+					$proxyArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $proxyScript + '"'), '-ListenPort', '28841', '-TargetPort', '28840', '-RttMs', '0', '-JitterMs', '0', '-LossPercent', '100', '-StatsFile', ('"' + $statsPath + '"'), '-Seed', '7', '-Seconds', '500')
+					$process = Start-Process -FilePath 'powershell.exe' -ArgumentList $proxyArgs -PassThru -WindowStyle Hidden
+					[void]$startedProcesses.Add($process)
+					[void](Wait-Until { (Read-SharedText $statsPath) -match 'uptime_s' } 30)
+					return $process
+				}
+
+				$yRelayAddress = "127.0.0.1:$relayPort"
+
+				# Y1: without a relay (the default) the blocked connection fails as it always did, and the relay code stays silent
+				try
+				{
+					Stop-StartedProcesses
+					foreach ($suffix in @('_yhost', '_yfriend')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")), (Join-Path $appdata ("online_log" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+					$y1Code = New-SessionCode
+					[void](Start-DeadEndProxy (Join-Path $lastLogs 'Y-proxy-Y1.txt'))
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostlan:$y1Code"; 'S3AIR_LOGNAME' = '_yhost' })
+					Start-Sleep -Seconds 10
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = "joinintro:${y1Code}:28841"; 'S3AIR_LOGNAME' = '_yfriend' })
+					$y1failed = Wait-Until { (Get-NetLog '_yfriend') -match 'Netplay failure: BLOCKED_OR_TIMEOUT' } 80
+					$y1friend = Get-NetLog '_yfriend'
+					Copy-Item (Join-Path $appdata 'logfile_yfriend.txt') (Join-Path $lastLogs 'Y1-friend.txt') -Force -ErrorAction SilentlyContinue
+					Copy-Item (Join-Path $appdata 'logfile_yhost.txt') (Join-Path $lastLogs 'Y1-host.txt') -Force -ErrorAction SilentlyContinue
+					Add-Result 'Y1' 'No relay set (the default): a blocked direct connection fails with the usual timeout message, no relay is tried' ($y1failed -and $y1friend -notmatch 'relay server') ("timeout message shown: $y1failed, relay mentioned: " + ($y1friend -match 'relay server'))
+				}
+				catch { Add-Result 'Y1' 'No relay set (the default): a blocked direct connection fails as before' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+
+				# Y2: with the same relay on both sides the same blocked connection completes through the relay and the game runs in sync
+				try
+				{
+					Stop-StartedProcesses
+					foreach ($suffix in @('_yhost', '_yfriend')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")), (Join-Path $appdata ("online_log" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+					$y2Code = New-SessionCode
+					$relayStatsPath = Join-Path $lastLogs 'Y-relay-Y2.txt'
+					$relayOutPath = Join-Path $lastLogs 'Y-relay-Y2-output.txt'
+					$proxyStatsPath = Join-Path $lastLogs 'Y-proxy-Y2.txt'
+					[void](Start-RelayProgram $relayStatsPath $relayOutPath)
+					[void](Start-DeadEndProxy $proxyStatsPath)
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostlan:$y2Code"; 'S3AIR_RELAY' = $yRelayAddress; 'S3AIR_LOGNAME' = '_yhost' })
+					Start-Sleep -Seconds 10
+					[void](Start-GameProcess @{ 'S3AIR_NETPLAY' = "joinintro:${y2Code}:28841"; 'S3AIR_RELAY' = $yRelayAddress; 'S3AIR_LOGNAME' = '_yfriend'; 'S3AIR_NETPLAY_TEST_INPUT' = '0x1'; 'S3AIR_NETPLAY_TEST_TOGGLE' = '1' })
+					$y2reached = Wait-Until { (@((Read-SharedText (Join-Path $appdata 'online_log_yfriend.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[friend\].* state=5 ' })).Count -gt 0 } 120
+					if ($y2reached) { Start-Sleep -Seconds 40 }
+					$y2Host = Get-NetLog '_yhost'
+					$y2Friend = Get-NetLog '_yfriend'
+					$y2FriendLines = @((Read-SharedText (Join-Path $appdata 'online_log_yfriend.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[friend\]' })
+					$y2HostLines = @((Read-SharedText (Join-Path $appdata 'online_log_yhost.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[host\]' })
+					Copy-Item (Join-Path $appdata 'logfile_yhost.txt') (Join-Path $lastLogs 'Y2-host.txt') -Force -ErrorAction SilentlyContinue
+					Copy-Item (Join-Path $appdata 'logfile_yfriend.txt') (Join-Path $lastLogs 'Y2-friend.txt') -Force -ErrorAction SilentlyContinue
+					Set-Content -Path (Join-Path $lastLogs 'Y2-online-lines.txt') -Value ($y2HostLines + $y2FriendLines) -Encoding utf8
+					$relayStats = Read-KeyValueFile $relayStatsPath
+					$proxyStats = Read-KeyValueFile $proxyStatsPath
+					Stop-StartedProcesses
+
+					$inGame = @($y2FriendLines | Where-Object { $_ -match ' state=5 ' })
+					$fpsValues = @()
+					for ($i = 2; $i -lt $inGame.Count; $i++) { $m = [regex]::Match($inGame[$i], 'fps=([\d.]+)'); if ($m.Success) { $fpsValues += [double]$m.Groups[1].Value } }
+					$fpsMin = if ($fpsValues.Count -gt 0) { ($fpsValues | Measure-Object -Minimum).Minimum } else { 0 }
+					$repairs = 0
+					foreach ($line in $y2FriendLines) { $m = [regex]::Match($line, 'repairs=(\d+)'); if ($m.Success -and [int]$m.Groups[1].Value -gt $repairs) { $repairs = [int]$m.Groups[1].Value } }
+					$syncFrames = @($inGame | ForEach-Object { $m = [regex]::Match($_, 'last sync ok at frame (\d+)'); if ($m.Success) { [int]$m.Groups[1].Value } })
+					$syncProgress = if ($syncFrames.Count -ge 2) { ($syncFrames | Measure-Object -Maximum).Maximum - ($syncFrames | Measure-Object -Minimum).Minimum } else { 0 }
+					$aborted = ($y2Friend -match 'giving up|aborting') -or ($y2Host -match 'aborting')
+
+					Add-Result 'Y2a' 'Direct path blocked, relay set on both sides: the friend gets into the running game anyway' ($y2reached -and -not $aborted) ("in game: $y2reached, aborted: $aborted")
+					Add-Result 'Y2b' 'The friend tried the direct connection, then switched to the relay, was let in, and both sides proved the code' (($y2Friend -match 'the direct connection did not work, connecting through the relay server instead') -and ($y2Friend -match 'the relay server let us in, connecting to the host through it') -and ($y2Friend -match 'the host proved the code') -and ($y2Host -match 'a friend connects through the relay server') -and ($y2Host -match 'a friend proved the code and is player 2')) ''
+					Add-Result 'Y2c' 'Nothing got through the direct path (the proxy forwarded 0 datagrams in both directions, and dropped some)' (([int64]$proxyStats['c2s_forwarded'] -eq 0) -and ([int64]$proxyStats['s2c_forwarded'] -eq 0) -and ([int64]$proxyStats['c2s_dropped'] -gt 0)) ("proxy forwarded " + $proxyStats['c2s_forwarded'] + "/" + $proxyStats['s2c_forwarded'] + ", dropped " + $proxyStats['c2s_dropped'] + "/" + $proxyStats['s2c_dropped'])
+					Add-Result 'Y2d' 'The relay carried the game: it forwarded many datagrams, one lobby, one friend, no wrong keys' (([int64]$relayStats['forwarded'] -gt 500) -and ([int64]$relayStats['wrong_keys'] -eq 0) -and ([int64]$relayStats['lobbies_created'] -eq 1)) ("relay forwarded " + $relayStats['forwarded'] + ", wrong keys " + $relayStats['wrong_keys'] + ", lobbies " + $relayStats['lobbies_created'])
+					Add-Result 'Y2e' 'Through the relay the game stays in sync (no repairs), the sync keeps advancing, and the friend runs at about 60 fps' (($repairs -eq 0) -and ($syncProgress -gt 600) -and ($fpsValues.Count -ge 3) -and ($fpsMin -ge 45)) ("repairs $repairs, sync advanced $syncProgress frames, fps min $fpsMin over $($fpsValues.Count) samples")
+					Add-Result 'Y2f' 'The online logs say that the friend plays through the relay (friend relay=1, host relayed=1)' (($y2FriendLines -match 'state=5 .*relay=1').Count -gt 0 -and ($y2HostLines -match 'relayed=1').Count -gt 0) ''
+					$relayOutput = Read-SharedText $relayOutPath
+					Add-Result 'Y2g' 'The relay program prints no addresses and no lobby or key values (counters only)' (($relayOutput -match 's3air_relay') -and ($relayOutput -notmatch '\d+\.\d+\.\d+\.\d+') -and ($relayOutput -notmatch '(?i)127\.0|lobby code|key=')) ''
+				}
+				catch { Add-Result 'Y2a' 'Relay fallback with the direct path blocked' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+
+				# Y3: the lobby screens: the friend is told it plays through the relay, the host sees the warning (pictures)
+				try
+				{
+					Stop-StartedProcesses
+					Add-Type -AssemblyName System.Drawing
+					Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class LobbyWinY { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }' -ErrorAction SilentlyContinue
+					foreach ($suffix in @('_yhost', '_yfriend')) { Remove-Item (Join-Path $appdata ("logfile" + $suffix + ".txt")), (Join-Path $appdata ("online_log" + $suffix + ".txt")) -ErrorAction SilentlyContinue }
+					$y3Code = New-SessionCode
+					[void](Start-RelayProgram (Join-Path $lastLogs 'Y-relay-Y3.txt') (Join-Path $lastLogs 'Y-relay-Y3-output.txt'))
+					[void](Start-DeadEndProxy (Join-Path $lastLogs 'Y-proxy-Y3.txt'))
+					$y3Host = Start-GameProcess @{ 'S3AIR_LOBBY_OPEN' = 'hostlan'; 'S3AIR_LOBBY_CODE' = $y3Code; 'S3AIR_RELAY' = $yRelayAddress; 'S3AIR_LOGNAME' = '_yhost'; 'S3AIR_PLAYER_NAME' = 'Hosty' }
+					Start-Sleep -Seconds 12
+					$y3Friend = Start-GameProcess @{ 'S3AIR_NETPLAY' = "joinintro:${y3Code}:28841"; 'S3AIR_LOBBY_OPEN' = 'show'; 'S3AIR_LOBBY_AUTOREADY' = '1'; 'S3AIR_RELAY' = $yRelayAddress; 'S3AIR_LOGNAME' = '_yfriend'; 'S3AIR_PLAYER_NAME' = 'Relayed' }
+					$y3In = Wait-Until { (Get-NetLog '_yhost') -match 'a friend proved the code and is player 2' } 120
+					Start-Sleep -Seconds 6
+					foreach ($shot in @(@($y3Host, 'Y3-lobby-host.png', $y3Friend), @($y3Friend, 'Y3-lobby-friend.png', $y3Host)))
+					{
+						$shot[2].Refresh(); [void][LobbyWinY]::ShowWindow($shot[2].MainWindowHandle, 7)
+						Start-Sleep -Milliseconds 700
+						$shot[0].Refresh(); [void][LobbyWinY]::ShowWindow($shot[0].MainWindowHandle, 9)
+						Start-Sleep -Milliseconds 700
+						[void](Save-GameScreenshot $shot[0] (Join-Path $lastLogs $shot[1]))
+						[void][LobbyWinY]::ShowWindow($shot[2].MainWindowHandle, 4)
+					}
+					$y3HostText = Get-NetLog '_yhost'
+					$y3FriendText = Get-NetLog '_yfriend'
+					Copy-Item (Join-Path $appdata 'logfile_yhost.txt') (Join-Path $lastLogs 'Y3-host.txt') -Force -ErrorAction SilentlyContinue
+					Copy-Item (Join-Path $appdata 'logfile_yfriend.txt') (Join-Path $lastLogs 'Y3-friend.txt') -Force -ErrorAction SilentlyContinue
+					Add-Result 'Y3' 'Lobby through the relay: the friend joins with its name and sees the lobby, the host sees it as player 2 (see Y3-lobby-host.png and Y3-lobby-friend.png for the relay warnings)' ($y3In -and ($y3FriendText -match 'lobby: you are slot 2') -and ($y3HostText -match 'player 2 is called "Relayed"')) "joined: $y3In"
+				}
+				catch { Add-Result 'Y3' 'Lobby through the relay' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+
+				# Y4: abuse against the real relay program (forged datagrams over the loopback)
+				try
+				{
+					Stop-StartedProcesses
+					$abuseStats = Join-Path $lastLogs 'Y-relay-Y4.txt'
+					$abuseOut = Join-Path $lastLogs 'Y-relay-Y4-output.txt'
+					$relayProcess = Start-RelayProgram $abuseStats $abuseOut
+					Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+public class RelayFlood
+{
+	public static long Send(Socket socket, int port, byte[] data, int count)
+	{
+		IPEndPoint target = new IPEndPoint(IPAddress.Loopback, port);
+		Stopwatch watch = Stopwatch.StartNew();
+		for (int i = 0; i < count; i++) socket.SendTo(data, target);
+		return watch.ElapsedMilliseconds;
+	}
+}
+'@ -ErrorAction SilentlyContinue
+
+					function New-RelayClient { $c = New-Object System.Net.Sockets.UdpClient(0, [System.Net.Sockets.AddressFamily]::InterNetwork); $c.Client.ReceiveTimeout = 1500; return $c }
+					function Send-Relay($c, [byte[]]$bytes) { [void]$c.Send($bytes, $bytes.Length, (New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Loopback, $relayPort))) }
+					function Receive-Relay($c) { $remote = New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Any, 0); try { return ,($c.Receive([ref]$remote)) } catch { return $null } }
+					function Get-BigEndian([uint64]$value, [int]$bytes) { $result = New-Object byte[] $bytes; for ($i = 0; $i -lt $bytes; $i++) { $result[$bytes - 1 - $i] = [byte](($value -shr (8 * $i)) -band 0xff) }; return $result }
+					function New-Hello([byte]$type, [uint64]$lobby, [uint64]$key) { return [byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, $type) + (Get-BigEndian $lobby 8) + (Get-BigEndian $key 8)) }
+					$lobbyId = [uint64]0x5eed5eed01; $goodKey = [uint64]0x1122334455667788
+
+					# A host registers, a friend joins, data goes both ways through the real program
+					$hostClient = New-RelayClient; $friendClient = New-RelayClient
+					Send-Relay $hostClient (New-Hello 1 $lobbyId $goodKey)
+					$registered = Receive-Relay $hostClient
+					Send-Relay $friendClient (New-Hello 3 $lobbyId $goodKey)
+					$joined = Receive-Relay $friendClient
+					$hostToken = if ($registered -and $registered.Length -eq 18 -and $registered[5] -eq 2) { $registered[14..17] } else { $null }
+					$friendToken = if ($joined -and $joined.Length -eq 10 -and $joined[5] -eq 4) { $joined[6..9] } else { $null }
+					Add-Result 'Y4a' 'Real relay program: a host registers and a friend with the key joins' (($null -ne $hostToken) -and ($null -ne $friendToken)) ''
+					$forwardedOk = $false
+					if ($hostToken -and $friendToken)
+					{
+						Send-Relay $friendClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 6) + $friendToken + @(11, 22, 33)))
+						$atHost = Receive-Relay $hostClient
+						Send-Relay $hostClient ([byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 8) + $hostToken + @(0, 1) + @(44, 55)))
+						$atFriend = Receive-Relay $friendClient
+						$forwardedOk = ($atHost -and $atHost.Length -eq 15 -and $atHost[5] -eq 9 -and $atHost[12] -eq 11 -and $atHost[14] -eq 33) -and ($atFriend -and $atFriend.Length -eq 12 -and $atFriend[5] -eq 7 -and $atFriend[10] -eq 44 -and $atFriend[11] -eq 55)
+					}
+					Add-Result 'Y4b' 'Real relay program: datagrams are forwarded in both directions with the payload unchanged' $forwardedOk ''
+
+					# Wrong keys: no answer at all, and after 8 attempts the address is ignored even with the right key
+					$stranger = New-RelayClient; $stranger.Client.ReceiveTimeout = 400
+					$answers = 0
+					for ($i = 0; $i -lt 9; $i++) { Send-Relay $stranger (New-Hello 3 $lobbyId ([uint64](0x4000 + $i))); if ($null -ne (Receive-Relay $stranger)) { $answers++ } }
+					Send-Relay $stranger (New-Hello 3 $lobbyId $goodKey)
+					$answeredAfterBlock = ($null -ne (Receive-Relay $stranger))
+					$other = New-RelayClient
+					Send-Relay $other (New-Hello 3 $lobbyId $goodKey)
+					$otherJoined = ($null -ne (Receive-Relay $other))
+					Add-Result 'Y4c' 'Real relay program: wrong keys get no answer; after 8 the address is ignored even with the right key; other addresses are not affected' (($answers -eq 0) -and (-not $answeredAfterBlock) -and $otherJoined) "answers to wrong keys: $answers, answered after block: $answeredAfterBlock, other friend joined: $otherJoined"
+
+					# A flood of valid data from the friend: the relay caps it and stays responsive
+					$before = Read-KeyValueFile $abuseStats
+					$floodData = [byte[]](@(0x53, 0x33, 0x52, 0x4c, 1, 6) + $friendToken + (1..100 | ForEach-Object { 7 }))
+					$elapsedMs = [RelayFlood]::Send($friendClient.Client, $relayPort, $floodData, 40000)
+					Start-Sleep -Seconds 3
+					$hostClient.Client.ReceiveTimeout = 300
+					$after = Read-KeyValueFile $abuseStats
+					Add-Result 'Y4d' 'Real relay program: a flood of 40000 datagrams from one address is rate limited (the relay forwarded only what the limit allows and dropped the rest)' (([int64]$after['dropped_rate'] -gt 0) -and ([int64]$after['forwarded'] -le 6000 + 3000 * ($elapsedMs / 1000.0 + 2) + 500)) ("sent 40000 in $elapsedMs ms (from the friend's own address and token); relay received " + $after['received'] + ", forwarded " + $after['forwarded'] + ", dropped by rate " + $after['dropped_rate'])
+					$relayAlive = -not $relayProcess.HasExited
+					$fresh = New-RelayClient
+					Send-Relay $fresh (New-Hello 3 $lobbyId $goodKey)
+					$freshJoined = ($null -ne (Receive-Relay $fresh))
+					Add-Result 'Y4e' 'Real relay program: still running and still serving a new friend after the flood' ($relayAlive -and $freshJoined) "running: $relayAlive, new friend joined: $freshJoined"
+
+					# Garbage and oversized datagrams: no answer, no crash
+					$garbage = New-RelayClient; $garbage.Client.ReceiveTimeout = 400
+					Send-Relay $garbage ([byte[]](1..200 | ForEach-Object { 0xaa }))
+					Send-Relay $garbage ([byte[]](1..5000 | ForEach-Object { 0x53 }))
+					Send-Relay $garbage ([byte[]]@(0x53, 0x33, 0x52, 0x4c, 1, 3))
+					$garbageAnswer = Receive-Relay $garbage
+					Start-Sleep -Milliseconds 2500		# (the counter file is rewritten once per second)
+					$final = Read-KeyValueFile $abuseStats
+					Add-Result 'Y4f' 'Real relay program: garbage, oversized and truncated datagrams get no answer and do not crash it' (($null -eq $garbageAnswer) -and (-not $relayProcess.HasExited) -and ([int64]$final['dropped_invalid'] -ge [int64]$after['dropped_invalid'] + 2)) ("(a datagram bigger than the relay's receive buffer, like the 5000 byte one, is discarded by the operating system before the relay can count it, so 2 of the 3 are counted) dropped invalid: " + $after['dropped_invalid'] + " -> " + $final['dropped_invalid'])
+					foreach ($client in @($hostClient, $friendClient, $stranger, $other, $fresh, $garbage)) { $client.Close() }
+				}
+				catch { Add-Result 'Y4' 'Relay abuse tests' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+			}
+
 			if (Wants 'M')
 			{
 				Write-Step 'M. Public matchmaking server registration and code join'

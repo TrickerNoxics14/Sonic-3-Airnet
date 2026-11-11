@@ -22,6 +22,7 @@
     <ClInclude Include="..\..\source\oxygen_netcore\base\HandleProvider.h" />
     <ClInclude Include="..\..\source\oxygen_netcore\base\TestHooks.h" />
     <ClInclude Include="..\..\source\oxygen_netcore\network\ConnectionManager.h" />
+    <ClInclude Include="..\..\source\oxygen_netcore\network\RelayProtocol.h" />
     <ClInclude Include="..\..\source\oxygen_netcore\network\HighLevelPacketBase.h" />
     <ClInclude Include="..\..\source\oxygen_netcore\network\internal\CryptoFunctions.h" />
     <ClInclude Include="..\..\source\oxygen_netcore\network\internal\ReceivedPacket.h" />

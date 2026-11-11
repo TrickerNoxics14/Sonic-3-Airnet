@@ -79,6 +79,19 @@ namespace NetplayAuth
 		return (tag == 0) ? 1 : tag;
 	}
 
+	// What a relay server gets to see instead of the session ID (one way hashes, see RelayProtocol.h): a lobby name and a key that only people with the code can compute.
+	// The relay operator could still try all 2^40 session IDs offline, so a relay should be run by somebody the players trust, like any server that carries their traffic.
+	inline uint64 relayLobbyFromSession(uint64 sessionID)
+	{
+		uint64 id = detail::hashToUint64("S3AIRRELAYLOBBY1|" + std::to_string(sessionID));
+		return (id == 0) ? 1 : id;
+	}
+
+	inline uint64 relayKeyFromSession(uint64 sessionID)
+	{
+		return detail::hashToUint64("S3AIRRELAYKEY1|" + std::to_string(sessionID));
+	}
+
 	// role: 'C' for the friend's proof, 'H' for the host's proof
 	inline uint64 computeProof(char role, uint32 secret, uint32 hostNonce, uint32 clientNonce)
 	{

@@ -193,3 +193,18 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Fix: Save-WindowPicture minimizes the other game windows, restores the wanted one, then takes the picture
 - Guard: pictures L2-lobby-host.png / L2-lobby-friend2.png / W4-lobby-host.png were looked at by eye
 - Lesson: a picture is evidence only if it shows what its file name says.
+
+## 2026-11-11 · test-measures-stale-counter · powershell
+- Seed: run_checks.ps1 Y4f read the relay's counter file 0.5 s after the garbage datagrams; the file is rewritten once per second, so the count was one short and a correct relay failed the check
+- Broken assumption: a status file written periodically shows the state of a moment ago
+- Search: `grep -n "stats\|Read-KeyValueFile\|Read-ProxyStats" checks/run_checks.ps1` (sleep at least one write interval, compare against a value read before the action)
+- Siblings: Y4d reads after a 3 s pause (fine); W stage reads proxy stats after stopping nothing but with 40 s margin (fine)
+- Guard: Y4f now waits 2.5 s and compares with the earlier counter
+- Lesson: when a check reads a periodically written file, wait one period and compare with a baseline.
+
+## 2026-11-11 · log-only-in-one-branch · cpp
+- Seed: NetplayHost::createNetConnection logged "a friend connects through the relay server" only inside the `mRestrictToKnownPeers` branch; a lobby opened without the matchmaking server never reached it, so Y2b could not see the line although the relay worked
+- Broken assumption: a log line placed in the code path that is guarded by a security option is seen on every route
+- Fix: the line is logged at the top of the function, before the optional restriction
+- Guard: Y2b
+- Lesson: log the outcome where every route passes (same as test-pins-internal-path).

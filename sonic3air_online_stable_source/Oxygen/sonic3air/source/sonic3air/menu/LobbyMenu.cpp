@@ -895,8 +895,17 @@ void LobbyMenu::render()
 		const char* text = inLobby ? (client->isLobbyHostStarting() ? "The host is picking a game..." : "Press READY when you are set.") : "Connecting to the lobby...";
 		if (nullptr != client && client->isRejoiningLobby())
 			text = "Connection lost. Coming back to your slot...";
-		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), text, 5, (inLobby && !client->isRejoiningLobby()) ? white : orange);
+		const bool relayConnecting = (nullptr != client && client->isRelayConnecting());
+		if (relayConnecting)
+			text = "Direct connection failed. Connecting through the relay...";
+		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), text, 5, (inLobby && !client->isRejoiningLobby() && !relayConnecting) ? white : orange);
 		py += 14;
+		if (nullptr != client && client->isUsingRelay() && inLobby)
+		{
+			// Everything goes through another computer: that adds delay, so say it
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Playing through a relay server: expect more lag.", 5, orange);
+			py += 8;
+		}
 	}
 	else if (mScreen == Screen::JOIN)
 	{
@@ -1073,7 +1082,13 @@ void LobbyMenu::render()
 	{
 		int highPing = 0;
 		const int highSlot = host->getHighPingSlot(highPing);
-		if (host->isReadyCheckActive())
+		const int relayedSlot = host->getRelayedSlot();
+		if (relayedSlot > 0 && !host->isReadyCheckActive())
+		{
+			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "WARNING: " + shorten(host->getPlayerName(relayedSlot), 12) + " plays through the relay server.", 4, red);
+			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY + 10), "That adds delay for them. Input delay evens out the lag.", 4, grey);
+		}
+		else if (host->isReadyCheckActive())
 		{
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), "Waiting for players to get ready... " + std::to_string(host->getReadyCheckSecondsLeft()) + " s", 4, yellow);
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY + 10), "Press START GAME again to start without them.", 4, grey);

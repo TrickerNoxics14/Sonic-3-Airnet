@@ -17,6 +17,7 @@
 #include "oxygen/simulation/Simulation.h"
 #include "oxygen/simulation/SimulationState.h"
 #include "oxygen_netcore/base/TestHooks.h"
+#include "oxygen_netcore/network/RelayProtocol.h"
 #include <algorithm>
 #include <cmath>
 
@@ -76,6 +77,8 @@ void NetplayHost::registerAtServer()
 
 NetConnection* NetplayHost::createNetConnection(const SocketAddress& senderAddress)
 {
+	if (RelayProtocol::isVirtualIP(senderAddress.getIP()))
+		RMX_LOG_INFO("Netplay host: a friend connects through the relay server");
 	if (mRestrictToKnownPeers)
 	{
 		bool known = std::find(mKnownPeerIPs.begin(), mKnownPeerIPs.end(), senderAddress.getIP()) != mKnownPeerIPs.end();
@@ -83,6 +86,11 @@ NetConnection* NetplayHost::createNetConnection(const SocketAddress& senderAddre
 			known = (mConnectingPlayers[k].mRemoteAddress.getIP() == senderAddress.getIP());
 		if (!known)
 			known = mNetplayManager.isLanRequester(senderAddress.getIP());		// A friend on the same network found this host with the code
+		if (!known && RelayProtocol::isVirtualIP(senderAddress.getIP()))
+		{
+			// A friend through the relay server: the relay only passes on friends who know the lobby's key, and the code check (handshake) still follows
+			known = true;
+		}
 		if (!known)
 		{
 			RMX_LOG_INFO("Netplay host: refused a connection from an address the matchmaking server did not introduce");
@@ -966,6 +974,23 @@ int NetplayHost::getPlayerPing(int slot) const
 		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex == slot)
 			return connection->mPing.get();
 	return -1;
+}
+
+int NetplayHost::getRelayedSlot() const
+{
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex >= 1 && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()))
+			return connection->mPlayerIndex;
+	return -1;
+}
+
+int NetplayHost::getRelayedFriendCount() const
+{
+	int count = 0;
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()))
+			++count;
+	return count;
 }
 
 int NetplayHost::getWorstPing() const

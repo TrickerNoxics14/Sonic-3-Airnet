@@ -10,6 +10,8 @@
 #include "oxygen_netcore/network/NetConnection.h"
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
+#include "oxygen_netcore/network/RelayProtocol.h"
+#include "RelayCore.h"
 
 #include <algorithm>
 #include <chrono>
@@ -469,6 +471,478 @@ namespace
 
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Relay server: the protocol, the relay logic (with forged datagrams and a fake clock) and the game's socket going through a real relay on the loopback
+namespace
+{
+	struct SentDatagram
+	{
+		Relay::Endpoint mTo;
+		std::vector<uint8_t> mData;
+	};
+
+	struct RelayFixture
+	{
+		std::vector<SentDatagram> mSent;
+		Relay::Core mCore;
+		double mNow = 1000.0;
+
+		explicit RelayFixture(const Relay::Limits& limits = Relay::Limits()) :
+			mCore(limits, [this](const Relay::Endpoint& to, const uint8_t* data, size_t size) { mSent.push_back({ to, std::vector<uint8_t>(data, data + size) }); })
+		{}
+
+		static Relay::Endpoint ep(uint32_t ip, uint16_t port)  { Relay::Endpoint e; e.mIP = ip; e.mPort = port; return e; }
+
+		void send(const Relay::Endpoint& from, const std::vector<uint8_t>& datagram)  { mCore.onDatagram(from, datagram.data(), datagram.size(), mNow); }
+		void hello(const Relay::Endpoint& from, RelayProtocol::Type type, uint64_t lobby, uint64_t key)
+		{
+			std::vector<uint8_t> bytes;
+			RelayProtocol::buildHello(bytes, type, lobby, key);
+			send(from, bytes);
+		}
+		const SentDatagram* lastTo(const Relay::Endpoint& to) const
+		{
+			for (size_t i = mSent.size(); i > 0; --i)
+				if (mSent[i - 1].mTo == to)
+					return &mSent[i - 1];
+			return nullptr;
+		}
+		uint32_t hostToken(const Relay::Endpoint& host) const
+		{
+			const SentDatagram* reply = lastTo(host);
+			return (reply != nullptr && reply->mData.size() == RelayProtocol::HEADER_SIZE + 12 && reply->mData[5] == RelayProtocol::HOST_REGISTERED) ? RelayProtocol::get32(&reply->mData[RelayProtocol::HEADER_SIZE + 8]) : 0;
+		}
+		uint32_t clientToken(const Relay::Endpoint& client) const
+		{
+			const SentDatagram* reply = lastTo(client);
+			return (reply != nullptr && reply->mData.size() == RelayProtocol::HEADER_SIZE + 4 && reply->mData[5] == RelayProtocol::CLIENT_JOINED) ? RelayProtocol::get32(&reply->mData[RelayProtocol::HEADER_SIZE]) : 0;
+		}
+	};
+
+	Relay::Endpoint relayEndpointFromAddress(const SocketAddress& address)
+	{
+		unsigned a = 0, b = 0, c = 0, d = 0;
+		Relay::Endpoint result;
+		const std::string ip = address.getIP();
+		if (sscanf_s(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4)
+			result.mIP = (a << 24) | (b << 16) | (c << 8) | d;
+		result.mPort = address.getPort();
+		return result;
+	}
+
+	std::string relayIPText(uint32_t ip)
+	{
+		return std::to_string((ip >> 24) & 0xff) + "." + std::to_string((ip >> 16) & 0xff) + "." + std::to_string((ip >> 8) & 0xff) + "." + std::to_string(ip & 0xff);
+	}
+
+	// The relay logic behind a real UDP socket (what s3air_relay.cpp does)
+	struct SocketRelay
+	{
+		UDPSocket mSocket;
+		Relay::Core mCore;
+		uint16 mPort = 0;
+		SocketRelay() : mCore(Relay::Limits(), [this](const Relay::Endpoint& to, const uint8_t* data, size_t size) { mSocket.sendData(data, size, SocketAddress(relayIPText(to.mIP), to.mPort)); }) {}
+		void pump()
+		{
+			const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+			for (int i = 0; i < 200; ++i)
+			{
+				UDPSocket::ReceiveResult received;
+				if (!mSocket.receiveNonBlocking(received) || received.mBuffer.empty())
+					break;
+				mCore.onDatagram(relayEndpointFromAddress(received.mSenderAddress), received.mBuffer.data(), received.mBuffer.size(), now);
+			}
+		}
+	};
+
+	void runRelayTests()
+	{
+		// --- Protocol
+		{
+			std::vector<uint8_t> hello;
+			RelayProtocol::buildHello(hello, RelayProtocol::CLIENT_JOIN, 0x1122334455667788ull, 0x99aabbccddeeff00ull);
+			uint8_t type = 0;
+			report("relay protocol: a hello has the expected size and parses back",
+				hello.size() == RelayProtocol::HELLO_SIZE && RelayProtocol::parseHeader(hello.data(), hello.size(), type) && type == RelayProtocol::CLIENT_JOIN &&
+				RelayProtocol::get64(&hello[6]) == 0x1122334455667788ull && RelayProtocol::get64(&hello[14]) == 0x99aabbccddeeff00ull);
+			std::vector<uint8_t> wrongMagic = hello;
+			wrongMagic[0] = 'X';
+			std::vector<uint8_t> wrongVersion = hello;
+			wrongVersion[4] = 99;
+			report("relay protocol: wrong magic or version is not a relay datagram", !RelayProtocol::parseHeader(wrongMagic.data(), wrongMagic.size(), type) && !RelayProtocol::parseHeader(wrongVersion.data(), wrongVersion.size(), type) && !RelayProtocol::parseHeader(hello.data(), 3, type));
+			uint16_t id = 0;
+			bool roundTrip = true;
+			for (uint32_t n : { 1u, 2u, 255u, 256u, 4660u, 65535u })
+				roundTrip = roundTrip && RelayProtocol::parseVirtualIP(RelayProtocol::virtualIP((uint16_t)n), id) && id == n;
+			report("relay protocol: made-up peer addresses round trip and are recognized", roundTrip && RelayProtocol::isVirtualIP("240.0.0.1") && !RelayProtocol::isVirtualIP("127.0.0.1") && !RelayProtocol::isVirtualIP("240.1.0.1") && !RelayProtocol::isVirtualIP("8.8.8.8"));
+			report("relay protocol: malformed made-up addresses are refused", !RelayProtocol::parseVirtualIP("240.0.256.1", id) && !RelayProtocol::parseVirtualIP("240.0.1", id) && !RelayProtocol::parseVirtualIP("240.0.a.1", id) && !RelayProtocol::parseVirtualIP("240.0.1.2.3", id) && !RelayProtocol::parseVirtualIP("240.0..1", id));
+			report("relay protocol: the relay's lobby name and key do not reveal the session ID and differ from each other",
+				NetplayAuth::relayLobbyFromSession(0x123456789aull) != 0x123456789aull && NetplayAuth::relayKeyFromSession(0x123456789aull) != NetplayAuth::relayLobbyFromSession(0x123456789aull) &&
+				NetplayAuth::relayKeyFromSession(1) != NetplayAuth::relayKeyFromSession(2) && NetplayAuth::relayLobbyFromSession(7) == NetplayAuth::relayLobbyFromSession(7));
+		}
+
+		const Relay::Endpoint hostEp = RelayFixture::ep(0x0a000001, 5000), friendEp = RelayFixture::ep(0x0a000002, 6000), strangerEp = RelayFixture::ep(0x0a000003, 7000);
+		const uint64_t lobby = 0xabcdef0123ull, key = 0x1234567890abcdefull;
+
+		// --- Forwarding both ways
+		{
+			RelayFixture fixture;
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			const uint32_t hostToken = fixture.hostToken(hostEp);
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t friendToken = fixture.clientToken(friendEp);
+			report("relay: a host registers a lobby and a friend with the key joins it (both get a token)", hostToken != 0 && friendToken != 0 && fixture.mCore.getStats().mLobbies == 1 && fixture.mCore.getStats().mPipes == 1);
+
+			const uint8_t payload[5] = { 1, 2, 3, 4, 5 };
+			std::vector<uint8_t> up;
+			RelayProtocol::buildClientData(up, RelayProtocol::DATA_C2R, friendToken, payload, sizeof(payload));
+			fixture.mSent.clear();
+			fixture.send(friendEp, up);
+			const bool toHost = fixture.mSent.size() == 1 && fixture.mSent[0].mTo == hostEp && fixture.mSent[0].mData.size() == RelayProtocol::HEADER_SIZE + 6 + 5 &&
+				fixture.mSent[0].mData[5] == RelayProtocol::DATA_R2H && RelayProtocol::get32(&fixture.mSent[0].mData[6]) == hostToken && RelayProtocol::get16(&fixture.mSent[0].mData[10]) == 1 &&
+				memcmp(&fixture.mSent[0].mData[12], payload, 5) == 0;
+			uint16_t friendID = (toHost) ? RelayProtocol::get16(&fixture.mSent[0].mData[10]) : 0;
+			report("relay: a friend's datagram reaches the host with the friend's number, the payload unchanged", toHost);
+
+			std::vector<uint8_t> down;
+			RelayProtocol::buildHostData(down, RelayProtocol::DATA_H2R, hostToken, friendID, payload, sizeof(payload));
+			fixture.mSent.clear();
+			fixture.send(hostEp, down);
+			report("relay: the host's datagram reaches that friend, the payload unchanged",
+				fixture.mSent.size() == 1 && fixture.mSent[0].mTo == friendEp && fixture.mSent[0].mData[5] == RelayProtocol::DATA_R2C && RelayProtocol::get32(&fixture.mSent[0].mData[6]) == friendToken &&
+				fixture.mSent[0].mData.size() == RelayProtocol::HEADER_SIZE + 4 + 5 && memcmp(&fixture.mSent[0].mData[10], payload, 5) == 0);
+
+			// A second friend gets its own number, and the datagrams do not get mixed up
+			const Relay::Endpoint friend2 = RelayFixture::ep(0x0a000004, 6001);
+			fixture.hello(friend2, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t token2 = fixture.clientToken(friend2);
+			std::vector<uint8_t> down2;
+			RelayProtocol::buildHostData(down2, RelayProtocol::DATA_H2R, hostToken, 2, payload, sizeof(payload));
+			fixture.mSent.clear();
+			fixture.send(hostEp, down2);
+			report("relay: two friends are kept apart (the host addresses each by number)", token2 != 0 && token2 != friendToken && fixture.mSent.size() == 1 && fixture.mSent[0].mTo == friend2);
+
+			// Repeated hello (keepalive) gives the same token and not a second place
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			report("relay: a repeated join of the same friend keeps its token and does not use a second place", fixture.clientToken(friendEp) == friendToken && fixture.mCore.getStats().mPipes == 2);
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			report("relay: a repeated registration of the host keeps the host token", fixture.hostToken(hostEp) == hostToken && fixture.mCore.getStats().mLobbies == 1);
+		}
+
+		// --- Abuse: wrong key, forged data, stranger
+		{
+			RelayFixture fixture;
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			const uint32_t hostToken = fixture.hostToken(hostEp);
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t friendToken = fixture.clientToken(friendEp);
+			const uint8_t payload[3] = { 9, 9, 9 };
+
+			// Wrong key: not one byte comes back
+			const size_t before = fixture.mSent.size();
+			fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, lobby, key ^ 1);
+			fixture.hello(strangerEp, RelayProtocol::HOST_REGISTER, lobby, key ^ 1);
+			report("relay abuse: a join or registration with the wrong key gets no answer and no place", fixture.mSent.size() == before && fixture.mCore.getStats().mWrongKeys == 2 && fixture.mCore.getStats().mPipes == 1);
+
+			// The stranger tries to take over the lobby: the real host still works
+			std::vector<uint8_t> down;
+			RelayProtocol::buildHostData(down, RelayProtocol::DATA_H2R, hostToken, 1, payload, sizeof(payload));
+			fixture.mSent.clear();
+			fixture.send(hostEp, down);
+			report("relay abuse: a wrong-key registration does not take the lobby from the real host", fixture.mSent.size() == 1 && fixture.mSent[0].mTo == friendEp);
+
+			// Data without having joined, with a wrong token, from a forged address of the host (wrong token), to a friend that does not exist
+			std::vector<uint8_t> forged;
+			fixture.mSent.clear();
+			RelayProtocol::buildClientData(forged, RelayProtocol::DATA_C2R, 0x1234, payload, sizeof(payload));
+			fixture.send(strangerEp, forged);
+			RelayProtocol::buildClientData(forged, RelayProtocol::DATA_C2R, friendToken ^ 1, payload, sizeof(payload));
+			fixture.send(friendEp, forged);
+			RelayProtocol::buildHostData(forged, RelayProtocol::DATA_H2R, hostToken ^ 1, 1, payload, sizeof(payload));
+			fixture.send(hostEp, forged);
+			RelayProtocol::buildHostData(forged, RelayProtocol::DATA_H2R, hostToken, 1, payload, sizeof(payload));
+			fixture.send(strangerEp, forged);		// Right token, but from an address that is not the host's
+			RelayProtocol::buildHostData(forged, RelayProtocol::DATA_H2R, hostToken, 77, payload, sizeof(payload));
+			fixture.send(hostEp, forged);			// Right host, but no such friend
+			report("relay abuse: data with no join, a wrong token, from a forged host address or to a missing friend is dropped", fixture.mSent.empty() && fixture.mCore.getStats().mDroppedInvalid >= 5);
+
+			// Garbage
+			fixture.send(strangerEp, std::vector<uint8_t>(100, 0xaa));
+			fixture.send(strangerEp, std::vector<uint8_t>(3, 0));
+			fixture.send(strangerEp, std::vector<uint8_t>(RelayProtocol::MAX_DATAGRAM_SIZE + 1, 0));
+			std::vector<uint8_t> bigData;
+			RelayProtocol::buildClientData(bigData, RelayProtocol::DATA_C2R, friendToken, std::vector<uint8_t>(RelayProtocol::MAX_DATAGRAM_SIZE, 1).data(), RelayProtocol::MAX_DATAGRAM_SIZE);
+			fixture.send(friendEp, bigData);
+			std::vector<uint8_t> shortHello;
+			RelayProtocol::buildHello(shortHello, RelayProtocol::CLIENT_JOIN, lobby, key);
+			shortHello.pop_back();
+			fixture.send(strangerEp, shortHello);
+			std::vector<uint8_t> unknownType = shortHello;
+			unknownType[5] = 200;
+			fixture.send(strangerEp, unknownType);
+			fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, 0, key);
+			report("relay abuse: garbage, truncated, oversized and unknown-type datagrams and lobby 0 are dropped without any answer", fixture.mSent.empty());
+
+			// Unknown lobby: only a small refusal
+			fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, 0x777, key);
+			report("relay: joining a lobby that nobody registered is answered with NO_HOST", fixture.mSent.size() == 1 && fixture.mSent[0].mData.size() == RelayProtocol::HEADER_SIZE + 1 && fixture.mSent[0].mData[5] == RelayProtocol::CLIENT_REFUSED && fixture.mSent[0].mData[6] == RelayProtocol::NO_HOST);
+		}
+
+		// --- Abuse: guessing the key is cut off
+		{
+			RelayFixture fixture;
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			for (int i = 0; i < 8; ++i)
+			{
+				fixture.mNow += 1.0;
+				fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, lobby, 0x5000 + i);
+			}
+			const size_t sentBefore = fixture.mSent.size();
+			fixture.mNow += 1.0;
+			fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, lobby, key);		// Now even the RIGHT key from this address is ignored for a while
+			const bool blocked = fixture.mSent.size() == sentBefore && fixture.mCore.getStats().mDroppedBlocked == 1;
+			const Relay::Endpoint otherEp = RelayFixture::ep(0x0a000009, 6100);
+			fixture.hello(otherEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const bool othersFine = fixture.clientToken(otherEp) != 0;
+			fixture.mNow += 61.0;
+			fixture.mCore.update(fixture.mNow);
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			fixture.hello(strangerEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			report("relay abuse: after 8 wrong keys an address is ignored for a minute (others are not affected), then it may try again", blocked && othersFine && fixture.clientToken(strangerEp) != 0);
+		}
+
+		// --- Abuse: floods
+		{
+			RelayFixture fixture;
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			const uint32_t hostToken = fixture.hostToken(hostEp);
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t friendToken = fixture.clientToken(friendEp);
+			const uint8_t payload[100] = { 0 };
+			std::vector<uint8_t> up;
+			RelayProtocol::buildClientData(up, RelayProtocol::DATA_C2R, friendToken, payload, sizeof(payload));
+			fixture.mSent.clear();
+			for (int i = 0; i < 50000; ++i)
+				fixture.send(friendEp, up);		// All at the same instant
+			const uint64_t forwarded = fixture.mCore.getStats().mForwarded;
+			report("relay abuse: a data flood from one friend is capped at the burst limit and the rest is dropped", forwarded <= 6100 && forwarded >= 5000 && fixture.mCore.getStats().mDroppedRate >= 40000);
+
+			// While that friend floods, the other direction and other friends are not hurt
+			const Relay::Endpoint friend2 = RelayFixture::ep(0x0a000005, 6200);
+			fixture.hello(friend2, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t token2 = fixture.clientToken(friend2);
+			std::vector<uint8_t> up2;
+			RelayProtocol::buildClientData(up2, RelayProtocol::DATA_C2R, token2, payload, sizeof(payload));
+			const uint64_t before = fixture.mCore.getStats().mForwarded;
+			fixture.send(friend2, up2);
+			std::vector<uint8_t> down;
+			RelayProtocol::buildHostData(down, RelayProtocol::DATA_H2R, hostToken, 1, payload, sizeof(payload));
+			fixture.send(hostEp, down);
+			report("relay abuse: another friend and the host's own traffic still get through while one friend floods", fixture.mCore.getStats().mForwarded == before + 2);
+
+			// The flood stops being dropped when time passes (the limit is a rate, not a ban)
+			fixture.mNow += 2.0;
+			const uint64_t before2 = fixture.mCore.getStats().mForwarded;
+			fixture.send(friendEp, up);
+			report("relay abuse: the flooding friend can send again after a short pause", fixture.mCore.getStats().mForwarded == before2 + 1);
+
+			// Byte limit: big datagrams are limited by bytes even when few
+			RelayFixture bytes;
+			bytes.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			bytes.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t bytesToken = bytes.clientToken(friendEp);
+			std::vector<uint8_t> big;
+			RelayProtocol::buildClientData(big, RelayProtocol::DATA_C2R, bytesToken, std::vector<uint8_t>(4000, 7).data(), 4000);
+			for (int i = 0; i < 3000; ++i)
+				bytes.send(friendEp, big);
+			report("relay abuse: a flood of big datagrams is capped by bytes (about 6 MB burst)", bytes.mCore.getStats().mForwardedBytes <= 6100000 && bytes.mCore.getStats().mForwardedBytes >= 5000000);
+
+			// Hello flood from one address: only a handful are served
+			RelayFixture hellos;
+			hellos.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			hellos.mSent.clear();
+			for (int i = 0; i < 2000; ++i)
+				hellos.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			report("relay abuse: a flood of join requests from one address is answered only a few times", hellos.mSent.size() <= 12 && hellos.mCore.getStats().mDroppedRate >= 1900);
+		}
+
+		// --- Limits: lobbies, friends, memory
+		{
+			RelayFixture fixture;
+			for (int i = 0; i < 10; ++i)
+				fixture.hello(RelayFixture::ep(0x0b000001, (uint16_t)(4000 + i)), RelayProtocol::HOST_REGISTER, 100 + i, key);
+			report("relay limits: one address can open only a few lobbies", fixture.mCore.getStats().mLobbies <= 4);
+
+			RelayFixture many;
+			for (int i = 0; i < 2000; ++i)
+				many.hello(RelayFixture::ep(0x0c000000 + (uint32_t)i, 5000), RelayProtocol::HOST_REGISTER, 1000 + i, key);
+			report("relay limits: the number of lobbies is capped", many.mCore.getStats().mLobbies <= many.mCore.getLimits().mMaxLobbies && many.mCore.getStats().mLobbies >= 500);
+
+			RelayFixture full;
+			full.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			bool allJoined = true;
+			for (int i = 0; i < 6; ++i)
+			{
+				const Relay::Endpoint e = RelayFixture::ep(0x0d000000 + (uint32_t)i, 6000);
+				full.hello(e, RelayProtocol::CLIENT_JOIN, lobby, key);
+				allJoined = allJoined && full.clientToken(e) != 0;
+			}
+			const Relay::Endpoint seventh = RelayFixture::ep(0x0d0000ff, 6000);
+			full.hello(seventh, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const SentDatagram* reply = full.lastTo(seventh);
+			report("relay limits: a lobby has room for a few friends only; the next one is told FULL", allJoined && reply != nullptr && reply->mData[5] == RelayProtocol::CLIENT_REFUSED && reply->mData[6] == RelayProtocol::FULL);
+
+			RelayFixture sources;
+			for (int i = 0; i < 30000; ++i)
+				sources.hello(RelayFixture::ep(0x0e000000 + (uint32_t)i, 9000), RelayProtocol::CLIENT_JOIN, 5, key);
+			report("relay limits: memory for remembered addresses stays bounded during a flood from many addresses", sources.mCore.getSourceCount() <= sources.mCore.getLimits().mMaxSources);
+
+			// Amplification: no answer is ever larger than the request
+			RelayFixture amp;
+			bool smaller = true;
+			std::vector<uint8_t> request;
+			RelayProtocol::buildHello(request, RelayProtocol::HOST_REGISTER, lobby, key);
+			amp.send(hostEp, request);
+			smaller = smaller && !amp.mSent.empty() && amp.mSent.back().mData.size() <= request.size();
+			RelayProtocol::buildHello(request, RelayProtocol::CLIENT_JOIN, lobby, key);
+			amp.send(friendEp, request);
+			smaller = smaller && amp.mSent.back().mData.size() <= request.size();
+			RelayProtocol::buildHello(request, RelayProtocol::CLIENT_JOIN, 0x999, key);
+			amp.send(strangerEp, request);
+			smaller = smaller && amp.mSent.back().mData.size() <= request.size();
+			report("relay abuse: every answer is smaller than the request (the relay cannot amplify traffic)", smaller);
+		}
+
+		// --- Expiry
+		{
+			RelayFixture fixture;
+			fixture.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const uint32_t friendToken = fixture.clientToken(friendEp);
+			fixture.mNow += 50.0;		// The host stopped registering
+			fixture.mCore.update(fixture.mNow);
+			std::vector<uint8_t> up;
+			const uint8_t payload[2] = { 1, 2 };
+			RelayProtocol::buildClientData(up, RelayProtocol::DATA_C2R, friendToken, payload, sizeof(payload));
+			fixture.mSent.clear();
+			fixture.send(friendEp, up);
+			fixture.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			const SentDatagram* reply = fixture.lastTo(friendEp);
+			report("relay: a lobby whose host went silent disappears, and nothing is forwarded to it", !fixture.mCore.hasLobby(lobby) && fixture.mCore.getStats().mLobbies == 0 && reply != nullptr && reply->mData[5] == RelayProtocol::CLIENT_REFUSED);
+
+			RelayFixture idle;
+			idle.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+			idle.hello(friendEp, RelayProtocol::CLIENT_JOIN, lobby, key);
+			for (int i = 0; i < 13; ++i)
+			{
+				idle.mNow += 5.0;
+				idle.hello(hostEp, RelayProtocol::HOST_REGISTER, lobby, key);
+				idle.mCore.update(idle.mNow);
+			}
+			report("relay: a friend that sent nothing for a minute loses its place, the lobby stays", idle.mCore.getStats().mPipes == 0 && idle.mCore.hasLobby(lobby));
+		}
+
+		// --- The game's UDP socket through a real relay on the loopback
+		{
+			SocketRelay relay;
+			UDPSocket hostSocket, friendSocket, attacker;
+			uint16 hostPort = 0, friendPort = 0, attackerPort = 0;
+			if (!bindFreePort(relay.mSocket, relay.mPort, 40500) || !bindFreePort(hostSocket, hostPort, 40600) || !bindFreePort(friendSocket, friendPort, 40700) || !bindFreePort(attacker, attackerPort, 40800))
+			{
+				report("relay socket tests could bind their sockets", false);
+				return;
+			}
+			const SocketAddress relayAddress("127.0.0.1", relay.mPort);
+			const uint64 lobbyID = NetplayAuth::relayLobbyFromSession(0x1122334455ull), relayKey = NetplayAuth::relayKeyFromSession(0x1122334455ull);
+			hostSocket.startRelay(UDPSocket::RelayRole::HOST, relayAddress, lobbyID, relayKey);
+			friendSocket.startRelay(UDPSocket::RelayRole::CLIENT, relayAddress, lobbyID, relayKey);
+
+			TestListener hostListener, friendListener;
+			ConnectionManager hostManager(&hostSocket, nullptr, hostListener, network::HIGHLEVEL_PROTOCOL_VERSION_RANGE);
+			ConnectionManager friendManager(&friendSocket, nullptr, friendListener, network::HIGHLEVEL_PROTOCOL_VERSION_RANGE);
+			auto pumpAll = [&](int milliseconds)
+			{
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+				while (std::chrono::steady_clock::now() < deadline)
+				{
+					hostSocket.updateRelay();
+					friendSocket.updateRelay();
+					relay.pump();
+					hostManager.updateConnectionManager();
+					friendManager.updateConnectionManager();
+					std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				}
+			};
+			pumpAll(600);
+			report("relay sockets: the host is registered and the friend let in", hostSocket.isRelayReady() && friendSocket.isRelayReady());
+
+			// A real connection (handshake, packets in both directions) over the relay, to the made-up address of the host
+			NetConnection friendConnection;
+			friendConnection.startConnectTo(friendManager, SocketAddress(RelayProtocol::hostVirtualIP(), RelayProtocol::VIRTUAL_PORT));
+			pumpAll(500);
+			TestPacket hello;
+			friendConnection.sendPacket(hello);
+			pumpAll(400);
+			const bool connected = friendConnection.getState() == NetConnection::State::CONNECTED && hostListener.mCreated.size() == 1 && hostListener.mCreated[0]->getState() == NetConnection::State::CONNECTED;
+			report("relay sockets: two connection managers connect through the relay and exchange a packet", connected && hostListener.mReceivedTestPackets == 1);
+			bool hostSeesVirtual = connected && RelayProtocol::isVirtualIP(hostListener.mCreated[0]->getRemoteAddress().getIP());
+			report("relay sockets: the host sees the relayed friend under a made-up address, the friend sees the host under one too", hostSeesVirtual && friendConnection.getRemoteAddress().getIP() == RelayProtocol::hostVirtualIP());
+			if (connected)
+			{
+				TestPacket back;
+				hostListener.mCreated[0]->sendPacket(back);
+				pumpAll(400);
+				report("relay sockets: the host's packet reaches the friend through the relay", friendListener.mReceivedTestPackets == 1 && relay.mCore.getStats().mForwarded > 4);
+			}
+
+			// A forged "relay" datagram from somebody else is not unwrapped: it reaches the game as an ordinary datagram from its real sender
+			{
+				std::vector<uint8_t> forged;
+				const uint8_t payload[4] = { 1, 2, 3, 4 };
+				RelayProtocol::buildHostData(forged, RelayProtocol::DATA_R2H, 0x1111, 1, payload, sizeof(payload));
+				attacker.sendData(forged, SocketAddress("127.0.0.1", hostPort));
+				bool sawForged = false, sawVirtual = false;
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+				while (std::chrono::steady_clock::now() < deadline)
+				{
+					UDPSocket::ReceiveResult received;
+					hostSocket.receiveNonBlocking(received);
+					if (received.mBuffer == forged)
+					{
+						sawForged = true;
+						sawVirtual = RelayProtocol::isVirtualIP(received.mSenderAddress.getIP());
+					}
+					else if (!hostSocket.consumedLanPacket())
+						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				}
+				report("relay sockets: a datagram that looks like relay data but comes from another address is not treated as relayed", sawForged && !sawVirtual);
+			}
+
+			friendConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			hostManager.terminateAllConnections();
+			hostListener.deleteAll();
+
+			// A friend with the wrong key never gets in
+			UDPSocket wrongFriend;
+			uint16 wrongPort = 0;
+			if (bindFreePort(wrongFriend, wrongPort, 40900))
+			{
+				wrongFriend.startRelay(UDPSocket::RelayRole::CLIENT, relayAddress, lobbyID, relayKey ^ 0xff);
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+				while (std::chrono::steady_clock::now() < deadline)
+				{
+					wrongFriend.updateRelay();
+					relay.pump();
+					UDPSocket::ReceiveResult received;
+					wrongFriend.receiveNonBlocking(received);
+					std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				}
+				report("relay sockets: a friend with the wrong key is not let in", !wrongFriend.isRelayReady() && relay.mCore.getStats().mWrongKeys >= 1);
+			}
+		}
+	}
+}
+
 int main()
 {
 	for (const std::string& line : NetplayCodes::runSelfTest())
@@ -558,6 +1032,9 @@ int main()
 	runBroadcastTests();
 	runPacketLimitTests();
 	runLobbyLogicTests();
+	Sockets::startupSockets();
+	runRelayTests();
+	Sockets::shutdownSockets();
 	report("test hooks are off by default (no marker file next to this test program)", !TestHooks::isEnabled() && TestHooks::getEnv("PATH") == nullptr);
 	report("LAN discovery finds a host with the matching session code", lanFound);
 	report("LAN discovery rejects a different session code", lanMismatchRejected);

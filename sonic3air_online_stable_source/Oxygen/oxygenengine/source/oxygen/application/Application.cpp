@@ -582,6 +582,16 @@ void Application::update(float timeElapsed)
 						manager.startJoinViaServer();
 					}
 				}
+				else if (mode.compare(0, 10, "joinintro:") == 0)
+				{
+					// Developer test: "joinintro:CODE:PORT" joins 127.0.0.1:PORT as if the game server had introduced the host there (the session code is known,
+					// so the relay server is possible as a fallback). Pointing PORT at a dead end (a proxy that drops everything) simulates a connection that cannot be made directly.
+					const std::string rest = mode.substr(10);
+					const size_t colon = rest.find(':');
+					uint64 sessionID = 0;
+					if (colon != std::string::npos && NetplayCodes::readSessionCode(rest.substr(0, colon).c_str(), sessionID))
+						manager.startJoinIntroduced(sessionID, "127.0.0.1", (uint16)atoi(rest.c_str() + colon + 1));
+				}
 				else if (mode.compare(0, 11, "hostserver:") == 0)
 				{
 					manager.mSessionID = strtoull(mode.c_str() + 11, nullptr, 16);

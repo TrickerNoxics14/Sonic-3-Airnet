@@ -58,6 +58,10 @@ public:
 	inline void setAuthSecret(uint32 secret)  { mAuthSecret = secret; }
 	inline bool isHostVerified() const  { return mHostVerified; }
 
+	// The relay server (an optional fallback, see NetplayManager): used when the direct connection to the host did not work
+	inline bool isUsingRelay() const  { return mUsingRelay; }
+	inline bool isRelayConnecting() const  { return mUsingRelay && (mState == State::CONNECT_TO_HOST || (mState == State::CONNECTED && !mHostVerified)); }
+
 	void joinViaServer();
 	void connectDirectlyToHost(std::string_view ip, uint16 port);
 
@@ -104,6 +108,7 @@ private:
 	void startGame(const StartGamePacket& packet);
 	void beginConnectTo(const SocketAddress& address);
 	void fail(NetplayFailure::Reason reason, const std::string& detail = std::string());
+	bool startRelayFallback(const char* why);
 	void handleJoinChallenge(uint32 hostNonce);
 	void handleJoinReply(const struct JoinReplyPacket& packet);
 	void onReceivedJoinStateChunk(const JoinStateChunkPacket& packet);
@@ -121,6 +126,11 @@ private:
 	bool mResumeSession = false;
 	bool mReconnectTestTriggered = false;
 	uint8 mPlayerIndex = 1;
+
+	// Relay server fallback
+	bool mUsingRelay = false;			// The direct connection did not work: everything goes through the relay server now
+	bool mRelayJoinPending = false;		// Waiting for the relay to let us in, only then the connection to the host through it starts
+	bool mServerKnewNoHost = false;		// The game server said that it does not know this code (the relay is the last chance)
 
 	// Handshake with the host
 	uint32 mAuthSecret = 0;

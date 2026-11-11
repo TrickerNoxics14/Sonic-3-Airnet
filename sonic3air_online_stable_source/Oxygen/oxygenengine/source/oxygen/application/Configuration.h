@@ -234,6 +234,10 @@ public:
 	// Online play: the name shown to the other players in the lobby (kept clean by NetplayLobby::sanitizeName, never the Windows user name)
 	std::string mOnlinePlayerName = "Player";
 
+	// Online play: optional relay server ("host" or "host:port", empty = no relay, which is the default and leaves the connection behavior as it always was).
+	// Only if both the host and the friend have the same relay set, players whose direct connection fails can still play, through the relay (more lag).
+	std::string mOnlineRelayServer;
+
 	// Internal
 	bool mForceCompileScripts = false;
 	int mScriptOptimizationLevel = -1;		// -1: Auto, 0: No optimization at all, up to 3: Full optimization

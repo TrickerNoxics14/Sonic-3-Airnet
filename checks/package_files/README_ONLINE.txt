@@ -95,6 +95,12 @@ IF SOMETHING GOES WRONG
   The log shows the ping (delay), the speed (fps) and how often the games had to be repaired.
 - If the code does not connect, one of the networks probably blocks direct connections:
   use the VPN option.
+- Optional relay server (a fallback for connections that cannot be made directly): if somebody runs one
+  (see DEPLOY_RELAY.txt; there is no public relay) and the host AND the friends put the same address into
+  settings.json (Online -> RelayServer, for example "relay.example.org:28842"), a friend whose direct connection
+  has not worked after 8 seconds is connected through the relay instead. The lobby says so and warns about the
+  extra lag. It is off by default (the setting is empty) and then nothing changes. It only works with lobby
+  codes, not with IP join codes.
 
 
 NOTES

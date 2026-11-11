@@ -20,6 +20,7 @@
 #include "oxygen/simulation/Simulation.h"
 
 #include "oxygen_netcore/base/TestHooks.h"
+#include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen_netcore/serverclient/Packets.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 
@@ -67,11 +68,83 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 	if (!directSecret)
 		mUDPSocket.setLanHostSession(NetplayAuth::lanTagFromSession(mSessionID));
 
+	// A relay server is only used if the player set one up: friends who cannot reach this host directly can then still join through it
+	if (!directSecret && isRelayConfigured())
+		startRelay(UDPSocket::RelayRole::HOST);
+
 	if (registerSessionAtServer)
 	{
 		mNetplayHost->registerAtServer();
 	}
 	return true;
+}
+
+std::string NetplayManager::getRelayServerSetting() const
+{
+	// Developer test: a relay without touching the settings file
+	if (const char* testRelay = TestHooks::getEnv("S3AIR_RELAY"))
+		return testRelay;
+	return Configuration::instance().mOnlineRelayServer;
+}
+
+bool NetplayManager::resolveRelayAddress(SocketAddress& outAddress) const
+{
+	// "host" or "host:port" (a name or an IPv4 address)
+	std::string text = getRelayServerSetting();
+	while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
+		text.pop_back();
+	size_t start = 0;
+	while (start < text.size() && (text[start] == ' ' || text[start] == '\t'))
+		++start;
+	text = text.substr(start);
+	if (text.empty())
+		return false;
+
+	std::string host = text;
+	int port = RelayProtocol::DEFAULT_PORT;
+	const size_t colon = text.rfind(':');
+	if (colon != std::string::npos)
+	{
+		host = text.substr(0, colon);
+		port = atoi(text.c_str() + colon + 1);
+	}
+	if (host.empty() || port <= 0 || port > 65535)
+		return false;
+	for (const char c : host)
+	{
+		if (!(isalnum((unsigned char)c) || c == '.' || c == '-'))
+			return false;
+	}
+
+	std::string ip;
+	if (!Sockets::resolveToIP(host, ip, false))
+		return false;
+	outAddress.set(ip, (uint16)port);
+	return true;
+}
+
+bool NetplayManager::isRelayConfigured() const
+{
+	return !getRelayServerSetting().empty();
+}
+
+bool NetplayManager::startRelay(UDPSocket::RelayRole role)
+{
+	SocketAddress address;
+	if (!resolveRelayAddress(address))
+	{
+		RMX_LOG_INFO("Netplay: the relay server setting is not usable (not a valid name or address), no relay is used");
+		return false;
+	}
+	mRelayReadyLogged = false;
+	mUDPSocket.startRelay(role, address, NetplayAuth::relayLobbyFromSession(mSessionID), NetplayAuth::relayKeyFromSession(mSessionID));
+	RMX_LOG_INFO("Netplay: " << ((role == UDPSocket::RelayRole::HOST) ? "registering this lobby at the relay server" : "asking the relay server to let us in"));
+	return true;
+}
+
+bool NetplayManager::beginRelayAsClient()
+{
+	return canUseRelayAsClient() && startRelay(UDPSocket::RelayRole::CLIENT);
 }
 
 bool NetplayManager::setupAsHostWithSecret(uint16 port, uint32 secret)
@@ -91,7 +164,20 @@ void NetplayManager::startJoinViaServer()
 	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
 	mUDPSocket.setLanSearchSession(NetplayAuth::lanTagFromSession(mSessionID));
 	mLanSearchTimer = 0.0f;
+	mRelaySessionKnown = true;
 	mNetplayClient->joinViaServer();
+}
+
+void NetplayManager::startJoinIntroduced(uint64 sessionID, std::string_view ip, uint16 port)
+{
+	mSessionID = sessionID;
+	if (!restartConnection(false) || nullptr == mNetplayClient)
+		return;
+	clearFailure();
+
+	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
+	mRelaySessionKnown = true;
+	mNetplayClient->connectDirectlyToHost(ip, port);
 }
 
 void NetplayManager::startJoinDirect(std::string_view ip, uint16 port, uint32 secret)
@@ -170,6 +256,9 @@ void NetplayManager::clearFailure()
 void NetplayManager::closeConnections()
 {
 	mUDPSocket.clearLan();
+	mUDPSocket.stopRelay();
+	mRelaySessionKnown = false;
+	mRelayReadyLogged = false;
 	SAFE_DELETE(mNetplayHost);
 	SAFE_DELETE(mNetplayClient);
 	mExternalAddressQuery.reset();
@@ -213,9 +302,9 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 
 	if (nullptr != mNetplayClient)
 	{
-		fprintf(file, "[friend] t=%us state=%d frame=%u fps=%.1f delay=%d frames, repairs=%d, last sync ok at frame %u, receiving game=%d\n",
+		fprintf(file, "[friend] t=%us state=%d frame=%u fps=%.1f delay=%d frames, repairs=%d, last sync ok at frame %u, receiving game=%d, relay=%d\n",
 			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayClient->getState(), (unsigned)frame, fps, mNetplayClient->getCurrentLatency(),
-			mNetplayClient->getDesyncCount(), (unsigned)mNetplayClient->getLastSyncOkFrame(), mNetplayClient->isReceivingGameState() ? 1 : 0);
+			mNetplayClient->getDesyncCount(), (unsigned)mNetplayClient->getLastSyncOkFrame(), mNetplayClient->isReceivingGameState() ? 1 : 0, mNetplayClient->isUsingRelay() ? 1 : 0);
 	}
 	else
 	{
@@ -230,8 +319,8 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 				latency = std::max(latency, player->mCurrentLatency);
 			}
 		}
-		fprintf(file, "[host] t=%us state=%d frame=%u fps=%.1f friends=%d, delay=%d frames, repairs=%d, inputdelay=%d, ping=%d\n",
-			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayHost->getHostState(), (unsigned)frame, fps, connected, latency, mNetplayHost->getResyncCount(), mNetplayHost->getEffectiveInputDelay(), worstPing);
+		fprintf(file, "[host] t=%us state=%d frame=%u fps=%.1f friends=%d, delay=%d frames, repairs=%d, inputdelay=%d, ping=%d, relayed=%d\n",
+			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayHost->getHostState(), (unsigned)frame, fps, connected, latency, mNetplayHost->getResyncCount(), mNetplayHost->getEffectiveInputDelay(), worstPing, mNetplayHost->getRelayedFriendCount());
 	}
 	fclose(file);
 }
@@ -242,7 +331,14 @@ void NetplayManager::updateConnections(float deltaSeconds)
 	if (!mUDPSocket.isValid())
 		return;
 
+	mUDPSocket.updateRelay();
 	mConnectionManager.updateConnectionManager();
+
+	if (mUDPSocket.getRelayRole() != UDPSocket::RelayRole::NONE && mUDPSocket.isRelayReady() != mRelayReadyLogged)
+	{
+		mRelayReadyLogged = mUDPSocket.isRelayReady();
+		RMX_LOG_INFO("Netplay: " << (mRelayReadyLogged ? ((mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST) ? "the relay server knows this lobby" : "the relay server let us in") : "the relay server does not answer (any more)"));
+	}
 
 	mExternalAddressQuery.updateQuery(deltaSeconds);
 

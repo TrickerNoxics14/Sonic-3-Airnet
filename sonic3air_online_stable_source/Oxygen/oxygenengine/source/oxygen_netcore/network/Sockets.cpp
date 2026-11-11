@@ -9,6 +9,7 @@
 #include "oxygen_netcore/pch.h"
 #include "oxygen_netcore/network/Sockets.h"
 #include "oxygen_netcore/base/TestHooks.h"
+#include "oxygen_netcore/network/RelayProtocol.h"
 #include <chrono>
 
 #ifdef _WIN32
@@ -625,6 +626,7 @@ bool UDPSocket::isValid() const
 
 void UDPSocket::close()
 {
+	stopRelay();
 	if (!isValid())
 		return;
 
@@ -770,6 +772,10 @@ bool UDPSocket::sendDataNow(const uint8* data, size_t length, const SocketAddres
 
 bool UDPSocket::sendData(const uint8* data, size_t length, const SocketAddress& destinationAddress)
 {
+	// A made-up address of a relayed peer: the datagram goes to the relay server instead (wrapped, see RelayProtocol.h)
+	if (mRelayRole != RelayRole::NONE && RelayProtocol::isVirtualIP(destinationAddress.getIP()))
+		return sendViaRelay(data, length, destinationAddress);
+
 	// Developer test switches (only honoured with the test hooks enabled): the delay is applied to each packet in each direction on its way out, so the round trip is the full value only if both sides use it
 	static const int lagMs = (nullptr != TestHooks::getEnv("S3AIR_NET_LAG")) ? atoi(TestHooks::getEnv("S3AIR_NET_LAG")) : 0;
 	static const int lossPercent = (nullptr != TestHooks::getEnv("S3AIR_NET_LOSS")) ? atoi(TestHooks::getEnv("S3AIR_NET_LOSS")) : 0;
@@ -966,6 +972,139 @@ std::vector<std::string> UDPSocket::getSubnetBroadcastAddresses()
 	return result;
 }
 
+void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, uint64 lobbyID, uint64 key)
+{
+	mRelayRole = role;
+	mRelayAddress = relayAddress;
+	mRelayLobby = lobbyID;
+	mRelayKey = key;
+	mRelayToken = 0;
+	mRelayReady = false;
+	mRelayRefusal = 0;
+	mRelayLastHello = -1000.0;
+	mRelayDatagramsIn = 0;
+	mRelayDatagramsOut = 0;
+	updateRelay();
+}
+
+void UDPSocket::stopRelay()
+{
+	mRelayRole = RelayRole::NONE;
+	mRelayAddress.clear();
+	mRelayLobby = 0;
+	mRelayKey = 0;
+	mRelayToken = 0;
+	mRelayReady = false;
+	mRelayRefusal = 0;
+}
+
+void UDPSocket::updateRelay()
+{
+	if (mRelayRole == RelayRole::NONE || !isValid())
+		return;
+
+	// The registration / join message goes out every second until the relay answered, and then every 5 seconds (that keeps the lobby and our place in it alive)
+	const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+	if (now - mRelayLastHello < (mRelayReady ? 5.0 : 1.0))
+		return;
+	mRelayLastHello = now;
+
+	std::vector<uint8_t> hello;
+	RelayProtocol::buildHello(hello, (mRelayRole == RelayRole::HOST) ? RelayProtocol::HOST_REGISTER : RelayProtocol::CLIENT_JOIN, mRelayLobby, mRelayKey);
+	sendData(hello.data(), hello.size(), mRelayAddress);
+}
+
+bool UDPSocket::sendViaRelay(const uint8* data, size_t length, const SocketAddress& destinationAddress)
+{
+	if (!mRelayReady || length == 0 || length > RelayProtocol::MAX_PAYLOAD_SIZE)
+		return false;
+
+	std::vector<uint8_t> wrapped;
+	if (mRelayRole == RelayRole::HOST)
+	{
+		uint16_t friendID = 0;
+		if (!RelayProtocol::parseVirtualIP(destinationAddress.getIP(), friendID) || friendID == 0)
+			return false;
+		RelayProtocol::buildHostData(wrapped, RelayProtocol::DATA_H2R, mRelayToken, friendID, data, length);
+	}
+	else
+	{
+		RelayProtocol::buildClientData(wrapped, RelayProtocol::DATA_C2R, mRelayToken, data, length);
+	}
+	++mRelayDatagramsOut;
+	return sendData(wrapped.data(), wrapped.size(), mRelayAddress);
+}
+
+bool UDPSocket::handleRelayPacket(ReceiveResult& outReceiveResult)
+{
+	// Returns true if the datagram was consumed here (a message from the relay to us, or garbage); false if it now holds a relayed peer's datagram
+	std::vector<uint8>& buffer = outReceiveResult.mBuffer;
+	uint8_t type = 0;
+	if (!RelayProtocol::parseHeader(buffer.data(), buffer.size(), type))
+		return true;
+	const uint8_t* data = buffer.data();
+	const size_t size = buffer.size();
+
+	switch (type)
+	{
+		case RelayProtocol::HOST_REGISTERED:
+		{
+			if (mRelayRole != RelayRole::HOST || size != RelayProtocol::HEADER_SIZE + 12 || RelayProtocol::get64(data + RelayProtocol::HEADER_SIZE) != mRelayLobby)
+				return true;
+			mRelayToken = RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE + 8);
+			mRelayReady = true;
+			mRelayRefusal = 0;
+			return true;
+		}
+
+		case RelayProtocol::CLIENT_JOINED:
+		{
+			if (mRelayRole != RelayRole::CLIENT || size != RelayProtocol::HEADER_SIZE + 4)
+				return true;
+			mRelayToken = RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE);
+			mRelayReady = true;
+			mRelayRefusal = 0;
+			return true;
+		}
+
+		case RelayProtocol::CLIENT_REFUSED:
+		{
+			if (mRelayRole != RelayRole::CLIENT || size != RelayProtocol::HEADER_SIZE + 1)
+				return true;
+			mRelayReady = false;
+			mRelayRefusal = (int)data[RelayProtocol::HEADER_SIZE];
+			return true;
+		}
+
+		case RelayProtocol::DATA_R2H:
+		{
+			// Header, host token, friend number, payload
+			if (mRelayRole != RelayRole::HOST || !mRelayReady || size <= RelayProtocol::HEADER_SIZE + 6 || RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE) != mRelayToken)
+				return true;
+			const uint16_t friendID = RelayProtocol::get16(data + RelayProtocol::HEADER_SIZE + 4);
+			if (friendID == 0)
+				return true;
+			buffer.erase(buffer.begin(), buffer.begin() + RelayProtocol::HEADER_SIZE + 6);
+			outReceiveResult.mSenderAddress.set(RelayProtocol::virtualIP(friendID), RelayProtocol::VIRTUAL_PORT);
+			++mRelayDatagramsIn;
+			return false;
+		}
+
+		case RelayProtocol::DATA_R2C:
+		{
+			if (mRelayRole != RelayRole::CLIENT || !mRelayReady || size <= RelayProtocol::HEADER_SIZE + 4 || RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE) != mRelayToken)
+				return true;
+			buffer.erase(buffer.begin(), buffer.begin() + RelayProtocol::HEADER_SIZE + 4);
+			outReceiveResult.mSenderAddress.set(RelayProtocol::hostVirtualIP(), RelayProtocol::VIRTUAL_PORT);
+			++mRelayDatagramsIn;
+			return false;
+		}
+
+		default:
+			return true;
+	}
+}
+
 bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
 {
 	const std::vector<uint8>& buffer = outReceiveResult.mBuffer;
@@ -1055,6 +1194,16 @@ bool UDPSocket::receiveInternal(ReceiveResult& outReceiveResult)
 
 		// Done
 		outReceiveResult.mBuffer.resize(bytesRead);
+		if (mRelayRole != RelayRole::NONE && outReceiveResult.mSenderAddress == mRelayAddress)
+		{
+			// From the relay server: either a message to us (consumed here) or the datagram of a relayed peer, which then looks like it came from that peer's made-up address
+			if (handleRelayPacket(outReceiveResult))
+			{
+				outReceiveResult.mBuffer.clear();
+				mConsumedLanPacket = true;
+			}
+			return true;
+		}
 		if (handleLanPacket(outReceiveResult))
 		{
 			outReceiveResult.mBuffer.clear();
