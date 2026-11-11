@@ -35,7 +35,10 @@ function Fail([string]$message)
 
 function Run-Git
 {
-	$output = & git -C $root @args 2>&1
+	# git reports progress (for example while pushing) on stderr; that must not count as an error under ErrorActionPreference Stop
+	$previousPreference = $ErrorActionPreference
+	$ErrorActionPreference = 'Continue'
+	try { $output = & git -C $root @args 2>&1 } finally { $ErrorActionPreference = $previousPreference }
 	if ($LASTEXITCODE -ne 0) { throw ("git " + ($args -join " ") + " failed: " + ($output -join "`n")) }
 	return $output
 }
