@@ -54,3 +54,14 @@ states/
 *.exp
 *.res
 *.cache
+
+# generated run output (contains local paths) and build recipes
+*.recipe
+/checks/last_full_report.txt
+/checks/last_report.txt
+/checks/online_backend_report.txt
+/checks/online_stable_runtime_report.txt
+/checks/update_checks_report.txt
+/checks/review_fixes_report.txt
+/checks/local_stable_report*.txt
+/checks/rename_verify*.log
