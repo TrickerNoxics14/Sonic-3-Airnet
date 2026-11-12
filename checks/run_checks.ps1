@@ -62,7 +62,7 @@ $recoveryPath = Join-Path $checksDir '.run-recovery.json'
 $testHooksMarker = Join-Path $bin 'testhooks.enabled'
 $gameExitCode = 0
 # Online stages that only make sense on the stable online fork (U, the unzipped package, is engine independent and stays in this run).
-$onlineStageIds = @('D', 'E', 'M', 'N', 'R', 'L', 'S', 'X', 'W', 'Y')
+$onlineStageIds = @('D', 'E', 'M', 'N', 'R', 'L', 'S', 'X', 'W', 'Y', 'K')
 $delegatedOnlineStages = @()
 $delegatedOnlineWanted = @()
 if (-not $EngineRoot -and -not $Quick) {
@@ -503,7 +503,7 @@ try
 			$readmeOk = ($readmeText -match "Host \(works anywhere\)") -and ($readmeText -match "online_log\.txt")
 			Add-Result "A9" "Readme explains the join code and the log file" $readmeOk ""
 
-			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|_devtools|DropInTest' })
+			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|CharPickHarness|ExtraSlotTestMod|_devtools|DropInTest' })
 			Add-Result "A10" "No developer test mods in the package" ($testLeftovers.Count -eq 0) ($testLeftovers -join ", ")
 
 				$markerEntries = @($entries.Keys | Where-Object { $_ -match '(?i)testhooks\.enabled' })
@@ -567,6 +567,14 @@ try
 	if (Test-Path $binMod) { Remove-Item $binMod -Recurse -Force }
 	New-Item -ItemType Directory -Path (Split-Path $binMod) -Force | Out-Null
 	Copy-Item $sourceMod $binMod -Recurse
+
+	# The engine installs bundled mods from the folder "bundled_mods" of the directory it is STARTED in (here: the source tree's game folder), not from the
+	# build folder above, so the copy in the mods folder is brought up to date here. Without this a check that needs a new mod script runs against an old copy
+	# (found with stage K: the harness could not find a function that only the new script defines).
+	$installedMod = Join-Path $appdata 'mods\DropInCoop'
+	New-Item -ItemType Directory -Path $installedMod -Force | Out-Null
+	& robocopy $sourceMod $installedMod /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+	if ($LASTEXITCODE -ge 8) { throw "Could not update the installed co-op mod from the source (robocopy exit code $LASTEXITCODE)" }
 
 	# Save the player's own setup, the checks change it and put it back afterwards
 	$savedMods = Join-Path $appdata "mods\active-mods.json"
@@ -819,9 +827,9 @@ try
 					[void]$startedProcesses.Add($proxyProcess)
 					[void](Wait-Until { (Read-SharedText $statsPath) -match 'uptime_s' } 30)
 
-					$wHostP = Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$wSecret"; 'S3AIR_LOGNAME' = '_whost'; 'S3AIR_NETPLAY_DELAY' = $run.Delay; 'S3AIR_NETPLAY_DELAYLOG' = '1'; 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Hosty' } else { '' }) }
+					$wHostP = Start-GameProcess @{ 'S3AIR_NETPLAY' = "hostdirect:$wSecret"; 'S3AIR_LOGNAME' = '_whost'; 'S3AIR_NETPLAY_DELAY' = $run.Delay; 'S3AIR_NETPLAY_DELAYLOG' = '1'; 'S3AIR_CHARACTER' = $(if ($tag -eq 'W2') { 'knuckles' } else { '' }); 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Hosty' } else { '' }) }
 					Start-Sleep -Seconds 12
-					$wFriendP = Start-GameProcess @{ 'S3AIR_NETPLAY' = ("joindirect:" + $wSecret + ":28841"); 'S3AIR_LOGNAME' = '_wfriend'; 'S3AIR_NETPLAY_TEST_INPUT' = '0x1'; 'S3AIR_NETPLAY_TEST_TOGGLE' = '1'; 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Laggy' } else { '' }) }
+					$wFriendP = Start-GameProcess @{ 'S3AIR_NETPLAY' = ("joindirect:" + $wSecret + ":28841"); 'S3AIR_LOGNAME' = '_wfriend'; 'S3AIR_NETPLAY_TEST_INPUT' = '0x1'; 'S3AIR_NETPLAY_TEST_TOGGLE' = '1'; 'S3AIR_CHARACTER' = $(if ($tag -eq 'W2') { 'sonic' } else { '' }); 'S3AIR_PLAYER_NAME' = $(if ($tag -eq 'W2') { 'Laggy' } else { '' }) }
 					$wReached = Wait-Until { (@((Read-SharedText (Join-Path $appdata 'online_log_wfriend.txt')) -split "`r?`n" | Where-Object { $_ -match '^\[friend\].* state=5 ' })).Count -gt 0 } 120
 					if ($wReached) { Start-Sleep -Seconds 40 }
 					if ($wReached -and $tag -eq 'W2')
@@ -874,6 +882,12 @@ try
 					Add-Result ($tag + 'a') ("Through the lag proxy ($($run.Title)): the friend joins and plays, no abort") ($wReached -and -not $aborted) ("in game: $wReached, aborted: $aborted")
 					$userNameInLog = ($wFriendLog -match ('names [^\r\n]*' + [regex]::Escape($env:USERNAME)))
 					Add-Result ($tag + 'h') ("Names in the lobby message: default is just Player (not the Windows user name) when none is set, the set names otherwise ($($run.Title))") (($wFriendLog -match $(if ($tag -eq 'W2') { 'names Hosty,Laggy,' } else { 'names Player,Player,' })) -and -not $userNameInLog) ("friend log names line: " + [regex]::Match($wFriendLog, 'names [^\r\n]*').Value)
+					if ($tag -eq 'W2')
+					{
+						# A non-default pick through the lag proxy: the host plays Knuckles and the friend asks for Sonic. Both computers must log the same fixed characters
+						$wPicksExpected = 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC'
+						Add-Result 'W2i' 'A non-default pick through the lag proxy (host Knuckles, friend Sonic): the host and the friend log the same fixed characters for the game, and the checks above still hold' (($wHostLog -match $wPicksExpected) -and ($wFriendLog -match $wPicksExpected) -and ($wHostLog -match 'player 2 \(Laggy\) plays as SONIC')) ("host: " + [regex]::Match($wHostLog, 'characters of this game: [^\r\n]*').Value + " | friend: " + [regex]::Match($wFriendLog, 'characters of this game: [^\r\n]*').Value)
+					}
 					Add-Result ($tag + 'b') ("The traffic really went through the proxy with the set delay and loss ($($run.Title))") (($c2s -gt 500) -and ($s2c -gt 500) -and ($delayAvg -gt 85) -and ($delayAvg -lt 115) -and ($lossShare -gt 1.0) -and ($lossShare -lt 6.0)) ("friend to host $c2s datagrams, host to friend $s2c, dropped $dropped (" + [math]::Round($lossShare, 1) + " percent), average added one-way delay " + $delayAvg + " ms")
 					Add-Result ($tag + 'c') ("Game stays in sync with 200 ms, jitter and loss ($($run.Title)): no repairs, the sync check keeps passing") (($repairs -eq 0) -and ($syncProgress -ge 600)) ("repairs: $repairs, sync check progressed by $syncProgress frames")
 					Add-Result ($tag + 'd') ("Usable frame rate for the friend ($($run.Title)): lowest 30 fps or more, average 45 or more") (($fpsValues.Count -ge 4) -and ($fpsMin -ge 30) -and ($fpsAvg -ge 45)) ("samples: " + $fpsValues.Count + ", lowest " + [math]::Round($fpsMin, 1) + ", average " + [math]::Round($fpsAvg, 1))
@@ -1199,7 +1213,7 @@ try
 				Stop-StartedProcesses
 
 				# X4 and X5: a different game version, different mods (a developer switch makes the friend look different)
-				foreach ($case in @(@{ Id = 'X4'; Switch = 'S3AIR_NETPLAY_FAKE_BUILD'; Reason = 'VERSION_MISMATCH'; Title = 'Different game version' }, @{ Id = 'X5'; Switch = 'S3AIR_NETPLAY_FAKE_MODS'; Reason = 'MOD_MISMATCH'; Title = 'Different mods' }))
+				foreach ($case in @(@{ Id = 'X4'; Switch = 'S3AIR_NETPLAY_FAKE_BUILD'; Reason = 'VERSION_MISMATCH'; Title = 'Different game version' }, @{ Id = 'X5'; Switch = 'S3AIR_NETPLAY_FAKE_MODS'; Reason = 'MOD_MISMATCH'; Title = 'Different mods' }, @{ Id = 'X5b'; Switch = 'S3AIR_NETPLAY_OLD_LOBBY_PROTOCOL'; Reason = 'VERSION_MISMATCH'; Title = 'A friend with the lobby messages of the version before the character choice' }))
 				{
 					Remove-NetLogs @('_xhost', '_xfriend')
 					$caseSecret = New-Secret
@@ -1597,6 +1611,290 @@ public class RelayFlood
 				Add-Result 'N9' 'The online team move launches a teammate with synchronized velocity' ($fourReady -and $moveReplicas -eq 4) ("peer copies reporting a launch: $moveReplicas/4")
 				Add-Result 'N10' 'Two online players complete a coordinated boss phase' ($fourReady -and $bossReplicas -eq 4) ("peer copies reporting a boss phase: $bossReplicas/4")
 				Stop-StartedProcesses
+			}
+
+			# ---------------------------------------------------------------------------------------------------
+			$kWanted = @($Only | Where-Object { $_ -match '^K[1-9]$' })
+			if ((Wants 'K') -or ($kWanted.Count -gt 0)) {
+				Write-Step 'K. Character choice: every online player picks a character in the lobby, the host starts the game, and every computer reports which character each slot really got'
+				$lastLogs = Join-Path $checksDir 'last_logs'
+				New-Item -ItemType Directory -Path $lastLogs -Force | Out-Null
+				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class KWin { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }' -ErrorAction SilentlyContinue
+
+				function Run-K([string]$name) { return (($kWanted.Count -eq 0) -or ($kWanted -contains $name)) }
+
+				function Install-KMods([bool]$withExtra, [int]$expectedPlayers = 4)
+				{
+					# The harness and the test extra-slot character are fixtures of the checks (never packaged); the production mod comes first because the harness imports from it
+					$mods = @('DropInCoop')
+					$modsFolder = Join-Path $appdata 'mods'
+					foreach ($name in @('CharPickHarness', 'ExtraSlotTestMod'))
+					{
+						$target = Join-Path $modsFolder $name
+						if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+					}
+					if ($withExtra)
+					{
+						Copy-Item (Join-Path $checksDir 'harness\ExtraSlotTestMod') (Join-Path $modsFolder 'ExtraSlotTestMod') -Recurse
+						$mods += 'ExtraSlotTestMod'
+					}
+					Copy-Item (Join-Path $checksDir 'harness\CharPickHarness') (Join-Path $modsFolder 'CharPickHarness') -Recurse
+					$harnessMain = Join-Path $modsFolder 'CharPickHarness\scripts\main.lemon'
+					Set-Content -Path $harnessMain -Value ((Get-Content -Raw $harnessMain).Replace('__EXPECTED_PLAYERS__', [string]$expectedPlayers)) -Encoding utf8 -NoNewline
+					$mods += 'CharPickHarness'
+					Set-ActiveMods $mods
+					# The lobby starts from the main menu: not the in-game start phase that the other stages use
+					Set-Content -Path $configPath -Value $savedConfigText -Encoding utf8 -NoNewline
+				}
+
+				function Save-KWindow([System.Diagnostics.Process]$process, [string]$path, [System.Diagnostics.Process[]]$others)
+				{
+					# The other game windows are minimized for a moment, so that the one that is photographed is really in front
+					foreach ($other in $others) { $other.Refresh(); [void][KWin]::ShowWindow($other.MainWindowHandle, 7) }
+					Start-Sleep -Milliseconds 700
+					$process.Refresh()
+					[void][KWin]::ShowWindow($process.MainWindowHandle, 9)
+					Start-Sleep -Milliseconds 700
+					[void](Save-GameScreenshot $process $path)
+					foreach ($other in $others) { [void][KWin]::ShowWindow($other.MainWindowHandle, 4) }
+				}
+
+				function Get-KReports([string]$text, [string]$name)
+				{
+					return ,@([regex]::Matches($text, ('CHECK\|' + [regex]::Escape($name) + '\|PASS\|([^\r\n]*)')) | ForEach-Object { $_.Groups[1].Value })
+				}
+
+				function Invoke-KScenario([string]$id, [bool]$withExtra, [hashtable]$picks, [bool]$reconnects, [string]$gameZone, [int]$friendCount = 3, [hashtable]$hostExtra = @{})
+				{
+					# One host and three friends on this computer, all through the lobby screens. $picks: the S3AIR_CHARACTER of 'host', 'f1', 'f2', 'f3' (a missing key: no pick).
+					Install-KMods $withExtra ($friendCount + 1)
+					Stop-StartedProcesses
+					$code = New-SessionCode
+					$suffixes = @{ host = ('_k' + $id + 'h') }
+					$friendKeys = @('f1', 'f2', 'f3')[0..($friendCount - 1)]
+					foreach ($friendKey in $friendKeys) { $suffixes[$friendKey] = ('_k' + $id + $friendKey.Substring(1)) }
+					foreach ($suffix in $suffixes.Values)
+					{
+						Remove-Item (Join-Path $appdata ('logfile' + $suffix + '.txt')), (Join-Path $appdata ('online_log' + $suffix + '.txt')) -ErrorAction SilentlyContinue
+					}
+					$common = @{ 'S3AIR_CHECK_CAPTURE_DIR' = $lastLogs }
+					$hostVars = $common.Clone()
+					$hostVars['S3AIR_LOBBY_OPEN'] = 'hostlan'; $hostVars['S3AIR_LOBBY_CODE'] = $code; $hostVars['S3AIR_LOGNAME'] = $suffixes.host; $hostVars['S3AIR_PLAYER_NAME'] = 'Hosty'
+					$hostVars['S3AIR_LOBBY_AUTOSTART'] = '85'; $hostVars['S3AIR_LOBBY_AUTOGAME'] = $gameZone; $hostVars['S3AIR_CHECK_CAPTURE_PREFIX'] = ($id + '-host')
+					if ($picks.ContainsKey('host')) { $hostVars['S3AIR_CHARACTER'] = $picks['host'] }
+					foreach ($extraKey in $hostExtra.Keys) { $hostVars[$extraKey] = $hostExtra[$extraKey] }
+					$procs = @{}
+					$procs.host = Start-GameProcess $hostVars
+					Start-Sleep -Seconds 12
+					$friendIndex = 0
+					$joinedOk = $true
+					foreach ($key in $friendKeys)
+					{
+						$friendIndex++
+						$vars = $common.Clone()
+						$vars['S3AIR_LOBBY_OPEN'] = 'join'; $vars['S3AIR_LOBBY_CODE'] = $code; $vars['S3AIR_LOGNAME'] = $suffixes[$key]; $vars['S3AIR_LOBBY_AUTOREADY'] = '1'
+						$vars['S3AIR_PLAYER_NAME'] = ('Friend ' + $friendIndex); $vars['S3AIR_CHECK_CAPTURE_PREFIX'] = ($id + '-' + $key)
+						$vars['S3AIR_NETPLAY_TEST_INPUT'] = @('128', '136', '132')[$friendIndex - 1]
+						if ($picks.ContainsKey($key)) { $vars['S3AIR_CHARACTER'] = $picks[$key] }
+						if ($reconnects -and $key -eq 'f2') { $vars['S3AIR_NETPLAY_LOBBY_DROP_TEST'] = '1' }		# its lobby connection breaks once and it comes back to the same slot and pick
+						if ($reconnects -and $key -eq 'f3') { $vars['S3AIR_NETPLAY_RECONNECT_TEST'] = '1' }			# its game connection breaks once while playing
+						$procs[$key] = Start-GameProcess $vars
+						$slotNumber = $friendIndex + 1
+						$in = Wait-Until { (Get-NetLog $suffixes.host) -match ('a friend proved the code and is player ' + $slotNumber) } 90
+						$joinedOk = $joinedOk -and $in
+					}
+					$allReady = Wait-Until { (Get-NetLog $suffixes.host) -match 'lobby: all players are ready' } 60
+					Start-Sleep -Seconds 4
+					# The lobby as the host and as the second friend see it (names, the character of each player, the CHARACTER entry)
+					if ($allReady)
+					{
+						Save-KWindow $procs.host (Join-Path $lastLogs ($id + '-lobby-host.png')) @($friendKeys | ForEach-Object { $procs[$_] })
+						$lastFriend = $(if ($friendKeys.Count -ge 2) { 'f2' } else { 'f1' })
+						Save-KWindow $procs[$lastFriend] (Join-Path $lastLogs ($id + '-lobby-friend.png')) @(@($procs.host) + @($friendKeys | Where-Object { $_ -ne $lastFriend } | ForEach-Object { $procs[$_] }))
+					}
+					$started = Wait-Until { (Get-NetLog $suffixes.host) -match 'the host starts the level' } 120
+					$reportsNeeded = 'charpick b'
+					$reported = Wait-Until {
+						$all = $true
+						foreach ($suffix in $suffixes.Values) { if ((Get-KReports (Get-NetLog $suffix) $reportsNeeded).Count -eq 0) { $all = $false } }
+						$all
+					} 420
+					Start-Sleep -Seconds 3
+					$texts = @{}
+					foreach ($key in $suffixes.Keys)
+					{
+						$texts[$key] = Get-NetLog $suffixes[$key]
+						$online = Read-SharedText (Join-Path $appdata ('online_log' + $suffixes[$key] + '.txt'))
+						Set-Content -Path (Join-Path $lastLogs ($id + '-' + $key + '.txt')) -Value $texts[$key] -Encoding utf8
+						Set-Content -Path (Join-Path $lastLogs ($id + '-' + $key + '-online.txt')) -Value $online -Encoding utf8
+						$texts[$key + '_online'] = $online
+					}
+					Stop-StartedProcesses
+					return [pscustomobject]@{ Texts = $texts; JoinedOk = $joinedOk; AllReady = $allReady; Started = $started; Reported = $reported; Code = $code }
+				}
+
+				function Test-KSync($run, [string]$id, [string]$what)
+				{
+					# The game states of host and friends stayed identical: no repair was needed, and the friends' sync checks kept passing for hundreds of frames
+					$repairs = 0; $syncFrames = @()
+					foreach ($key in @('f1', 'f2', 'f3') | Where-Object { $run.Texts.ContainsKey($_ + '_online') })
+					{
+						foreach ($line in @($run.Texts[$key + '_online'] -split "`r?`n" | Where-Object { $_ -match '^\[friend\]' }))
+						{
+							$m = [regex]::Match($line, 'repairs=(\d+)'); if ($m.Success -and [int]$m.Groups[1].Value -gt $repairs) { $repairs = [int]$m.Groups[1].Value }
+						}
+						$inGameText = (@($run.Texts[$key + '_online'] -split "`r?`n" | Where-Object { $_ -match '^\[friend\].* state=5 ' }) -join "`n")
+						$frames = @([regex]::Matches($inGameText, 'last sync ok at frame (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+						$syncFrames += $(if ($frames.Count -gt 1) { ($frames | Measure-Object -Maximum).Maximum - ($frames | Measure-Object -Minimum).Minimum } else { 0 })
+					}
+					$minSync = ($syncFrames | Measure-Object -Minimum).Minimum
+					Add-Result ($id + 'g') ("Same state on every computer ($what): the sync check keeps passing on every friend while the game advances by at least 600 frames, and no repair was needed") (($repairs -eq 0) -and ($minSync -ge 600)) ("repairs: $repairs, frames over which the sync check passed, per friend: " + ($syncFrames -join ', '))
+				}
+
+				$errorPattern = 'Script compile error|Script assertion failed|Invalid memory access|Unable to resolve|Invalid VRAM access|Failed to call'
+
+				# --- K1: all four players pick something else than their default, with a test extra-slot character installed; one friend drops in the lobby, another while playing
+				if (Run-K 'K1') {
+				try
+				{
+					$k1 = Invoke-KScenario 'K1' $true @{ host = 'knuckles'; f1 = 'sonic'; f2 = 'extra201'; f3 = 'knuckles' } $true '0x0001'
+					$t = $k1.Texts
+					Add-Result 'K1a' 'Lobby: host and three friends join and are ready; the lobby lists the test extra-slot character as installed' ($k1.JoinedOk -and $k1.AllReady -and ($t.host -match 'characters that can be picked: Sonic, Tails, Knuckles, extra characters in the slots: 201')) ("joined: $($k1.JoinedOk), all ready: $($k1.AllReady)")
+					Add-Result 'K1b' 'Lobby: the host accepts every pick and everybody sees the same list of picks (host Knuckles, player 2 Sonic, player 3 the extra character, player 4 Knuckles)' (($t.host -match 'player 2 \(Friend 1\) plays as SONIC') -and ($t.host -match 'player 3 \(Friend 2\) plays as EXTRA 201') -and ($t.host -match 'player 4 \(Friend 3\) plays as KNUCKLES') -and ($t.host -match 'the host plays as KNUCKLES') -and ($t.f1 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES') -and ($t.f2 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES') -and ($t.f3 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES')) ''
+					Add-Result 'K1c' 'Fixed at the start: every computer logs the same four characters for the game' (($t.host -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f1 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f2 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f3 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES')) ''
+					$expected = 'picks 0002 0000 01c9 0002 bodies 2 0 0 2 p2actor 1 p2x 0 x3 201 x4 0 second 1 chars 3 party 4'
+					$allSame = $true; $allExpected = $true; $detail = @()
+					foreach ($key in @('host', 'f1', 'f2', 'f3'))
+					{
+						$reports = Get-KReports $t[$key] 'charpick a'
+						$bReports = Get-KReports $t[$key] 'charpick b'
+						$ok = ($reports.Count -ge 1) -and ($reports[0] -eq $expected) -and ($bReports.Count -ge 1) -and ($bReports[0] -eq $expected)
+						$allExpected = $allExpected -and $ok
+						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
+					}
+					Add-Result 'K1d' 'In the game, on BOTH peers (all four computers): every slot has the character that was picked (Knuckles as main character with Tails, player 2 turned into Sonic, player 3 is the extra character on a Sonic base, player 4 Knuckles); the same again much later' $allExpected ($detail -join ' | ')
+					$drawn = $true; $drawDetail = @()
+					foreach ($key in @('host', 'f1', 'f2', 'f3'))
+					{
+						$roleLine = Get-KReports $t[$key] 'charpick a role'
+						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+)') } else { $null }
+						$ok = ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0)
+						$drawn = $drawn -and $ok
+						$drawDetail += ($key + ': ' + $(if ($roleLine.Count -ge 1) { $roleLine[0] } else { 'no report' }))
+					}
+					Add-Result 'K1e' 'The test extra-slot character was really drawn by its own mod on every computer (not a stand-in)' $drawn ($drawDetail -join ' | ')
+					Add-Result 'K1f' 'Reconnect: a friend whose lobby connection broke came back to its slot and kept its pick (player 3 the extra character); a friend whose game connection broke while playing was restored and the picks did not change' (($t.f2 -match 'reconnected to the lobby, back in player slot 3') -and ($t.host -match 'player 3 keeps its character EXTRA 201') -and ($t.f3 -match 'reconnected and restored the existing session') -and ((Get-KReports $t.f3 'charpick b').Count -ge 1)) ''
+					Test-KSync $k1 'K1' 'all four characters different from the defaults'
+					$errors = ($t.host + $t.f1 + $t.f2 + $t.f3) -match $errorPattern
+					Add-Result 'K1h' 'No script errors, crashes or repairs while playing with the picked characters' (-not $errors -and $k1.Started -and $k1.Reported) ("started: $($k1.Started), all reported: $($k1.Reported)")
+				}
+				catch
+				{
+					Add-Result 'K1a' 'Character choice scenario K1 ran' $false $_.Exception.Message
+				}
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- K2: the test extra-slot character is NOT installed: a friend asks for it anyway, another for nonsense; the host refuses, they keep the roles of old
+				if (Run-K 'K2') {
+				try
+				{
+					$k2 = Invoke-KScenario 'K2' $false @{ f1 = 'extra201'; f2 = 'bad' } $false '0x0001'
+					$t = $k2.Texts
+					Add-Result 'K2a' 'Without an extra-slot mod only Sonic, Tails and Knuckles are on the list' ($k2.JoinedOk -and $k2.AllReady -and ($t.host -match 'characters that can be picked: Sonic, Tails, Knuckles(\r?\n)') -and -not ($t.host -match 'extra characters in the slots')) ("joined: $($k2.JoinedOk), all ready: $($k2.AllReady)")
+					Add-Result 'K2b' 'The host refuses a character that is not installed and a made-up number, tells those friends, and their picks stay the roles of old (Tails and Knuckles), and the lobby screen of those friends says so' (([regex]::Matches($t.host, 'asked for a character that is not possible')).Count -ge 2 -and ($t.f1 -match 'the host changed our character to TAILS') -and ($t.f1 -match 'Lobby: on screen: character notice') -and ($t.f2 -match 'the host changed our character to KNUCKLES') -and ($t.f2 -match 'Lobby: on screen: character notice') -and ($t.host -match 'characters of this game: player 1 GAME MENU, player 2 TAILS, player 3 KNUCKLES, player 4 SONIC')) ''
+					$expected = 'picks fffe 0001 0002 0000 bodies 0 1 2 0 p2actor 0 p2x 0 x3 0 x4 0 second 1 chars 0 party 4'
+					$allExpected = $true; $detail = @()
+					foreach ($key in @('host', 'f1', 'f2', 'f3'))
+					{
+						$reports = Get-KReports $t[$key] 'charpick a'
+						$ok = ($reports.Count -ge 1) -and ($reports[0] -eq $expected)
+						$allExpected = $allExpected -and $ok
+						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
+					}
+					Add-Result 'K2c' 'Fallback in the game, on every computer: Sonic and Tails from the menu, player 3 Knuckles, player 4 Sonic; nothing broke' $allExpected ($detail -join ' | ')
+					Test-KSync $k2 'K2' 'stock characters only'
+					$errors = ($t.host + $t.f1 + $t.f2 + $t.f3) -match $errorPattern
+					Add-Result 'K2e' 'No script errors or crashes in the stock-only game' (-not $errors -and $k2.Started -and $k2.Reported) ("started: $($k2.Started), all reported: $($k2.Reported)")
+				}
+				catch
+				{
+					Add-Result 'K2a' 'Character choice scenario K2 ran' $false $_.Exception.Message
+				}
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- K3: only two players. The friend asks for the test extra-slot character as player 2: the Tails body of player 2 is turned into it, and (two players) the friend keeps its own full screen view
+				if (Run-K 'K3') {
+				try
+				{
+					$k3 = Invoke-KScenario 'K3' $true @{ f1 = 'extra201' } $false '0x0001' 1
+					$t = $k3.Texts
+					$expected = 'picks fffe 01c9 0002 0000 bodies 0 0 255 255 p2actor 1 p2x 201 x3 0 x4 0 second 1 chars 0 party 2'
+					$allExpected = $true; $detail = @()
+					foreach ($key in @('host', 'f1'))
+					{
+						$reports = Get-KReports $t[$key] 'charpick a'
+						$ok = ($reports.Count -ge 1) -and ($reports[0] -eq $expected)
+						$allExpected = $allExpected -and $ok
+						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
+					}
+					Add-Result 'K3a' 'Two players: player 2 is turned into the picked extra character (a Sonic base with its own mod drawing it) on both computers; the main character stays what the menu says' ($k3.JoinedOk -and $allExpected) ($detail -join ' | ')
+					$drawn = $true; $drawDetail = @()
+					foreach ($key in @('host', 'f1'))
+					{
+						$roleLine = Get-KReports $t[$key] 'charpick a role'
+						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+)') } else { $null }
+						$drawn = $drawn -and ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0)
+						$drawDetail += ($key + ': ' + $(if ($roleLine.Count -ge 1) { $roleLine[0] } else { 'no report' }))
+					}
+					Add-Result 'K3b' 'The extra character of player 2 was drawn by its own mod on both computers' $drawn ($drawDetail -join ' | ')
+					Test-KSync $k3 'K3' 'two players, player 2 turned into an extra character'
+					$errors = ($t.host + $t.f1) -match $errorPattern
+					Add-Result 'K3e' 'No script errors or crashes with player 2 as an extra character' (-not $errors -and $k3.Started -and $k3.Reported) ("started: $($k3.Started), all reported: $($k3.Reported)")
+				}
+				catch
+				{
+					Add-Result 'K3a' 'Character choice scenario K3 ran' $false $_.Exception.Message
+				}
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- K4: the extra-slot mod goes away between the pick and the start of the game (a test switch makes the host's list of installed extra characters empty after 75 seconds):
+				#     the host puts player 3 back to the default of its slot, tells it, and the game starts with that without any trouble
+				if (Run-K 'K4') {
+				try
+				{
+					$k4 = Invoke-KScenario 'K4' $true @{ f1 = 'sonic'; f2 = 'extra201' } $false '0x0001' 2 @{ 'S3AIR_CHARACTER_LIST_DROP' = '75' }
+					$t = $k4.Texts
+					Add-Result 'K4a' 'Unavailable at the start: the host notices that the extra character is gone, gives player 3 the default of its slot and tells it (log and the lobby screen of that friend)' (($t.host -match 'character of player 3 \(EXTRA 201\) is not available any more, using KNUCKLES') -and ($t.f2 -match 'the host changed our character to KNUCKLES') -and ($t.f2 -match 'Lobby: on screen: character notice')) ''
+					Add-Result 'K4b' 'The game starts with that on every computer (player 3 Knuckles instead of the extra character, player 2 still turned into Sonic), the same everywhere, and nothing broke' (($t.host -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC') -and ($t.f1 -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC') -and ($t.f2 -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC')) ''
+					$expected = 'picks fffe 0000 0002 0000 bodies 0 0 2 255 p2actor 1 p2x 0 x3 0 x4 0 second 1 chars 0 party 3'
+					$allExpected = $true; $detail = @()
+					foreach ($key in @('host', 'f1', 'f2'))
+					{
+						$reports = Get-KReports $t[$key] 'charpick a'
+						$ok = ($reports.Count -ge 1) -and ($reports[0] -eq $expected)
+						$allExpected = $allExpected -and $ok
+						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
+					}
+					Add-Result 'K4c' 'In the game, on every computer: player 3 is a Knuckles (the fallback), not the extra character' $allExpected ($detail -join ' | ')
+					Test-KSync $k4 'K4' 'an extra character that went away before the start'
+					$errors = ($t.host + $t.f1 + $t.f2) -match $errorPattern
+					Add-Result 'K4e' 'No script errors or crashes after the fallback' (-not $errors -and $k4.Started -and $k4.Reported) ("started: $($k4.Started), all reported: $($k4.Reported)")
+				}
+				catch
+				{
+					Add-Result 'K4a' 'Character choice scenario K4 ran' $false $_.Exception.Message
+				}
+				finally { Stop-StartedProcesses }
+				}
+
+				foreach ($name in @('CharPickHarness', 'ExtraSlotTestMod'))
+				{
+					$target = Join-Path (Join-Path $appdata 'mods') $name
+					if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+				}
 			}
 
 			if ((Wants 'P') -or ($Only -contains 'P3') -or ($Only -contains 'P4') -or ($Only -contains 'T'))
@@ -2102,6 +2400,7 @@ public class RelayFlood
 		if (Test-Path $partyHarnessInstalled) { Remove-Item -LiteralPath $partyHarnessInstalled -Recurse -Force }
 		$netPartyHarnessInstalled = Join-Path $appdata 'mods\NetPartyHarness'
 		if (Test-Path $netPartyHarnessInstalled) { Remove-Item -LiteralPath $netPartyHarnessInstalled -Recurse -Force }
+		foreach ($leftover in @('CharPickHarness', 'ExtraSlotTestMod')) { $leftoverPath = Join-Path $appdata ("mods\" + $leftover); if (Test-Path $leftoverPath) { Remove-Item -LiteralPath $leftoverPath -Recurse -Force } }
 		if (Test-Path -LiteralPath $testHooksMarker) { Remove-Item -LiteralPath $testHooksMarker -Force }
 		Write-Host ""
 		Write-Host "Your mod list, config and settings were put back." -ForegroundColor DarkGray

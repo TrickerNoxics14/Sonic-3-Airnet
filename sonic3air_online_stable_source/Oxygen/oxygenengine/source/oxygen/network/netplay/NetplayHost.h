@@ -61,6 +61,7 @@ public:
 		uint8 mPlayerIndex = 0xff;		// Assigned once the friend is authenticated
 		uint32 mClientToken = 0;		// From the join message, see JoinAuthPacket
 		bool mLobbyAnnounced = false;	// The first lobby message was logged
+		float mAuthSeconds = 0.0f;		// Time since the friend proved the code
 		bool mLeaving = false;			// The host sent this friend away (kick, not ready): it gets disconnected a moment later
 		float mLeaveTimer = 0.0f;
 		std::string mName = NetplayLobby::DEFAULT_NAME;		// Cleaned up by the host, see NetplayLobby::sanitizeName
@@ -69,6 +70,9 @@ public:
 		uint32 mPingSentTicks = 0;
 		float mHighPingLogTimer = 0.0f;
 		NetplayLobby::ChatRateLimiter mChatLimiter;
+		uint16 mCharacter = NetplayLobby::CHARACTER_NONE;		// The character this player picked, as the host accepted it (CHARACTER_NONE until the slot is known)
+		bool mCharacterNotice = false;				// The host changed this player's request (not allowed or not installed): the player is told
+		NetplayLobby::CharacterRateLimiter mCharacterLimiter;
 		inline bool isActive() const  { return mAuthenticated && !mLeaving && getState() == NetConnection::State::CONNECTED; }
 		uint32 mStartGamePacketID = 0;
 		uint32 mLastReceivedFrameNumber = 0;
@@ -88,6 +92,7 @@ public:
 	inline HostState getHostState() const  { return mHostState; }
 	inline const std::vector<PlayerConnection*>& getPlayerConnections() const  { return mPlayerConnections; }
 	int getAuthenticatedCount() const;		// Friends who are connected and proved that they know the code
+	bool friendsHaveAnnounced() const;		// Every connected friend sent its first lobby message (or waited long enough)
 
 	void registerAtServer();
 
@@ -119,6 +124,14 @@ public:
 	int getConnectedClientCount() const;
 	bool areAllClientsReady() const;							// At least one client, and every connected client is ready
 	void setLobbyHostStarting(bool starting);
+
+	// Character choice (see NetplayLobbyLogic.h): the host decides. A friend asks with its lobby message, the host checks the request, and the lobby state shows everybody's pick.
+	// When the game starts the picks are fixed for the whole session (also for a friend who comes back or joins late), and go to everybody in the start message.
+	uint16 getCharacterOfSlot(int slot);
+	bool hasCharacterNotice(int slot) const;
+	inline bool arePicksLocked() const  { return mPicksLocked; }
+	void onHostCharacterChanged();					// The host picked another character for itself
+	void lockCharacters();							// Fixes the picks for this session (called when the game starts)
 
 	// Names and ping (slot 0 is the host)
 	std::string getPlayerName(int slot) const;			// Empty for an empty slot
@@ -158,6 +171,8 @@ private:
 	void updatePings(float deltaSeconds);
 	void updateAutoDelay(float deltaSeconds, bool force);
 	void sendLeave(PlayerConnection& connection, NetplayLobby::LeaveReason reason);
+	void handleCharacterRequest(PlayerConnection& connection, uint16 requested);
+	void revalidateCharacters();
 	void addChatLine(int slot, const std::string& text);
 	void finishReadyCheck(bool timedOut);
 	void abortJoinTransfer();
@@ -189,6 +204,11 @@ private:
 	std::deque<ChatLine> mChatLog;
 	NetplayLobby::SlotReservations mReservations;
 	NetplayLobby::KickBlockList mKickBlocked;
+
+	// Character choice
+	bool mPicksLocked = false;
+	uint16 mSessionPicks[4] = { NetplayLobby::CHARACTER_MENU, NetplayLobby::CHARACTER_TAILS, NetplayLobby::CHARACTER_KNUCKLES, NetplayLobby::CHARACTER_SONIC };
+	bool mHostCharacterNotice = false;
 
 	// Ping, input delay
 	float mPingTimer = 0.0f;

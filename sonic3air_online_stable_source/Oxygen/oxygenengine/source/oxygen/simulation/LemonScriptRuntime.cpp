@@ -389,3 +389,10 @@ uint32 LemonScriptRuntime::getLineNumberInFile(const lemon::ScriptFunction& func
 	const uint32 lineNumber = (programCounter < opcodes.size()) ? opcodes[programCounter].mLineNumber : opcodes.back().mLineNumber;
 	return (lineNumber < function.mSourceBaseLineOffset) ? 0 : (lineNumber - function.mSourceBaseLineOffset + 1);
 }
+
+bool LemonScriptRuntime::hasFunctionByName(lemon::FlyweightString functionName)
+{
+	if (!mProgram.hasValidProgram())
+		return false;
+	return !mProgram.getInternalLemonProgram().getFunctionsByName(functionName.getHash()).empty();
+}

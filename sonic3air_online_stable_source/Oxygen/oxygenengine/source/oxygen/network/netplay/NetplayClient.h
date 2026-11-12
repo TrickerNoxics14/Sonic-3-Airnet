@@ -95,6 +95,13 @@ public:
 	inline int getLobbyEffectiveDelay() const  { return (int)mLobbyEffectiveDelay; }
 	inline int getLobbyReadyCheckSeconds() const  { return (int)mLobbyReadyCheckSeconds; }
 	inline const std::deque<ChatLine>& getChatLog() const  { return mChatLog; }
+
+	// Character choice (see NetplayLobbyLogic.h): what this player wants, and what the host says everybody plays
+	inline uint16 getMyCharacter() const  { return mMyCharacter; }
+	void setMyCharacter(uint16 character);		// Asks the host for it (the host checks it and may keep the old one)
+	inline uint16 getLobbyCharacter(int slot) const  { return (slot >= 0 && slot < 4) ? mLobbyCharacters[slot] : NetplayLobby::CHARACTER_NONE; }
+	inline bool areLobbyCharactersLocked() const  { return mLobbyCharactersLocked; }
+	bool takeCharacterNotice();					// True once after the host changed this player's character (it was not possible or not installed)
 	void sendChat(int quickMessage, const std::string& freeText);
 	inline bool isRejoiningLobby() const  { return mLobbyRejoin; }		// The connection broke while in the lobby and is being restored
 
@@ -165,6 +172,11 @@ private:
 	uint8 mLobbyDelaySetting = 0xff;
 	uint8 mLobbyEffectiveDelay = 0;
 	uint8 mLobbyReadyCheckSeconds = 0;
+	uint16 mMyCharacter = NetplayLobby::CHARACTER_NONE;		// The character this player asked for (CHARACTER_NONE until the host told which one is the default of the slot)
+	uint16 mLobbyCharacters[4] = { NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE };
+	bool mLobbyCharactersLocked = false;
+	bool mCharacterNoticeSeen = false;
+	bool mCharacterNoticePending = false;
 	std::deque<ChatLine> mChatLog;
 	bool mLobbyRejoin = false;				// The connection broke in the lobby: coming back to the same player slot
 	bool mLobbyPingLogged = false;

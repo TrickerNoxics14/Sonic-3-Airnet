@@ -10,6 +10,8 @@
 #include "oxygen_netcore/base/TestHooks.h"
 #include "sonic3air/menu/LobbyMenu.h"
 #include "sonic3air/menu/MenuBackground.h"
+#include "sonic3air/menu/GameApp.h"
+#include "sonic3air/Game.h"
 #include "sonic3air/menu/SharedResources.h"
 #include "sonic3air/menu/entries/GeneralMenuEntries.h"
 #include "sonic3air/audio/AudioOut.h"
@@ -45,6 +47,7 @@ namespace
 		CHAT_QUICK,
 		KICK,
 		EDIT_NAME,
+		CHARACTER,
 		TEXT_OK
 	};
 
@@ -190,6 +193,7 @@ void LobbyMenu::rebuildEntries()
 
 		case Screen::HOSTING:
 			mMenuEntries.addEntry("START GAME", START_GAME);
+			mMenuEntries.addEntry("CHARACTER", CHARACTER);
 			mMenuEntries.addEntry("INPUT DELAY", INPUT_DELAY);
 			mMenuEntries.addEntry("QUICK CHAT", CHAT_QUICK);
 			mMenuEntries.addEntry("KICK", KICK);
@@ -200,6 +204,7 @@ void LobbyMenu::rebuildEntries()
 
 		case Screen::JOINED:
 			mMenuEntries.addEntry("READY", READY);
+			mMenuEntries.addEntry("CHARACTER", CHARACTER);
 			mMenuEntries.addEntry("QUICK CHAT", CHAT_QUICK);
 			mMenuEntries.addEntry("NAME", EDIT_NAME);
 			mMenuEntries.addEntry("LEAVE LOBBY", LEAVE);
@@ -356,6 +361,18 @@ void LobbyMenu::startGame(bool force)
 	if (nullptr == host || (!force && !host->areAllClientsReady()))
 		return;
 	host->setLobbyHostStarting(true);
+
+	// Developer test switch (only with the test hooks enabled): the host starts a level by itself, as if it had picked it in Act Select, so that a check can play
+	// a game with the characters that were picked in the lobby without any key press. The number is the zone and act, e.g. 0x0100.
+	if (const char* autoGame = TestHooks::getEnv("S3AIR_LOBBY_AUTOGAME"))
+	{
+		RMX_LOG_INFO("Lobby: (test) the host starts the level " << autoGame << " by itself");
+		Game::instance().startIntoLevel(Game::Mode::UNDEFINED, 0, (uint16)strtoul(autoGame, nullptr, 0), 0);
+		GameApp::instance().onStartGame();
+		mMenuBackground->setGameStartedMenu();
+		mState = State::INACTIVE;
+		return;
+	}
 	goBack();
 }
 
@@ -436,6 +453,58 @@ void LobbyMenu::getSlotStates(uint8 outStates[4], bool& outConnected) const
 	}
 }
 
+int LobbyMenu::getMySlot() const
+{
+	if (nullptr != netplay().getNetplayHost())
+		return 0;
+	if (nullptr != netplay().getNetplayClient() && netplay().getNetplayClient()->hasLobbyState())
+		return (int)netplay().getNetplayClient()->getLobbyYourSlot();
+	return -1;
+}
+
+uint16 LobbyMenu::getCharacterOfSlot(int slot)
+{
+	if (nullptr != netplay().getNetplayHost())
+		return netplay().getNetplayHost()->getCharacterOfSlot(slot);
+	if (nullptr != netplay().getNetplayClient() && netplay().getNetplayClient()->hasLobbyState())
+		return netplay().getNetplayClient()->getLobbyCharacter(slot);
+	return NetplayLobby::CHARACTER_NONE;
+}
+
+uint16 LobbyMenu::getMyCharacter()
+{
+	const int slot = getMySlot();
+	return (slot < 0) ? NetplayLobby::CHARACTER_NONE : getCharacterOfSlot(slot);
+}
+
+bool LobbyMenu::areCharactersLocked()
+{
+	if (nullptr != netplay().getNetplayHost())
+		return netplay().getNetplayHost()->arePicksLocked();
+	if (nullptr != netplay().getNetplayClient())
+		return netplay().getNetplayClient()->areLobbyCharactersLocked();
+	return false;
+}
+
+// Left and right (or the accept button) go through the characters this player may pick; the host decides what is accepted
+void LobbyMenu::changeCharacter(int step)
+{
+	NetplayManager& manager = netplay();
+	const int slot = getMySlot();
+	if (slot < 0 || areCharactersLocked())
+	{
+		playMenuSound(0xad);
+		return;
+	}
+	const NetplayLobby::CharacterList& list = manager.getAvailableCharacters();
+	const uint16 next = NetplayLobby::nextCharacterChoice(slot, getMyCharacter(), step, list, manager.getConfiguredPartyExtraSlot(slot));
+	playMenuSound(0x5b);
+	if (nullptr != manager.getNetplayHost())
+		manager.setHostCharacterPick(next);
+	else if (nullptr != manager.getNetplayClient())
+		manager.getNetplayClient()->setMyCharacter(next);
+}
+
 // The next connected friend (slot 1 to 3) after "startSlot" in the direction "step", or 0 if nobody is there
 int LobbyMenu::findKickTarget(int startSlot, int step) const
 {
@@ -482,6 +551,11 @@ void LobbyMenu::updateEntryTexts()
 		if (mKickSlot == 0 || getPlayerNameOfSlot(mKickSlot).empty())
 			mKickSlot = findKickTarget(0, 1);
 		entry->mText = (mKickSlot == 0) ? std::string("KICK: (NOBODY)") : ("KICK: " + shorten(getPlayerNameOfSlot(mKickSlot), 12));
+	}
+	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(CHARACTER))
+	{
+		const uint16 mine = getMyCharacter();
+		entry->mText = "CHARACTER: " + ((mine == NetplayLobby::CHARACTER_NONE) ? std::string("...") : NetplayLobby::getCharacterName(mine)) + (areCharactersLocked() ? "  (FIXED)" : "");
 	}
 	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_NAME))
 		entry->mText = "NAME: " + manager.getLocalPlayerName();
@@ -645,6 +719,25 @@ void LobbyMenu::update(float timeElapsed)
 		}
 	}
 
+	// The host changed this player's character because it was not possible (or not installed any more): say so for a few seconds
+	if (nullptr != manager.getNetplayClient() && manager.getNetplayClient()->takeCharacterNotice())
+	{
+		mCharacterNoticeText = "Your character is not available. Now: " + NetplayLobby::getCharacterName(getMyCharacter());
+		mCharacterNoticeSeconds = 6.0f;
+	}
+	if (nullptr != manager.getNetplayHost())
+	{
+		const bool hostNotice = manager.getNetplayHost()->hasCharacterNotice(0);
+		if (hostNotice && !mHostCharacterNoticeSeen)
+		{
+			mCharacterNoticeText = "Your character is not available any more. Now: " + NetplayLobby::getCharacterName(getMyCharacter());
+			mCharacterNoticeSeconds = 6.0f;
+		}
+		mHostCharacterNoticeSeen = hostNotice;
+	}
+	if (mCharacterNoticeSeconds > 0.0f)
+		mCharacterNoticeSeconds = std::max(0.0f, mCharacterNoticeSeconds - timeElapsed);
+
 	updateEntryTexts();
 
 	if (mState == State::SHOW)
@@ -678,6 +771,10 @@ void LobbyMenu::update(float timeElapsed)
 				case KICK:
 					playMenuSound(0x5b);
 					mKickSlot = findKickTarget(mKickSlot == 0 ? 0 : mKickSlot, leftRight);
+					break;
+
+				case CHARACTER:
+					changeCharacter(leftRight);
 					break;
 			}
 		}
@@ -762,6 +859,10 @@ void LobbyMenu::update(float timeElapsed)
 					{
 						playMenuSound(0xad);
 					}
+					break;
+
+				case CHARACTER:
+					changeCharacter(1);
 					break;
 
 				case EDIT_NAME:
@@ -974,6 +1075,14 @@ void LobbyMenu::render()
 
 			drawer.printText(global::mOxyfontSmall, Vec2i(leftX, py), label, 4, (states[slot] != 0) ? white : grey);
 
+			// The character this player has picked (as the host accepted it), next to the name
+			if (states[slot] != 0)
+			{
+				const uint16 character = getCharacterOfSlot(slot);
+				if (character != NetplayLobby::CHARACTER_NONE)
+					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX - 22, py), "- " + shorten(NetplayLobby::getCharacterName(character), 12), 4, (slot == mySlot) ? yellow : white);
+			}
+
 			// Ping (round trip, as measured by the host)
 			if (slot != 0 && states[slot] >= 2)
 			{
@@ -981,11 +1090,11 @@ void LobbyMenu::render()
 				if (ping >= 0)
 				{
 					const Color pingColor = NetplayLobby::isHighPing(ping) ? red : ((ping > 80) ? yellow : green);
-					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 40, py), std::to_string(ping) + " ms", 6, pingColor);
+					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 84, py), std::to_string(ping) + " ms", 6, pingColor);
 				}
 				else
 				{
-					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 40, py), "... ms", 6, grey);
+					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 84, py), "... ms", 6, grey);
 				}
 			}
 			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 174, py), status, 6, color);
@@ -1089,6 +1198,11 @@ void LobbyMenu::render()
 			lineY += 10;
 			begin = end + 1;
 		}
+	}
+	else if (mCharacterNoticeSeconds > 0.0f)
+	{
+		drawnStatus = "character notice";
+		drawer.printText(global::mOxyfontSmall, Vec2i(leftX, bottomY), shorten(mCharacterNoticeText, 58), 4, orange);
 	}
 	else if (mScreen == Screen::JOINED && nullptr != client && client->getLobbyReadyCheckSeconds() > 0 && !client->isLobbyReady())
 	{

@@ -1,0 +1,33 @@
+//# script-feature-level(2)
+
+// A tiny extra-slot character for the automated checks. It is our own code (no third-party content, no sprites): it adds an extra character the same way
+// real extra-slot mods (Extra Slots Unlimited and the character mods for it) do, which is the interface that the Drop-In Co-op mod uses for it:
+//  - the global "global.xtrachar" names the active extra slot (the framework mod declares it; this test mod declares it itself)
+//  - "ExtraChar.startup_charN" says which main character the extra character is based on (here: Sonic alone, like most of them)
+//  - "ExtraChar.drawCharacterSprite_charN" draws the character; the caller pushes character, variant, x, y, "small ghost" and a key, the function pops them
+//    and pushes true when it has drawn the character (here: a plain blue box, color 0xRRGGBBAA, so the checks can see that the extra character is really the one drawn)
+// The extra slot number is 201 (no real character mod uses it).
+
+global u8 global.xtrachar
+global u32 extratest.startups
+global u32 extratest.draws
+
+function void ExtraChar.startup_char201()
+{
+	++extratest.startups
+	global.characters = CHARS_SONIC_ALONE
+}
+
+function void ExtraChar.drawCharacterSprite_char201()
+{
+	u64 key = pop()
+	bool asSmallGhost = pop()
+	s16 py = s16(pop())
+	s16 px = s16(pop())
+	u8 variant = pop()
+	u8 character = pop()
+	++extratest.draws
+	u16 renderQueue = 0xa000 - char.sprite_priority
+	Renderer.drawRect(px - 7, py - 12, 14, 24, 0x30a0ffff, renderQueue, false)
+	push(true)
+}

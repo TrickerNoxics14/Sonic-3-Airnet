@@ -18,6 +18,8 @@
 #include "oxygen/application/modding/ModManager.h"
 #include "oxygen/simulation/EmulatorInterface.h"
 #include "oxygen/simulation/Simulation.h"
+#include "oxygen/simulation/CodeExec.h"
+#include "oxygen/simulation/LemonScriptRuntime.h"
 
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
@@ -57,6 +59,8 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 	if (!restartConnection(true, port) || nullptr == mNetplayHost)
 		return false;
 	mNetplayHost->setInputDelaySetting(mInputDelaySetting);
+	if (const uint16 testPick = getCharacterPickFromEnvironment(); testPick != NetplayLobby::CHARACTER_NONE)
+		setHostCharacterPick(testPick);		// Developer test switch: the host picks without a key press
 	clearFailure();
 	mTestCloseTimer = 0.0f;
 
@@ -243,6 +247,120 @@ int NetplayManager::getPlayerPingMs(int slot) const
 	return -1;
 }
 
+const NetplayLobby::CharacterList& NetplayManager::getAvailableCharacters()
+{
+	// The extra characters are found by asking the game's script program which "ExtraChar.startup_charN" functions exist (nothing gets executed). The answer only
+	// changes when the active mods change, so it is kept for a second at most.
+	const uint32 now = SDL_GetTicks();
+	if (!mCharacterListKnown || now - mCharacterListTicks > 1000)
+	{
+		mCharacterListKnown = true;
+		mCharacterListTicks = now;
+		std::vector<int> extras;
+		LemonScriptRuntime& runtime = Application::instance().getSimulation().getCodeExec().getLemonScriptRuntime();
+		if (runtime.hasValidProgram())
+		{
+			for (int slot = 1; slot <= 255; ++slot)
+			{
+				if (runtime.hasFunctionByName(lemon::FlyweightString("ExtraChar.startup_char" + std::to_string(slot))))
+					extras.push_back(slot);
+			}
+		}
+		// Developer test switch: after this many seconds the extra characters count as gone (as if their mod had been switched off), to see what the lobby does then
+		if (const char* dropAfter = TestHooks::getEnv("S3AIR_CHARACTER_LIST_DROP"))
+		{
+			if ((double)now / 1000.0 > atof(dropAfter))
+				extras.clear();
+		}
+		NetplayLobby::CharacterList list;
+		list.setExtraSlots(extras);
+		if (list != mCharacterList || !mCharacterListLogged)
+		{
+			std::string text;
+			for (const int slot : list.getExtraSlots())
+				text += " " + std::to_string(slot);
+			RMX_LOG_INFO("Netplay: characters that can be picked: Sonic, Tails, Knuckles" << (list.getExtraSlots().empty() ? "" : ", extra characters in the slots:") << text);
+			mCharacterList = list;
+			mCharacterListLogged = true;
+			mCharacterListChanged = true;
+		}
+	}
+	return mCharacterList;
+}
+
+void NetplayManager::invalidateCharacterList()
+{
+	mCharacterListKnown = false;
+}
+
+int NetplayManager::getConfiguredPartyExtraSlot(int slot) const
+{
+	// The setting of the Drop-In Co-op mod that names the extra character of player 3 or 4 (it is still the default of that player)
+	if (slot != 2 && slot != 3)
+		return 0;
+	const char* identifier = (slot == 2) ? "party_slot3" : "party_slot4";
+	for (const Mod* mod : ModManager::instance().getActiveMods())
+	{
+		if (mod->mUniqueID != "dropin-coop")
+			continue;
+		for (const Mod::SettingCategory& category : mod->mSettingCategories)
+			for (const Mod::Setting& setting : category.mSettings)
+				if (setting.mIdentifier == identifier)
+					return (int)setting.mCurrentValue;
+	}
+	return 0;
+}
+
+uint16 NetplayManager::getCharacterPickFromEnvironment() const
+{
+	// Developer test switch: "sonic", "tails", "knuckles", "menu", or "extraN" for the extra slot N
+	const char* text = TestHooks::getEnv("S3AIR_CHARACTER");
+	if (nullptr == text)
+		return NetplayLobby::CHARACTER_NONE;
+	if (_stricmp(text, "sonic") == 0)		return NetplayLobby::CHARACTER_SONIC;
+	if (_stricmp(text, "tails") == 0)		return NetplayLobby::CHARACTER_TAILS;
+	if (_stricmp(text, "knuckles") == 0)	return NetplayLobby::CHARACTER_KNUCKLES;
+	if (_stricmp(text, "menu") == 0)		return NetplayLobby::CHARACTER_MENU;
+	if (_strnicmp(text, "extra", 5) == 0)	return NetplayLobby::makeExtraCharacter(atoi(text + 5));
+	if (_stricmp(text, "bad") == 0)			return 0x7777;		// (a pick that nobody may have, to test that the host refuses it)
+	return NetplayLobby::CHARACTER_NONE;
+}
+
+void NetplayManager::setHostCharacterPick(uint16 pick)
+{
+	if (nullptr != mNetplayHost && mNetplayHost->arePicksLocked())
+		return;
+	bool adjusted = false;
+	const uint16 accepted = NetplayLobby::sanitizeCharacterPick(0, pick, getAvailableCharacters(), mHostCharacterPick, &adjusted);
+	if (accepted != mHostCharacterPick)
+	{
+		mHostCharacterPick = accepted;
+		RMX_LOG_INFO("Netplay: the host plays as " << NetplayLobby::getCharacterName(accepted));
+	}
+	if (nullptr != mNetplayHost)
+		mNetplayHost->onHostCharacterChanged();
+}
+
+void NetplayManager::setSessionCharacters(const uint16 picks[4])
+{
+	// What comes from the host is checked here as well (nothing is trusted): a pick that is not possible for the slot becomes the slot's default
+	const NetplayLobby::CharacterList& list = getAvailableCharacters();
+	for (int slot = 0; slot < 4; ++slot)
+	{
+		bool adjusted = false;
+		mSessionCharacters.mPicks[slot] = NetplayLobby::sanitizeCharacterPick(slot, picks[slot], list, NetplayLobby::defaultCharacterForSlot(slot, list, getConfiguredPartyExtraSlot(slot)), &adjusted, getConfiguredPartyExtraSlot(slot));
+		if (adjusted)
+			RMX_LOG_INFO("Netplay: the character of player " << (slot + 1) << " (" << NetplayLobby::getCharacterName(picks[slot]) << ") is not available here, using " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[slot]));
+	}
+	mSessionCharactersValid = true;
+	RMX_LOG_INFO("Netplay: characters of this game: player 1 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[0]) << ", player 2 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[1]) << ", player 3 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[2]) << ", player 4 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[3]));
+}
+
+void NetplayManager::clearSessionCharacters()
+{
+	mSessionCharactersValid = false;
+}
+
 void NetplayManager::reportFailure(NetplayFailure::Reason reason, const std::string& detail)
 {
 	mLastFailure = reason;
@@ -261,6 +379,8 @@ void NetplayManager::clearFailure()
 void NetplayManager::closeConnections()
 {
 	mUDPSocket.clearLan();
+	clearSessionCharacters();
+	mHostCharacterPick = NetplayLobby::CHARACTER_MENU;
 	mUDPSocket.stopRelay();
 	mRelaySessionKnown = false;
 	mRelayReadyLogged = false;
@@ -474,6 +594,27 @@ void NetplayManager::onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber)
 		if (nullptr != forced)
 			role = (uint8)atoi(forced);
 		Application::instance().getSimulation().getEmulatorInterface().writeMemory8(ROLE_ADDRESS, role);
+	}
+
+	// The characters of the four players, fixed when the game started, for the game scripts: also shared memory, so that every computer's scripts see the same
+	// numbers in every frame (they came from the host in the start message). Not part of the compared game state; the scripts use them to set up the players.
+	{
+		EmulatorInterface& emulatorInterface = Application::instance().getSimulation().getEmulatorInterface();
+		const bool gameRunning = (nullptr != mNetplayClient && mNetplayClient->getState() == NetplayClient::State::GAME_RUNNING) ||
+								 (nullptr != mNetplayHost && mNetplayHost->getHostState() == NetplayHost::HostState::GAME_RUNNING);
+		if (gameRunning && mSessionCharactersValid)
+		{
+			emulatorInterface.writeMemory8(PICKS_ADDRESS, 1);
+			for (int slot = 0; slot < 4; ++slot)
+			{
+				emulatorInterface.writeMemory8(PICKS_ADDRESS + 2 + slot * 2, (uint8)(mSessionCharacters.mPicks[slot] & 0xff));
+				emulatorInterface.writeMemory8(PICKS_ADDRESS + 3 + slot * 2, (uint8)(mSessionCharacters.mPicks[slot] >> 8));
+			}
+		}
+		else
+		{
+			emulatorInterface.writeMemory8(PICKS_ADDRESS, 0);
+		}
 	}
 
 	if (nullptr != mNetplayHost || nullptr != mNetplayClient)

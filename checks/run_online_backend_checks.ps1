@@ -36,9 +36,9 @@ try {
     $results.Add("PASS online package built from the stable fork and passed content guards (no test-hooks marker shipped)")
 
     # D join by code, E bad connection, M public matchmaking, N four players, R reconnect, L lobby,
-    # S join secret (wrong code refused), X failure reasons and Retry, W a lag proxy with 200 ms / jitter / loss, L also the lobby features, Y relay fallback (direct path blocked) and attacks on the relay program, U the unzipped package ignores developer variables
+    # K character choice in the lobby (host, three friends, test extra-slot character, reconnects, stock-only fallback), S join secret (wrong code refused), X failure reasons and Retry, W a lag proxy with 200 ms / jitter / loss, L also the lobby features, Y relay fallback (direct path blocked) and attacks on the relay program, U the unzipped package ignores developer variables
     $runtimeScript = Join-Path $checksDir "run_checks.ps1"
-    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,W,Y,U 2>&1
+    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,W,Y,K,U 2>&1
     $runtimeExitCode = $LASTEXITCODE
     $runtimeOutput | ForEach-Object {
         Write-Output $_
@@ -50,7 +50,7 @@ try {
         }
     }
     if ($runtimeExitCode -ne 0) { throw "Stable online runtime checks returned exit code $runtimeExitCode" }
-    $results.Add("PASS stable online runtime checks: join by code, join secret, failure reasons, network stress, four peers, reconnect, lobby, relay fallback, packaged game")
+    $results.Add("PASS stable online runtime checks: join by code, join secret, failure reasons, network stress, four peers, reconnect, lobby, character choice, relay fallback, packaged game")
 
     # Stage T: the in-game updater (install helper alone, the real game against a loopback server that plays GitHub, release.ps1 dry run and the real release zip).
     # It runs last because its release dry run rebuilds the package with a test version and then puts the normal package back.

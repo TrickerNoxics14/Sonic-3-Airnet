@@ -79,6 +79,11 @@ private:
 	std::string getPlayerNameOfSlot(int slot) const;
 	int getPingOfSlot(int slot) const;
 	int findKickTarget(int startSlot, int step) const;
+	int getMySlot() const;
+	uint16 getCharacterOfSlot(int slot);
+	uint16 getMyCharacter();
+	bool areCharactersLocked();
+	void changeCharacter(int step);
 
 private:
 	MenuBackground* mMenuBackground = nullptr;
@@ -108,4 +113,8 @@ private:
 	int mLastWarnedSlot = -1;			// The friend the host was last warned about (high ping), for the log
 	float mHostingMessageSeconds = 0.0f;	// A hint that was set while hosting (nobody joined yet, ready check asked) is shown for a few seconds only: it must not hide the warnings and the ready check status for good
 	std::string mLastDrawnStatus;		// What the bottom line of the lobby screen showed last (written to the log when it changes, so that the checks see what was really drawn)
+	float mCharacterNoticeSeconds = 0.0f;	// A note that the host changed this player's character is shown for a few seconds
+	std::string mCharacterNoticeText;
+	bool mHookGameDone = false;
+	bool mHostCharacterNoticeSeen = false;
 };

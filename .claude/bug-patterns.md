@@ -352,3 +352,28 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Seed: DropIn.drawPlayerLabel(u8 slot, u16 x, u16 y, ...) received s16 positions (py - 28, px partly off-screen); a negative value became 65xxx in the stock-engine fallback Renderer.drawText (s32).
 - Fix: s16 parameters and s16 shared-memory stores; check A15 on the package
 - Search: `rg -n "u16 (x|y)\b" DropInCoop/scripts`
+
+## 2026-11-12 · checks-run-against-stale-installed-copy · powershell
+- Seed: checks/run_checks.ps1 copied the co-op mod to `<exe folder>\bundled_mods`, but the engine installs bundled mods from `bundled_mods` in its WORKING directory (the source tree's game folder when the runner starts it), so every game stage ran against whatever copy was last put into %APPDATA%\Sonic3AIR\mods by hand. Stage K died at start with "Unknown function name 'DropIn.pick'" (the new script file did not exist in the installed copy).
+- Broken assumption: the comment "the game installs the copy from its own folder at each start" holds for a check that starts the game from the build folder (the unzipped package stage U does); it does not hold when the working directory is somewhere else.
+- Fix: the runner mirrors the source mod into the mods folder itself (robocopy /MIR; fails the run if that does not work).
+- Search: `grep -n "bundled_mods" checks/*.ps1` (every place that relies on the automatic installation must start the game with the right working directory, or install the copy itself)
+- Siblings: stage U and L4/L5 start the exe from the unzipped package folder (right directory, fine); the local stages F/G/P/Q ran on the hand-copied mod before this too.
+- Guard: stage K needs a function that only the new script defines; it cannot pass on an old copy.
+- Lesson: when a check installs something "for the game to pick up", check that the game really looks where the check put it.
+
+## 2026-11-12 · lemon-stringformat-argument-limit · lemon
+- Seed: checks/harness/CharPickHarness: a `stringformat` with 16 arguments failed to compile ("No appropriate function overload found calling 'stringformat'"); the game stops with a modal error dialog at start, so every runner wait ran out its full time before the cause was visible.
+- Broken assumption: stringformat takes any number of arguments (the standard library has stringformat1 to stringformat8: at most 8).
+- Fix: build long lines from several short stringformat calls (at most 8 arguments each).
+- Search: `grep -n "stringformat(" -r DropInCoop checks/harness` and count the arguments of each call (more than 8 does not compile)
+- Lesson: after an edit to a script, start the game once and look at the window before running a long stage (a script compile error is a dialog, not a log line).
+
+## 2026-11-12 · init-hook-runs-after-every-state-load · lemon
+- Seed: DropInCoop/scripts/main.lemon `Init()` reset all mod variables (`dropin.joined = false`, team state, party wants...). Found with stage K: after a friend reconnected in the game, its restored game said `dropin.joined 0` while the host and the other friends had 1 (player 2 was playing); the player-2 rules (hurt, rescue, team moves) then differ on that one computer, and the 64 KB memory comparison cannot see script variables.
+- Root cause: the engine calls the script function `Init` at the end of EVERY `CodeExec::reinitRuntime`, which includes loading a game state (a friend who joins a running game, comes back, or is repaired). The state's script variables are loaded first and `Init` then overwrote them with defaults on that computer only.
+- Fix: online (`DropIn.net()`) and in a running level (`level.framecounter != 0`) `Init` keeps what the state loaded; on a fresh start (counter 0) and offline it resets as before.
+- Search: `grep -n "function void Init()" -r DropInCoop checks/harness sonic3air_online_stable_source/Oxygen/sonic3air/scripts` and read what each one resets; also anything in C++ that assumes script variables are zero after a load.
+- Siblings: the stock `Init` in standalone/enginecallbacks.lemon only re-derives values from settings (safe to repeat, it says so itself); `InitializeGameCharacters` runs at level start on every computer at the same frame (fine); the test harness mods keep their counters in globals that the state restores (fine).
+- Guard: K1f (a friend whose game connection breaks while playing is restored and reports the same bodies, with `joined` true, 1500 frames later). Not covered: other mod variables that are set once and never again; they are restored from the host now.
+- Lesson: a reset hook that runs "on load" must know whether the load brought state with it.

@@ -2,9 +2,11 @@ SONIC 3 AIRNET - ONLINE CO-OP (STABLE FORK)
 ==========================================
 
 Up to four players can join from separate computers. Each gets their own
-full screen and controller slot. The host plays Sonic; player 2 is Tails,
-player 3 is Knuckles, and player 4 is a second Sonic by default (or the
-configured ESU character when an extra-character mod is installed).
+full screen and controller slot. Every player picks their own character in
+the lobby (see CHOOSING YOUR CHARACTER below). If nobody touches that entry,
+the old roles apply: the host plays what the game menu says (Sonic with Tails),
+player 2 is Tails, player 3 is Knuckles, and player 4 is a second Sonic (or
+the extra-slot character set in the mod's "Player 3/4 Extra Character Slot").
 Nothing else to install: the co-op mod is built in. The game copies it into its mods folder (%APPDATA%\Sonic3AIR\mods) and
 switches it on the first time it starts, and repairs that copy at every start so that it always matches this folder.
 (If you switch it off in the Mods menu, it stays off; the copy is still kept up to date.)
@@ -33,6 +35,39 @@ picks Normal Game (or Act Select) and a save as usual, and everybody joins in as
 Back keeps the lobby open; LEAVE LOBBY closes it. Windows may ask whether the game may use the network the
 first time somebody hosts: choose Allow.
 The F9 window below still works the same way (it is also the way to host on a VPN or the same network).
+
+CHOOSING YOUR CHARACTER
+  In the lobby every player (the host too) has a CHARACTER entry: press Left/Right (or the accept button) to go through
+  the characters you can have, and everybody sees "<number> <name> - <character>" for every player. The host checks every
+  choice; a choice that is not possible is refused and you are told what you play instead. You can change it as often as
+  you like while the lobby is open. When the host starts the game the choices are FIXED for that whole game (a friend who
+  loses the connection and comes back keeps its slot and its character; somebody who joins a game that is already running
+  gets the character of the slot that was fixed at the start).
+  Who can be what (this is what the game can really run):
+    Host (player 1):   GAME MENU (default: whatever the save slot / game menu says), SONIC or KNUCKLES. Both get Tails as the
+                       game's second character, like the game's own "Sonic & Tails" and "Knuckles & Tails". Tails alone as the
+                       host's character is not offered: the game then has no second character, so there would be no body for
+                       player 2. A character of an extra-slot mod for the host is picked in the game's own menu (if that mod
+                       supports it), then choose GAME MENU.
+    Player 2:          TAILS (default), SONIC, KNUCKLES or an extra character. For anything but Tails the Tails body is turned into
+                       the picked character as soon as player 2 has joined and plain gameplay is on (not during the intro of
+                       Angel Island 1 or a cutscene): until then player 2 plays Tails.
+    Players 3 and 4:   KNUCKLES / SONIC (the old roles), the other one, or an extra character. Tails exists once in the game, so only
+                       player 2 can be Tails. Two players may pick the same character (two Sonics are fine).
+  Extra characters: if the extra-slot character mods (Extra Slots Unlimited and the characters made for it) are installed, their
+  characters appear in the list of players 2, 3 and 4 as "EXTRA <slot>" (the well known slots 35 and 90 by their name). Everybody has
+  to install the same mods: the join check refuses friends with other mods, so everybody's list is the same, and the host checks every
+  pick again. The list is read from the game's scripts when the lobby opens; without such a mod it is Sonic, Tails and Knuckles.
+  If a picked extra character is not installed any more when the game starts (the mod was switched off in between), that player gets
+  the default of the slot and the lobby says so; nothing breaks. An extra character is only checked to be a script mod
+  that provides ExtraChar.startup_charN (like the real ones); nobody checks what it looks like or whether its abilities work for players 2 to 4.
+  Saving: if the host's pick is another character than the one the save slot was made for, this game does not write to that slot
+  (so a Sonic save never gets Knuckles' progress). Play without a save slot, or with a slot of that character, to save.
+  Limits (honest status): everything was tested by automated checks on one computer, with a tiny test mod as the extra character.
+  The real extra-slot character mods were NOT tested here (their abilities depend on how they hook into the framework: not every one
+  works for players 2 to 4, see DropInCoop/README.txt). With three or four players the game uses one shared camera for everybody (as
+  before); with two players each keeps its own full screen, also when player 2 was turned into another character. Not tested: player 2
+  turned into another character during the intro of Angel Island 1 (the change waits until the intro is over) or in boss fights.
 
 IN THE LOBBY
   Names:    NAME sets the name the others see (12 letters, plain characters only, default "Player"). It is saved in

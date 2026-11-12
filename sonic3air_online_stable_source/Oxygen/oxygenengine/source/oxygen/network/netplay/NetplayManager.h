@@ -86,6 +86,24 @@ public:
 	std::string getPlayerName(int slot) const;
 	int getPlayerPingMs(int slot) const;
 
+	// Character choice. Every player picks the character they play with in the lobby (see NetplayLobbyLogic.h). The list of characters that can be picked is read from the
+	// game's scripts (an extra-slot mod provides "ExtraChar.startup_charN"), so it is never fixed here; without such a mod it is Sonic, Tails and Knuckles.
+	const NetplayLobby::CharacterList& getAvailableCharacters();		// Cached; read again when the active mods change
+	void invalidateCharacterList();
+	inline bool takeCharacterListChanged()  { const bool changed = mCharacterListChanged; mCharacterListChanged = false; return changed; }		// True once after the list changed (the host then checks every pick again)
+	int getConfiguredPartyExtraSlot(int slot) const;					// The mod setting "Player 3/4 Extra Character Slot" (0 = none): the default character of that player
+	inline uint16 getHostCharacterPick() const  { return mHostCharacterPick; }
+	void setHostCharacterPick(uint16 pick);								// The host's own pick; checked like everybody's, ignored once the game has started
+	uint16 getCharacterPickFromEnvironment() const;						// Developer test switch S3AIR_CHARACTER (a name or a number), CHARACTER_NONE if not set
+
+	// The picks that were fixed when the game started, identical on every computer. They are written to the shared memory every frame while a netplay game runs
+	// (PICKS_ADDRESS: u8 "valid", then four times a low byte and a high byte), which is where the game scripts read them.
+	static const uint32 PICKS_ADDRESS = 0x8fff50;
+	void setSessionCharacters(const uint16 picks[4]);
+	void clearSessionCharacters();
+	inline bool hasSessionCharacters() const  { return mSessionCharactersValid; }
+	inline uint16 getSessionCharacter(int slot) const  { return (slot >= 0 && slot < 4) ? mSessionCharacters.mPicks[slot] : NetplayLobby::CHARACTER_NONE; }
+
 	// Remembers why something failed, shows it in plain language and writes it to the online log
 	void reportFailure(NetplayFailure::Reason reason, const std::string& detail = std::string());
 	void clearFailure();
@@ -115,6 +133,14 @@ private:
 	float mLanSearchTimer = 0.0f;
 	uint64 mHostSecret = 0;
 	int mInputDelaySetting = NetplayLobby::INPUT_DELAY_AUTO;
+	NetplayLobby::CharacterList mCharacterList;
+	bool mCharacterListKnown = false;
+	uint32 mCharacterListTicks = 0;
+	bool mCharacterListChanged = false;
+	bool mCharacterListLogged = false;
+	uint16 mHostCharacterPick = NetplayLobby::CHARACTER_MENU;
+	NetplayLobby::SessionCharacters mSessionCharacters;
+	bool mSessionCharactersValid = false;
 	float mTestCloseTimer = 0.0f;
 	float mOnlineLogTimer = 0.0f;
 	bool mOnlineLogStarted = false;

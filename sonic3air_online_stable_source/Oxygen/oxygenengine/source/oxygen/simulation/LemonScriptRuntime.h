@@ -54,6 +54,7 @@ public:
 
 	void callFunction(const lemon::ScriptFunction& function);
 	bool callFunctionByName(lemon::FlyweightString functionName, bool showErrorOnFail = true);
+	bool hasFunctionByName(lemon::FlyweightString functionName);		// Does a script function of that name exist? (nothing is executed)
 	bool callFunctionByNameAtLabel(lemon::FlyweightString functionName, lemon::FlyweightString labelName, bool showErrorOnFail = true);
 
 	size_t getCallStackSize() const;

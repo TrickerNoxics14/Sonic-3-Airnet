@@ -9,6 +9,7 @@
 #pragma once
 
 #include "oxygen_netcore/network/HighLevelPacketBase.h"
+#include "oxygen/network/netplay/NetplayLobbyLogic.h"
 
 
 // Sent from host to clients
@@ -16,7 +17,7 @@ struct StartGamePacket : public highlevel::PacketBase
 {
 	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("StartGamePacket");
 
-	static const uint8 PACKET_VERSION = 4;
+	static const uint8 PACKET_VERSION = 5;
 	static const size_t MAX_BLOB_SIZE = 0x100000;		// Reading refuses larger sizes before anything gets allocated
 
 	uint8 mPacketVersion = PACKET_VERSION;
@@ -26,6 +27,7 @@ struct StartGamePacket : public highlevel::PacketBase
 	uint8 mPlayerIndex = 1;
 	uint32 mFirstFrameNumber = 0;
 	uint64 mRNGState[4] = { 0 };
+	uint16 mCharacterPicks[4] = { NetplayLobby::CHARACTER_MENU, NetplayLobby::CHARACTER_TAILS, NetplayLobby::CHARACTER_KNUCKLES, NetplayLobby::CHARACTER_SONIC };		// The character of each player slot: fixed for this session
 
 	std::vector<uint8> mSerializedGameSettings;
 	std::vector<uint8> mActiveModsInfo;		// Text with the active mods (and versions), to check that host and client use the same ones
@@ -48,6 +50,8 @@ struct StartGamePacket : public highlevel::PacketBase
 
 		for (int k = 0; k < 4; ++k)
 			serializer.serialize(mRNGState[k]);
+		for (int k = 0; k < 4; ++k)
+			serializer.serialize(mCharacterPicks[k]);
 
 		serializer.serializeData(mSerializedGameSettings, MAX_BLOB_SIZE);
 		serializer.serializeData(mActiveModsInfo, MAX_BLOB_SIZE);
@@ -101,6 +105,12 @@ struct LobbyStatePacket : public highlevel::PacketBase
 	uint8 mEffectiveDelay = 0;			// The input delay that is in use right now
 	uint8 mReadyCheckSeconds = 0;		// Seconds left of a running ready check (0 = none)
 
+	// Character choice (see NetplayLobby::CHARACTER_*): the pick of each player slot as the host accepted it. This part is optional on the wire
+	// (a message without it leaves the defaults), and the join handshake refuses peers of another NetplayLobby::LOBBY_PROTOCOL anyway.
+	uint16 mCharacters[4] = { NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE };
+	uint8 mCharacterNotice = 0;			// Bit k: the host changed the request of player slot k (not allowed or not installed), the player is told
+	uint8 mCharactersLocked = 0;		// 1 once the game has started: the picks cannot change any more
+
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
 		serializer.serialize(mYourSlot);
@@ -114,6 +124,14 @@ struct LobbyStatePacket : public highlevel::PacketBase
 		serializer.serialize(mDelaySetting);
 		serializer.serialize(mEffectiveDelay);
 		serializer.serialize(mReadyCheckSeconds);
+
+		if (!serializer.isReading() || serializer.getRemaining() >= 10)
+		{
+			for (int k = 0; k < 4; ++k)
+				serializer.serialize(mCharacters[k]);
+			serializer.serialize(mCharacterNotice);
+			serializer.serialize(mCharactersLocked);
+		}
 	}
 };
 
@@ -125,11 +143,16 @@ struct LobbyReadyPacket : public highlevel::PacketBase
 
 	uint8 mReady = 0;
 	std::string mName;		// The host cleans it up again, nothing the friend sends is trusted
+	uint16 mCharacter = NetplayLobby::CHARACTER_NONE;		// The character the player wants (NetplayLobby::CHARACTER_*), or CHARACTER_NONE for no request; the host validates it
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
 		serializer.serialize(mReady);
 		serializer.serialize(mName, LobbyStatePacket::MAX_NAME_BYTES);
+		if (!serializer.isReading() || serializer.getRemaining() >= 2)
+			serializer.serialize(mCharacter);
+		else
+			mCharacter = NetplayLobby::CHARACTER_NONE;
 	}
 };
 
@@ -330,6 +353,7 @@ struct JoinAuthPacket : public highlevel::PacketBase
 	uint64 mProof = 0;
 	uint8 mPreferredSlot = 0;	// The player slot (1 to 3) this friend had before a connection loss, or 0
 	uint32 mClientToken = 0;	// Random number chosen once per run of the game: tells the host that it is the same player again (even from another address)
+	uint8 mLobbyProtocol = 0;	// NetplayLobby::LOBBY_PROTOCOL of this friend; 0 = a version without the field (the host refuses it as another version)
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
@@ -337,6 +361,10 @@ struct JoinAuthPacket : public highlevel::PacketBase
 		serializer.serialize(mProof);
 		serializer.serialize(mPreferredSlot);
 		serializer.serialize(mClientToken);
+		if (!serializer.isReading() || serializer.getRemaining() >= 1)
+			serializer.serialize(mLobbyProtocol);
+		else
+			mLobbyProtocol = 0;
 	}
 };
 
@@ -349,11 +377,16 @@ struct JoinReplyPacket : public highlevel::PacketBase
 	uint8 mResult = 0;			// A NetplayAuth::JoinResult
 	uint8 mSlot = 0;
 	uint64 mProof = 0;
+	uint8 mLobbyProtocol = 0;	// NetplayLobby::LOBBY_PROTOCOL of the host; 0 = a version without the field (the friend refuses it as another version)
 
 	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
 	{
 		serializer.serialize(mResult);
 		serializer.serialize(mSlot);
 		serializer.serialize(mProof);
+		if (!serializer.isReading() || serializer.getRemaining() >= 1)
+			serializer.serialize(mLobbyProtocol);
+		else
+			mLobbyProtocol = 0;
 	}
 };

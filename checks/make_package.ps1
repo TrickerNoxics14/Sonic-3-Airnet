@@ -79,7 +79,7 @@ if ($markerFiles.Count -gt 0) { throw "Refusing to package the developer test-ho
 
 # Keep player data and developer fixtures out of the redistributable.
 $forbiddenFiles = @(Get-ChildItem -LiteralPath $out -File -Recurse | Where-Object {
-	$_.FullName -match '(?i)[\\/](saves|states|ChecksHarness|ActHarness|BossHarness|NetPartyHarness|PartyHarness|TeleportHarness)([\\/]|$)' -or
+	$_.FullName -match '(?i)[\\/](saves|states|ChecksHarness|ActHarness|BossHarness|NetPartyHarness|CharPickHarness|ExtraSlotTestMod|PartyHarness|TeleportHarness)([\\/]|$)' -or
 	$_.Name -match '(?i)sonic_knuckles|sonic_3_and|_harness' -or
 	$_.Extension -match '(?i)^\.(md|gen|smd)$' -or
 	($_.Extension -eq '.bin' -and $_.Length -gt 512KB)
@@ -100,7 +100,7 @@ $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
 try {
 	$markerEntries = @($archive.Entries | Where-Object { $_.FullName -match '(?i)(^|/)testhooks\.enabled$' })
 	if ($markerEntries.Count -gt 0) { throw "Refusing to package the developer test-hooks marker: $($markerEntries[0].FullName)" }
-	$forbiddenEntries = @($archive.Entries | Where-Object { $_.FullName -match '(?i)(^|/)(saves|states|ChecksHarness|ActHarness|BossHarness|NetPartyHarness|PartyHarness|TeleportHarness)(/|$)|sonic_knuckles|sonic_3_and|\.(md|gen|smd)$' -or ($_.FullName -match '\.bin$' -and $_.Length -gt 512KB) })
+	$forbiddenEntries = @($archive.Entries | Where-Object { $_.FullName -match '(?i)(^|/)(saves|states|ChecksHarness|ActHarness|BossHarness|NetPartyHarness|CharPickHarness|ExtraSlotTestMod|PartyHarness|TeleportHarness)(/|$)|sonic_knuckles|sonic_3_and|\.(md|gen|smd)$' -or ($_.FullName -match '\.bin$' -and $_.Length -gt 512KB) })
 	if ($forbiddenEntries.Count -gt 0) { throw "Refusing to package a save, ROM, or test fixture: $($forbiddenEntries[0].FullName)" }
 }
 finally { $archive.Dispose() }

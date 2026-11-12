@@ -1,0 +1,10 @@
+{
+  "Metadata": {
+    "Name": "Character Pick Harness",
+    "UniqueID": "dropin-char-pick-harness",
+    "Author": "Development checks",
+    "Description": "Reports which character every online player really got (stage K of the checks). Not distributed.",
+    "ModVersion": "1.0.0",
+    "GameVersion": "20.07.24.0"
+  }
+}

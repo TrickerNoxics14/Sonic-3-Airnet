@@ -47,7 +47,8 @@ namespace NetplayAuth
 		WRONG_CODE		= 1,	// The proof did not match: the friend typed a code for a different host
 		LOBBY_FULL		= 2,	// All player slots are taken
 		TOO_MANY_TRIES	= 3,	// Too many wrong attempts from the same address
-		KICKED			= 4		// The host removed this address a moment ago
+		KICKED			= 4,	// The host removed this address a moment ago
+		VERSION_MISMATCH = 5	// The friend speaks another version of the lobby messages (see NetplayLobby::LOBBY_PROTOCOL): both need the same version
 	};
 
 	namespace detail

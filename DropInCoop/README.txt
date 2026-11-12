@@ -139,3 +139,14 @@ OPTIONAL ESU EXTRA-SLOT CHARACTERS (experimental adapter)
   extra-slot character or ability is verified for independent P3/P4 play.
   Reto's mod is third-party content with its own license; install it separately
   from its original author and keep it out of the co-op ZIP.
+
+ONLINE: EVERY PLAYER PICKS A CHARACTER (Sonic 3 AirNet online build only)
+  In the online lobby every player has a CHARACTER entry (see README_ONLINE.txt of the online
+  package). The picks are fixed when the host starts the game and reach this mod through the
+  engine (shared memory 0x8fff50, see scripts/charpick.lemon). Offline, and in the stock game,
+  nothing changes: the memory is empty, so the roles above and the two settings
+  "Player 3/4 Extra Character Slot" apply as before. Online, a pick overrides those settings
+  (they stay the default of players 3 and 4 in the lobby).
+  Host: Sonic or Knuckles (with Tails), or "game menu". Player 2: Tails, or any other character:
+  the Tails body is turned into the picked one once player 2 has joined. Players 3/4: Knuckles,
+  Sonic or an extra-slot character. Only player 2 can be Tails (Tails exists once).

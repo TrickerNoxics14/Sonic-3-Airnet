@@ -1,0 +1,91 @@
+//# script-feature-level(2)
+
+// Stage K of the checks: every online player picks a character in the lobby, the game starts, and this harness reports, on every computer, which character
+// each player slot really got (the picks that came from the host, the character of each body, the extra slot, whether player 2 was turned into another
+// character, and how often the extra test character was drawn). The runner compares what the computers report; nothing is decided here.
+//
+// The development harness imports DropInCoop globals and functions, so DropInCoop must be listed before it.
+
+// The runner replaces __EXPECTED_PLAYERS__ by the number of players of the scenario (2 to 4)
+constant u8 CharPick.EXPECTED_PLAYERS = __EXPECTED_PLAYERS__
+
+global u32 charpick.frame
+global u32 charpick.report_a
+global u32 charpick.report_b
+global u32 charpick.last_ready_frame
+
+function u8 CharPick.get8(string name)
+{
+	return u8(System.getGlobalVariableValueByName(name))
+}
+
+function u32 CharPick.getDraws()
+{
+	return u32(System.getGlobalVariableValueByName("extratest.draws"))
+}
+
+// One line with the facts that must be identical on every computer (no role in it)
+function string CharPick.describe()
+{
+	u16 pick0 = DropIn.pick(0)
+	u16 pick1 = DropIn.pick(1)
+	u16 pick2 = DropIn.pick(2)
+	u16 pick3 = DropIn.pick(3)
+	u8 c1 = u8[DropIn.P1 + 0x38]
+	u8 c2 = u8[DropIn.P2 + 0x38]
+	u32 party3 = DropIn.partyPlayer(2)
+	u32 party4 = DropIn.partyPlayer(3)
+	u8 c3 = party3 != 0 ? u8[party3 + 0x38] : 0xff
+	u8 c4 = party4 != 0 ? u8[party4 + 0x38] : 0xff
+	string picks = stringformat("picks %04x %04x %04x %04x", pick0, pick1, pick2, pick3)
+	string bodies = stringformat("bodies %d %d %d %d", c1, c2, c3, c4)
+	string extras = stringformat("p2actor %d p2x %d x3 %d x4 %d", DropIn.isPlayer2Actor() ? 1 : 0, dropin.p2_converted_slot, DropIn.partyExtraSlot(2), DropIn.partyExtraSlot(3))
+	string game = stringformat("second %d chars %d party %d", getSecondCharacter() == 0xff ? 0 : 1, global.characters, DropIn.partyCount())
+	return stringformat("%s %s %s %s", picks, bodies, extras, game)
+}
+
+function void UpdateGameObjects()
+{
+	++charpick.frame
+	if (charpick.frame == 1)
+	{
+		option.dropin.players = 4
+		option.dropin.require_join = 1
+		option.dropin.split = 1
+		option.dropin.p2_hurt = 1
+		option.dropin.idle_seconds = 0
+		System.setGlobalVariableValueByName("option.dropin.team_features", 1)
+		System.setGlobalVariableValueByName("option.dropin.team_moves", 1)
+	}
+	base.UpdateGameObjects()
+
+	// A body that is set up the way the picks say: wait until everybody who is going to play is in (four players), and player 2 was turned if it was asked to be
+	if (global.zone_act == 0x0001 && global.level_started > 0 && charpick.frame % 30 == 0)
+	{
+		bool player2Done = DropIn.player2WantsOtherCharacter() ? DropIn.isPlayer2Actor() : true
+		bool everybodyIn = DropIn.partyCount() == CharPick.EXPECTED_PLAYERS && dropin.joined && player2Done
+		if (everybodyIn)
+		{
+			if (charpick.last_ready_frame == 0)
+				charpick.last_ready_frame = charpick.frame
+			// First report once the players have been in for a while, the second one much later (after a reconnect of a friend, for example)
+			if (charpick.report_a == 0 && charpick.frame >= charpick.last_ready_frame + 300)
+			{
+				charpick.report_a = charpick.frame
+				Checks.report("charpick a", 1, CharPick.describe())
+				Checks.report("charpick a role", 1, stringformat("role %d draws %d startups %d", DropIn.role(), CharPick.getDraws(), u32(System.getGlobalVariableValueByName("extratest.startups"))))
+			}
+			else if (charpick.report_a != 0 && charpick.report_b == 0 && charpick.frame >= charpick.report_a + 1500)
+			{
+				charpick.report_b = charpick.frame
+				Checks.report("charpick b", 1, CharPick.describe())
+				Checks.report("charpick b role", 1, stringformat("role %d draws %d", DropIn.role(), CharPick.getDraws()))
+				Checks.capture("charpick")
+			}
+		}
+		else if (charpick.frame % 900 == 0)
+		{
+			Checks.report("charpick waiting", 1, stringformat("%s joined %d wants %d", CharPick.describe(), dropin.joined ? 1 : 0, DropIn.player2WantsOtherCharacter() ? 1 : 0))
+		}
+	}
+}

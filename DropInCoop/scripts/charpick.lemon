@@ -1,0 +1,272 @@
+//# script-feature-level(2)
+
+// Drop-In Co-op: the character each online player picked in the lobby.
+//
+// While playing online, the online build of the game fixes the picks when the game starts (the same four numbers on every computer, they come from the
+// host in the start message) and writes them to the shared memory every frame; nothing here decides anything, it only reads them. Offline (local co-op, and
+// the stock game) the memory is empty, so every function below answers "no pick" and everything stays as it was.
+//
+// A pick is a number: 0 Sonic, 1 Tails, 2 Knuckles, 0x100 + N a character of the extra slot N (a mod that adds "ExtraChar.startup_charN", the same
+// way as Extra Slots Unlimited and the mods for it do), 0xfffe "as the game's menu says" (player 1 only).
+//   shared memory 0x8fff50: 1 = the picks are valid; 0x8fff52 + 2 * slot: the pick of that player slot (low byte, high byte); slot 0 = the host (player 1).
+// What the game can really run, per player:
+//  - Player 1 (the host): Sonic or Knuckles, with Tails as the second character, exactly as the game's own "Sonic & Tails" and "Knuckles & Tails".
+//  - Player 2: Tails, the second character of the game. For any other pick the Tails body is turned into the picked character (see "convertPlayer2").
+//  - Players 3 and 4: the extra characters of the party mode (party.lemon): Sonic, Knuckles, or an extra-slot character.
+
+constant u32 DropIn.PICKS_ADDRESS = 0x8fff50
+constant u16 DropIn.PICK_MENU = 0xfffe
+constant u16 DropIn.PICK_NONE = 0xffff
+constant u32 DropIn.P2_SPEED = 0x8fe020			// Private speed caps and scratch area of player 2 while it is a converted character (next to those of players 3 and 4)
+constant u32 DropIn.P2_SCRATCH = 0x8fe200
+
+global bool dropin.pick_forced_main		// The host's pick changed the character of the save slot or menu: this game must not write to that save slot
+global u16 dropin.p2_dead				// Frames player 2 has been dead while it is a converted character
+global u8 dropin.p2_converted_slot		// The extra slot of the converted player 2 (0 = none)
+
+// Are the picks of this online game known? (they are the same on every computer)
+function bool DropIn.picksValid()
+{
+	return DropIn.net() && u8[DropIn.PICKS_ADDRESS] == 1
+}
+
+// The pick of a player slot (0 = host), or PICK_NONE
+function u16 DropIn.pick(u8 slot)
+{
+	if (slot > 3 || !DropIn.picksValid())
+		return DropIn.PICK_NONE
+	u32 address = DropIn.PICKS_ADDRESS + 2 + u32(slot) * 2
+	return u16(u8[address]) | (u16(u8[address + 1]) << 8)
+}
+
+// The extra slot of the pick (the N of "ExtraChar.startup_charN"), or 0 if it is not an extra character
+function u8 DropIn.pickedExtraSlot(u8 slot)
+{
+	u16 pick = DropIn.pick(slot)
+	return (pick > 0x100 && pick <= 0x1ff) ? u8(pick - 0x100) : 0
+}
+
+// The stock character of a pick (Sonic or Knuckles), or "fallback"
+function u8 DropIn.pickedStockCharacter(u8 slot, u8 fallback)
+{
+	u16 pick = DropIn.pick(slot)
+	if (pick == CHARACTER_SONIC)
+		return CHARACTER_SONIC
+	if (pick == CHARACTER_KNUCKLES)
+		return CHARACTER_KNUCKLES
+	return fallback
+}
+
+
+// The host's pick decides the main character, before the game sets it up from the menu's choice (level select / save slot). Sonic and Knuckles both keep
+// Tails as the second character, as the game's own "Sonic & Tails" and "Knuckles & Tails" do. "Game menu" leaves it alone.
+//# address-hook(0x0067b6)
+function void SetGlobalCharacters()
+{
+	dropin.pick_forced_main = false
+	if (DropIn.picksValid() && global.game_mode != 0x88 && competition_mode.active == 0)
+	{
+		u16 pick = DropIn.pick(0)
+		u16 chosen = levelselect.characters
+		if (pick == CHARACTER_SONIC)
+			chosen = CHARS_SONIC_AND_TAILS
+		else if (pick == CHARACTER_KNUCKLES)
+			chosen = CHARS_KNUCKLES_AND_TAILS
+		if (chosen != levelselect.characters)
+		{
+			levelselect.characters = chosen
+			dropin.pick_forced_main = true
+		}
+	}
+	base.SetGlobalCharacters()
+}
+
+// A save slot belongs to the character it was made for: when the host's pick is another character, this game does not write to the slot
+// (the host could otherwise end up with a Sonic save that has Knuckles' progress in it). Play without a save slot or with a slot of that character to save.
+//# address-hook(0x00c434)
+function void SaveGameOnLevelFinished()
+{
+	if (dropin.pick_forced_main)
+		return
+	base.SaveGameOnLevelFinished()
+}
+
+
+//-------------------------------------------------------//
+// Player 2 as another character than Tails              //
+//-------------------------------------------------------//
+
+// Does the pick of player 2 ask for a body other than Tails?
+function bool DropIn.player2WantsOtherCharacter()
+{
+	u16 pick = DropIn.pick(1)
+	return pick == CHARACTER_SONIC || pick == CHARACTER_KNUCKLES || (pick > 0x100 && pick <= 0x1ff)
+}
+
+function bool DropIn.isPlayer2Actor()
+{
+	return u32[DropIn.P2] == addressof(DropIn.p2ActorUpdate)
+}
+
+// Only in plain gameplay: not in the intro of Angel Island, a cutscene, a death or while Tails carries somebody
+function bool DropIn.canConvertPlayer2()
+{
+	if (!DropIn.isActiveContext() || u32[DropIn.P2] != addressof(Character.BaseUpdate.Tails))
+		return false
+	if (global.level_started <= 0 || (global.zone_act == 0x0000 && camera.update_routine < 0x04))
+		return false
+	if (player1.control_override != 0 || player2.control_override != 0 || debug_mode.state != 0 || tails.carrying != 0)
+		return false
+	if (u8[DropIn.P1 + 5] != base_state.NORMAL || u8[DropIn.P2 + 5] != base_state.NORMAL || u8[DropIn.P1 + 0x2e] != 0 || u8[DropIn.P2 + 0x2e] != 0)
+		return false
+	return true
+}
+
+// Turns the Tails body of player 2 into the picked character: the same body (position, camera, rings, score, the code that makes player 2 a team member all
+// stay), but its update is the one of Sonic, Knuckles or the extra character, like players 3 and 4 have it.
+function void DropIn.convertPlayer2()
+{
+	pushAll()
+	u8 extraSlot = DropIn.pickedExtraSlot(1)
+	A0 = DropIn.P2
+	objA0.update_address = addressof(DropIn.p2ActorUpdate)
+	char.character = extraSlot != 0 ? DropIn.resolveExtraBaseCharacter(extraSlot, CHARACTER_SONIC) : DropIn.pickedStockCharacter(1, CHARACTER_SONIC)
+	char.mapping_offset = char.character == CHARACTER_KNUCKLES ? 0x14a8d6 : char.character == CHARACTER_TAILS ? 0x148eb8 : 0x146620
+	char.hitbox_extends.x = char.hitbox.x.UPRIGHT
+	char.hitbox_extends.y = char.hitbox.y.UPRIGHT
+	char.hitbox.default.x = char.hitbox.x.UPRIGHT
+	char.hitbox.default.y = char.hitbox.y.UPRIGHT
+	char.double_jump_state = 0
+	char.spindash = 0
+	char.spindash_charge = 0
+	char.state.former = 0xff
+	char.animation.sprite = 0
+	char.animation.frame = 0
+	char.animation.timer = 0
+	char.flags |= char.flag.IN_AIR
+	char.bonus_effect = 0
+	char.protection_flag = 0
+	char.invuln.countdown = 60
+	dropin.p2_dead = 0
+	dropin.p2_converted_slot = extraSlot
+	// The tails of Tails (an object of their own that follows its owner) and his dust cloud: without Tails they must not be drawn or updated
+	if (u16[0xffffcc0a + 0x30] == u16(DropIn.P2))
+		zeroMemory(0xffffcc0a, 0x4a)
+	zeroMemory(0xffffcc9e, 0x4a)
+	setSpeedCapProperties(DropIn.P2_SPEED, false)
+	tails.ai_routine = 0x06
+	tails.control_counter = 600
+	tails.respawn_counter = 0
+	tails.carrying = 0
+	popAll()
+}
+
+// Called once per frame after the objects were updated
+function void DropIn.updatePlayer2Pick()
+{
+	if (DropIn.picksValid() && dropin.joined && !DropIn.isPlayer2Actor() && DropIn.player2WantsOtherCharacter() && DropIn.canConvertPlayer2())
+		DropIn.convertPlayer2()
+}
+
+// Back next to player 1, after being dead for a while
+function void DropIn.player2Respawn()
+{
+	if (!DropIn.safeAnchor(DropIn.P1))
+		return
+	A0 = DropIn.P2
+	char.base_state = base_state.NORMAL
+	char.position.x = u32[DropIn.P1 + 0x10]
+	char.position.y = u32[DropIn.P1 + 0x14]
+	char.velocity.x = 0
+	char.velocity.y = 0
+	char.groundspeed = 0
+	char.control_flags = 0
+	char.flags = char.flag.IN_AIR
+	char.flags2d = 0
+	char.state = char.state.STANDING
+	char.state.former = 0xff
+	char.hitbox_extends.x = char.hitbox.x.UPRIGHT
+	char.hitbox_extends.y = char.hitbox.y.UPRIGHT
+	char.rotation.both = 0
+	char.jumping = 0
+	char.hlock_countdown = 0
+	char.double_jump_state = 0
+	char.spindash = 0
+	char.spindash_charge = 0
+	char.object_standing_on = 0
+	char.layer_flags = u16[DropIn.P1 + 0x46]
+	char.invuln.countdown = 90
+	char.drown_countdown = 30
+	dropin.p2_dead = 0
+}
+
+// The update of player 2 while it is Sonic, Knuckles or an extra character. Same idea as "partyActorUpdate": the game's code for these characters reads
+// player 1's controls and speed caps, so those are swapped for player 2's for the duration of the update. The rings and the score of player 2 are not
+// touched here: the code that gives player 2 its own rings recognises the body by its address (coop2.lemon), and the body is still at that address.
+//# address-hook(0x3f1020)
+function void DropIn.p2ActorUpdate()
+{
+	if (A0 != DropIn.P2)
+		return
+	if (player1.control_override != 0 || u8[DropIn.P1 + 5] >= base_state.DIED)
+	{
+		DrawObject()
+		return
+	}
+	if (char.base_state >= base_state.DIED)
+	{
+		++dropin.p2_dead
+		if (dropin.p2_dead >= 120)
+			DropIn.player2Respawn()
+		if (char.base_state >= base_state.DIED)
+		{
+			dropin.party_updating = 1
+			if (char.character == CHARACTER_KNUCKLES)
+				Character.UpdateDiedState.Knuckles()
+			else
+				Character.UpdateDiedState.Sonic()
+			dropin.party_updating = 0
+		}
+		else
+			DrawObject()
+		return
+	}
+	dropin.p2_dead = 0
+
+	u16 pad = control.pad1
+	u16 playerControl = control.player1
+	u8 savedSuper = super.active
+	u8 savedFast = sonic.fastrunanim.timer
+	u8 savedWaterCurrent = level.HCZ_water_current_flags.player1
+	u16 input = DropIn.partyInput(1)
+	u16 previous = DropIn.partyPreviousInput(1)
+	control.pad1 = ((input & 0xff) << 8) | (input & ~previous & 0xff)
+	control.player1 = control.pad1
+	super.active = 0
+	level.HCZ_water_current_flags.player1 = 0
+	A4 = DropIn.P2_SPEED
+	// Private scratch for legacy dust/look helpers, outside actor and globals storage.
+	A6 = DropIn.P2_SCRATCH
+	A5 = A6 + 0x70
+	dropin.party_updating = 1
+	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")
+	System.setGlobalVariableValueByName("global.xtrachar", dropin.p2_converted_slot)
+	if (char.base_state == base_state.HURT)
+	{
+		if (char.character == CHARACTER_KNUCKLES)
+			Character.UpdateGotHurtState.Knuckles()
+		else
+			Character.UpdateGotHurtState.Sonic()
+	}
+	else if (char.character == CHARACTER_KNUCKLES)
+		Character.UpdateNormalState.Knuckles()
+	else
+		Character.UpdateNormalState.Sonic()
+	dropin.party_updating = 0
+	control.pad1 = pad
+	control.player1 = playerControl
+	super.active = savedSuper
+	sonic.fastrunanim.timer = savedFast
+	level.HCZ_water_current_flags.player1 = savedWaterCurrent
+	System.setGlobalVariableValueByName("global.xtrachar", savedExtraSlot)
+}

@@ -13,6 +13,7 @@ include coop2
 include boss2
 include teamwork
 include party
+include charpick
 include party_platforms
 include screensize
 
@@ -249,10 +250,16 @@ function void Character.TailsAI.Update()
 }
 
 
-// Reset the join state on script load
+// Reset the mod's state on a fresh start (a new game: the game's memory is empty, so the level frame counter is 0).
+// Online, the engine calls Init() after EVERY game state it loads as well: for a friend who joins a running game, comes back after a connection loss, or gets its game repaired.
+// The state that was loaded already holds the mod's variables as the host and the other friends have them; resetting them here would make this one computer differ from the others
+// (for example "joined" false for a player 2 who is playing, and so the rules for player 2 differ), and no check of the game memory would notice. So online, the state of a
+// level that is running is kept. Offline everything stays as it was.
 function void Init()
 {
 	base.Init()
+	if (DropIn.net() && level.framecounter != 0)
+		return
 	dropin.joined = false
 	dropin.leave_timer = 0
 	dropin.idle_timer = 0
@@ -284,6 +291,9 @@ function void Init()
 	dropin.rescue_cooldown = 0
 	dropin.party_wants3 = false
 	dropin.party_wants4 = false
+	dropin.pick_forced_main = false
+	dropin.p2_dead = 0
+	dropin.p2_converted_slot = 0
 }
 
 

@@ -145,7 +145,7 @@ try
 		# Things an update must never carry
 		if ($relative -match '(?i)(^|/)(saves|states|savedata|mods)(/|$)' -or
 			$relative -match '(?i)(^|/)settings[^/]*\.json$' -or $relative -match '(?i)(^|/)active-mods\.json$' -or $relative -match '(?i)(^|/)testhooks\.enabled$' -or
-			$relative -match '(?i)(^|/)(ChecksHarness|ActHarness|BossHarness|NetPartyHarness|PartyHarness|TeleportHarness)(/|$)' -or
+			$relative -match '(?i)(^|/)(ChecksHarness|ActHarness|BossHarness|NetPartyHarness|CharPickHarness|ExtraSlotTestMod|PartyHarness|TeleportHarness)(/|$)' -or
 			$relative -match '(?i)sonic_knuckles|sonic_3_and|_harness' -or $relative -match '(?i)\.(gen|smd|md|sav|srm)$' -or
 			($relative -match '(?i)\.bin$' -and $entry.Length -gt 512KB)) { [void]$forbidden.Add($name) }
 		if ($relative -eq 'version.txt') { $versionEntry = $entry }

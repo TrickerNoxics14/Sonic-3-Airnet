@@ -254,18 +254,28 @@ namespace NetplayLobby
 			int mSlot = 0;
 			std::string mKey;
 			std::string mName;
+			uint16 mCharacter = 0xffff;		// The character the player had picked (0xffff = none), so that it keeps it when it comes back
 			float mRemaining = 0.0f;
 		};
 
-		inline void add(int slot, const std::string& key, const std::string& name)
+		inline void add(int slot, const std::string& key, const std::string& name, uint16 character = 0xffff)
 		{
 			remove(slot);
 			Item item;
 			item.mSlot = slot;
 			item.mKey = key;
 			item.mName = name;
+			item.mCharacter = character;
 			item.mRemaining = SLOT_RESERVATION_SECONDS;
 			mItems.push_back(item);
+		}
+		// The character that was picked by the player (identified by key) in this slot, or 0xffff if nothing is held for it
+		inline uint16 findCharacterFor(int slot, const std::string& key) const
+		{
+			for (const Item& item : mItems)
+				if (item.mSlot == slot && item.mKey == key)
+					return item.mCharacter;
+			return 0xffff;
 		}
 		inline void remove(int slot)
 		{
@@ -443,6 +453,200 @@ namespace NetplayLobby
 			return (oldestAny >= 0) ? oldestAny : REFUSE_NEW_CONNECTION;
 		return ACCEPT_NEW_CONNECTION;
 	}
+
+
+	// ---------------------------------------------------------------------------------------------------------------
+	// Character choice: every player picks the character they play with, in the lobby.
+	//
+	// What the game can really run (see DropInCoop/scripts/charpick.lemon, which carries a pick out):
+	//  - Player 1 (the host) plays the main character of the game: Sonic or Knuckles, each with Tails as the second character (the game's own
+	//    "Sonic & Tails" and "Knuckles & Tails"). "Game menu" keeps whatever the save slot / game menu says, as before this feature existed.
+	//  - Player 2 is the game's second character, which is Tails. If player 2 picks somebody else, that body is turned into the picked character.
+	//  - Players 3 and 4 are the extra characters of the mod ("party" actors): Sonic, Knuckles, or a character of an installed extra-slot mod.
+	//  - Tails exists once in the game (it is the second character), so only player 2 can be Tails.
+	// An extra character is a character of an "extra slot" mod (Extra Slots Unlimited and the mods built on it): it has a slot number N (1 to 255),
+	// and its mod provides the script function "ExtraChar.startup_charN". The list of installed extra characters is read from the game's scripts at
+	// run time, it is not fixed in the program. Without such a mod the list is just Sonic, Tails and Knuckles.
+	// Everybody must have the same mods (the join check enforces that), so everybody's list is the same, but the host checks every pick anyway.
+	static const uint16 CHARACTER_SONIC = 0;
+	static const uint16 CHARACTER_TAILS = 1;
+	static const uint16 CHARACTER_KNUCKLES = 2;
+	static const uint16 CHARACTER_EXTRA_BASE = 0x100;		// The extra slot N (1 to 255) is the id 0x100 + N
+	static const uint16 CHARACTER_MENU = 0xfffe;			// Player 1 only: the character chosen in the game's own menus (save slot, act select)
+	static const uint16 CHARACTER_NONE = 0xffff;			// On the wire: "no request", also "unknown"
+	static const int MAX_EXTRA_CHARACTERS = 24;				// More than this many extra characters are not offered (the list stays small and bounded)
+	static const uint8 LOBBY_PROTOCOL = 2;					// Version of the lobby messages: 2 = with character choice. A peer with another number is refused as a different version.
+
+	inline bool isExtraCharacter(uint16 id)
+	{
+		return id > CHARACTER_EXTRA_BASE && id <= CHARACTER_EXTRA_BASE + 255;
+	}
+
+	inline int extraSlotOf(uint16 id)
+	{
+		return isExtraCharacter(id) ? (int)(id - CHARACTER_EXTRA_BASE) : 0;
+	}
+
+	inline uint16 makeExtraCharacter(int slot)
+	{
+		return (slot >= 1 && slot <= 255) ? (uint16)(CHARACTER_EXTRA_BASE + slot) : CHARACTER_NONE;
+	}
+
+	// The name that the lobby shows (capital letters like the rest of the lobby); an extra character is called after its slot unless it is a well known one
+	inline std::string getCharacterName(uint16 id)
+	{
+		switch (id)
+		{
+			case CHARACTER_SONIC:		return "SONIC";
+			case CHARACTER_TAILS:		return "TAILS";
+			case CHARACTER_KNUCKLES:	return "KNUCKLES";
+			case CHARACTER_MENU:		return "GAME MENU";
+			default: break;
+		}
+		if (isExtraCharacter(id))
+		{
+			switch (extraSlotOf(id))
+			{
+				case 35:	return "MODERN SONIC";
+				case 90:	return "RETO";
+				default:	return "EXTRA " + std::to_string(extraSlotOf(id));
+			}
+		}
+		return "?";
+	}
+
+	// The characters that are installed: the three stock ones, plus the extra slots whose script function was found (sorted, no duplicates, bounded)
+	class CharacterList
+	{
+	public:
+		inline void setExtraSlots(const std::vector<int>& slots)
+		{
+			mExtras.clear();
+			std::vector<int> sorted(slots);
+			std::sort(sorted.begin(), sorted.end());
+			for (const int slot : sorted)
+			{
+				if (slot < 1 || slot > 255 || (!mExtras.empty() && mExtras.back() == slot) || (int)mExtras.size() >= MAX_EXTRA_CHARACTERS)
+					continue;
+				mExtras.push_back(slot);
+			}
+		}
+		inline bool hasExtra(int slot) const  { return std::find(mExtras.begin(), mExtras.end(), slot) != mExtras.end(); }
+		inline const std::vector<int>& getExtraSlots() const  { return mExtras; }
+		inline bool operator==(const CharacterList& other) const  { return mExtras == other.mExtras; }
+		inline bool operator!=(const CharacterList& other) const  { return mExtras != other.mExtras; }
+	private:
+		std::vector<int> mExtras;
+	};
+
+	// The characters player "slot" (0 = host, 1 to 3 = friends) may pick, in the order in which the lobby cycles through them; the first one is the default.
+	// "configuredExtraSlot" is the extra slot that the mod's older setting "Player 3/4 Extra Character Slot" names for this player (0 = none): it is the default
+	// then, so that a host who set it up that way keeps what he had.
+	inline std::vector<uint16> getChoicesForSlot(int slot, const CharacterList& available, int configuredExtraSlot = 0)
+	{
+		std::vector<uint16> choices;
+		switch (slot)
+		{
+			case 0:  choices = { CHARACTER_MENU, CHARACTER_SONIC, CHARACTER_KNUCKLES };  break;
+			case 1:  choices = { CHARACTER_TAILS, CHARACTER_SONIC, CHARACTER_KNUCKLES };  break;
+			case 2:  choices = { CHARACTER_KNUCKLES, CHARACTER_SONIC };  break;
+			case 3:  choices = { CHARACTER_SONIC, CHARACTER_KNUCKLES };  break;
+			default: return choices;
+		}
+		if (slot >= 1)		// (the host's character is the game's main character: an extra character is picked in the game's own menu there, when the mod supports it)
+		{
+			for (const int extra : available.getExtraSlots())
+				choices.push_back(makeExtraCharacter(extra));
+			if (slot >= 2 && configuredExtraSlot > 0 && available.hasExtra(configuredExtraSlot))
+			{
+				// The mod setting names the default: that character moves to the front
+				const uint16 configured = makeExtraCharacter(configuredExtraSlot);
+				choices.erase(std::remove(choices.begin(), choices.end(), configured), choices.end());
+				choices.insert(choices.begin(), configured);
+			}
+		}
+		return choices;
+	}
+
+	inline uint16 defaultCharacterForSlot(int slot, const CharacterList& available, int configuredExtraSlot = 0)
+	{
+		const std::vector<uint16> choices = getChoicesForSlot(slot, available, configuredExtraSlot);
+		return choices.empty() ? CHARACTER_SONIC : choices.front();
+	}
+
+	inline bool isCharacterAllowedForSlot(int slot, uint16 id, const CharacterList& available, int configuredExtraSlot = 0)
+	{
+		const std::vector<uint16> choices = getChoicesForSlot(slot, available, configuredExtraSlot);
+		return std::find(choices.begin(), choices.end(), id) != choices.end();
+	}
+
+	// What the host makes of a request: the request if it is allowed for that player (and installed), otherwise "fallback" (the pick the player had; if that is
+	// not allowed any more either, the slot's default). "outAdjusted" tells that the request was not accepted as asked.
+	inline uint16 sanitizeCharacterPick(int slot, uint16 requested, const CharacterList& available, uint16 fallback, bool* outAdjusted = nullptr, int configuredExtraSlot = 0)
+	{
+		if (isCharacterAllowedForSlot(slot, requested, available, configuredExtraSlot))
+		{
+			if (nullptr != outAdjusted)
+				*outAdjusted = false;
+			return requested;
+		}
+		if (nullptr != outAdjusted)
+			*outAdjusted = true;
+		return isCharacterAllowedForSlot(slot, fallback, available, configuredExtraSlot) ? fallback : defaultCharacterForSlot(slot, available, configuredExtraSlot);
+	}
+
+	// The next choice when a player cycles through the list (left and right); wraps around. A pick that is not in the list starts at the default.
+	inline uint16 nextCharacterChoice(int slot, uint16 current, int step, const CharacterList& available, int configuredExtraSlot = 0)
+	{
+		const std::vector<uint16> choices = getChoicesForSlot(slot, available, configuredExtraSlot);
+		if (choices.empty())
+			return CHARACTER_SONIC;
+		const auto it = std::find(choices.begin(), choices.end(), current);
+		const int index = (it == choices.end()) ? 0 : (int)(it - choices.begin());
+		const int count = (int)choices.size();
+		return choices[(size_t)(((index + step) % count + count) % count)];
+	}
+
+	// A player may change the pick a few times per second (cycling through a list), but must not flood the host: a small token bucket per player
+	struct CharacterRateLimiter
+	{
+		float mTokens = 8.0f;
+		uint64 mLastMs = 0;
+		bool mStarted = false;
+		int mDropped = 0;
+
+		inline bool allow(uint64 nowMs)
+		{
+			if (!mStarted)
+			{
+				mStarted = true;
+				mLastMs = nowMs;
+			}
+			const uint64 passed = (nowMs >= mLastMs) ? (nowMs - mLastMs) : 0;
+			mLastMs = nowMs;
+			mTokens = std::min(8.0f, mTokens + (float)passed * 0.004f);		// 4 changes per second on average, a burst of 8
+			if (mTokens < 1.0f)
+			{
+				++mDropped;
+				return false;
+			}
+			mTokens -= 1.0f;
+			return true;
+		}
+	};
+
+	// The picks that are fixed when the game starts (identical on all computers): one id per player slot
+	struct SessionCharacters
+	{
+		uint16 mPicks[4] = { CHARACTER_MENU, CHARACTER_TAILS, CHARACTER_KNUCKLES, CHARACTER_SONIC };
+		inline bool isValid(const CharacterList& available) const
+		{
+			for (int slot = 0; slot < 4; ++slot)
+				if (!isCharacterAllowedForSlot(slot, mPicks[slot], available))
+					return false;
+			return true;
+		}
+	};
 
 
 	// Why the host sends a friend away

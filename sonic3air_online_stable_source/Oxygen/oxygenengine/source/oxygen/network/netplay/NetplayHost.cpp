@@ -176,7 +176,7 @@ void NetplayHost::retireConnection(PlayerConnection* connection)
 		const NetConnection::DisconnectReason reason = connection->getDisconnectReason();
 		if (reason == NetConnection::DisconnectReason::TIMEOUT || reason == NetConnection::DisconnectReason::STALE)
 		{
-			mReservations.add(connection->mPlayerIndex, identityOf(*connection), connection->mName);
+			mReservations.add(connection->mPlayerIndex, identityOf(*connection), connection->mName, connection->mCharacter);
 			RMX_LOG_INFO("Netplay host: player " << (int)(connection->mPlayerIndex + 1) << " (" << connection->mName << ") lost the connection, the slot is kept for a minute");
 		}
 	}
@@ -184,6 +184,16 @@ void NetplayHost::retireConnection(PlayerConnection* connection)
 	connection->clear();
 	vectorRemoveAll(mPlayerConnections, connection);
 	mRetiredConnections.push_back(connection);		// Deleted in the next update: packets that are still queued may refer to it
+}
+
+bool NetplayHost::friendsHaveAnnounced() const
+{
+	// The game starts for a friend once it has said its name, readiness and character (its first lobby message comes right after the code check), or after three seconds at most.
+	// Without this, a friend who joins without the lobby screen could be given the game before the host heard which character it wants.
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && !connection->mLobbyAnnounced && connection->mAuthSeconds < 3.0f)
+			return false;
+	return true;
 }
 
 int NetplayHost::getAuthenticatedCount() const
@@ -232,6 +242,15 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 	}
 	mFailedAuth.recordSuccess(ip);
 
+	// A friend whose lobby messages are of another version (before the character choice, or a later one) cannot play with this host: it gets told so, through the normal
+	// "different version" path, instead of messages that one side cannot read
+	if (packet.mLobbyProtocol != NetplayLobby::LOBBY_PROTOCOL)
+	{
+		RMX_LOG_INFO("Netplay host: refused a friend that speaks another version of the lobby messages (" << (int)packet.mLobbyProtocol << " instead of " << (int)NetplayLobby::LOBBY_PROTOCOL << ")");
+		refuseConnection(connection, (uint8)NetplayAuth::JoinResult::VERSION_MISMATCH);
+		return;
+	}
+
 	connection.mClientToken = packet.mClientToken;
 	const std::string identity = identityOf(connection);
 	if (mKickBlocked.isBlocked(identity))
@@ -249,6 +268,7 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 				return other;		// (a connection that already ended does not hold its slot any more)
 		return nullptr;
 	};
+	uint16 takenOverCharacter = NetplayLobby::CHARACTER_NONE;		// the pick of the old connection of the same friend, if its slot is taken over below
 	int slot = 0;
 	// A slot that was kept for this address after a lost connection comes first (also for a friend who comes back by pressing Retry, without asking for it)
 	int preferred = packet.mPreferredSlot;
@@ -272,6 +292,7 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 		{
 			// The old connection of this friend has not timed out yet: it is the same friend coming back
 			RMX_LOG_INFO("Netplay host: friend came back, taking over its old player slot " << (int)(preferred + 1));
+			takenOverCharacter = holder->mCharacter;
 			holder->disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 			retireConnection(holder);
 			slot = preferred;
@@ -287,6 +308,9 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 		refuseConnection(connection, (uint8)NetplayAuth::JoinResult::LOBBY_FULL);
 		return;
 	}
+	uint16 reservedCharacter = mReservations.findCharacterFor(slot, identity);
+	if (reservedCharacter == NetplayLobby::CHARACTER_NONE)
+		reservedCharacter = takenOverCharacter;		// a friend who comes back keeps what it had picked
 	mReservations.remove(slot);
 	if (packet.mPreferredSlot >= 1 && slot == packet.mPreferredSlot)
 		RMX_LOG_INFO("Netplay host: friend came back to its player slot " << (slot + 1));
@@ -295,8 +319,24 @@ void NetplayHost::handleJoinAuth(PlayerConnection& connection, const JoinAuthPac
 	connection.mPlayerIndex = (uint8)slot;
 	connection.mName = NetplayLobby::DEFAULT_NAME;		// The real name comes with the next lobby message of the friend
 	connection.mPing = NetplayLobby::PingTracker();
+	connection.mCharacterNotice = false;
+	connection.mCharacterLimiter = NetplayLobby::CharacterRateLimiter();
+	{
+		// Its character: what the session has fixed if the game already started, else what it had before a connection loss, else the default of the slot
+		const NetplayLobby::CharacterList& list = mNetplayManager.getAvailableCharacters();
+		const int configured = mNetplayManager.getConfiguredPartyExtraSlot(slot);
+		if (mPicksLocked)
+			connection.mCharacter = mSessionPicks[slot];
+		else if (reservedCharacter != NetplayLobby::CHARACTER_NONE && NetplayLobby::isCharacterAllowedForSlot(slot, reservedCharacter, list, configured))
+			connection.mCharacter = reservedCharacter;
+		else
+			connection.mCharacter = NetplayLobby::defaultCharacterForSlot(slot, list, configured);
+		if (reservedCharacter != NetplayLobby::CHARACTER_NONE && connection.mCharacter == reservedCharacter)
+			RMX_LOG_INFO("Netplay host: player " << (slot + 1) << " keeps its character " << NetplayLobby::getCharacterName(reservedCharacter));
+	}
 	JoinReplyPacket reply;
 	reply.mResult = (uint8)NetplayAuth::JoinResult::ACCEPTED;
+	reply.mLobbyProtocol = NetplayLobby::LOBBY_PROTOCOL;
 	reply.mSlot = (uint8)slot;
 	reply.mProof = NetplayAuth::computeProof('H', mNetplayManager.getHostSecret(), connection.mHostNonce, packet.mClientNonce);
 	connection.sendPacket(reply, NetConnection::SendFlags::NONE);
@@ -326,7 +366,10 @@ void NetplayHost::updateHandshakes(float deltaSeconds)
 			continue;
 		}
 		if (connection->mAuthenticated)
+		{
+			connection->mAuthSeconds += deltaSeconds;
 			continue;
+		}
 
 		connection->mPendingSeconds += deltaSeconds;
 		if (connection->mRefuseTimer >= 0.0f)
@@ -396,7 +439,7 @@ void NetplayHost::updateConnection(float deltaSeconds)
 				RMX_LOG_INFO("Netplay host: connection state is now " << lastLoggedState);
 			}
 			// As long as the host is still in a menu, the friend waits; once the host started a game (e.g. picked a save file), the friend gets that game
-			if (anyPlayerConnected(mPlayerConnections) && Application::instance().getSimulation().isRunning())
+			if (anyPlayerConnected(mPlayerConnections) && Application::instance().getSimulation().isRunning() && friendsHaveAnnounced())
 			{
 				startGame();
 			}
@@ -446,7 +489,7 @@ void NetplayHost::updateConnection(float deltaSeconds)
 			}
 
 			// Same as for direct connections: the friend waits while the host is in a menu, and gets the game once the host started one
-			if (anyPlayerConnected(mPlayerConnections) && Application::instance().getSimulation().isRunning())
+			if (anyPlayerConnected(mPlayerConnections) && Application::instance().getSimulation().isRunning() && friendsHaveAnnounced())
 			{
 				startGame();
 			}
@@ -537,6 +580,9 @@ void NetplayHost::startGame()
 {
 	RMX_LOG_INFO("Netplay host: starting game");
 
+	// From now on the characters of the players are fixed for this session (they go to everybody in the start message)
+	lockCharacters();
+
 	// Is a game already running? Then the client joins that game, which needs the current game state to be sent over
 	PlayerConnection* firstActive = nullptr;
 	for (PlayerConnection* connection : mPlayerConnections)
@@ -564,6 +610,8 @@ void NetplayHost::startGame()
 	// Fill in start game packet
 	StartGamePacket packet;
 	{
+		for (int k = 0; k < MAX_PLAYERS; ++k)
+			packet.mCharacterPicks[k] = mSessionPicks[k];
 		packet.mGameBuildVersion = EngineMain::getDelegate().getAppMetaData().mBuildVersionNumber;
 		packet.mTransferMode = 0;
 		packet.mGameMode = 0;
@@ -679,6 +727,8 @@ void NetplayHost::beginJoinTransfer(uint32 frameNumber)
 
 	// Fill in start game packet; the actual state follows in chunks
 	StartGamePacket packet;
+	for (int k = 0; k < MAX_PLAYERS; ++k)
+		packet.mCharacterPicks[k] = mSessionPicks[k];
 	packet.mGameBuildVersion = EngineMain::getDelegate().getAppMetaData().mBuildVersionNumber;
 	packet.mTransferMode = 1;
 	packet.mGameMode = 0;
@@ -927,12 +977,24 @@ void NetplayHost::updateLobby(float deltaSeconds)
 	uint8 states[MAX_PLAYERS];
 	getLobbySlots(states);
 
+	// The installed characters may have changed (a mod switched on or off): every pick is checked again then
+	mNetplayManager.getAvailableCharacters();
+	if (mNetplayManager.takeCharacterListChanged() && !mPicksLocked)
+		revalidateCharacters();
+
 	// What a friend sees (without the ping, which changes all the time): only a change in here is sent right away
 	const int readySeconds = getReadyCheckSecondsLeft();
 	std::string key = mLobbyHostStarting ? "S" : "-";
 	for (int k = 0; k < MAX_PLAYERS; ++k)
 		key += std::to_string((int)states[k]) + "|" + getPlayerName(k) + "|";
 	key += std::to_string(mDelaySetting) + "|" + std::to_string(mEffectiveDelay) + "|" + std::to_string(readySeconds);
+	uint8 noticeMask = 0;
+	for (int k = 0; k < MAX_PLAYERS; ++k)
+	{
+		key += "|c" + std::to_string((int)getCharacterOfSlot(k));
+		noticeMask |= (uint8)((hasCharacterNotice(k) ? 1 : 0) << k);
+	}
+	key += std::string("|n") + std::to_string((int)noticeMask) + (mPicksLocked ? "L" : "-");
 
 	const bool allReady = areAllClientsReady();
 	if (allReady != mLobbyWasAllReady)
@@ -976,6 +1038,10 @@ void NetplayHost::updateLobby(float deltaSeconds)
 		packet.mDelaySetting = (mDelaySetting < 0) ? 0xff : (uint8)mDelaySetting;
 		packet.mEffectiveDelay = (uint8)mEffectiveDelay;
 		packet.mReadyCheckSeconds = (uint8)readySeconds;
+		for (int k = 0; k < MAX_PLAYERS; ++k)
+			packet.mCharacters[k] = getCharacterOfSlot(k);
+		packet.mCharacterNotice = noticeMask;
+		packet.mCharactersLocked = mPicksLocked ? 1 : 0;
 		connection->sendPacket(packet, NetConnection::SendFlags::NONE);
 	}
 }
@@ -998,6 +1064,128 @@ int NetplayHost::getPlayerPing(int slot) const
 		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex == slot)
 			return connection->mPing.get();
 	return -1;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Character choice
+
+uint16 NetplayHost::getCharacterOfSlot(int slot)
+{
+	if (slot < 0 || slot >= MAX_PLAYERS)
+		return NetplayLobby::CHARACTER_NONE;
+	if (mPicksLocked)
+		return mSessionPicks[slot];
+	if (slot == 0)
+		return mNetplayManager.getHostCharacterPick();
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex == slot && connection->mCharacter != NetplayLobby::CHARACTER_NONE)
+			return connection->mCharacter;
+	return NetplayLobby::defaultCharacterForSlot(slot, mNetplayManager.getAvailableCharacters(), mNetplayManager.getConfiguredPartyExtraSlot(slot));
+}
+
+bool NetplayHost::hasCharacterNotice(int slot) const
+{
+	if (slot == 0)
+		return mHostCharacterNotice;
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex == slot)
+			return connection->mCharacterNotice;
+	return false;
+}
+
+void NetplayHost::onHostCharacterChanged()
+{
+	mHostCharacterNotice = false;		// the host chose it itself
+	mLobbyLastKey.clear();				// tell everybody right away
+}
+
+void NetplayHost::handleCharacterRequest(PlayerConnection& connection, uint16 requested)
+{
+	const int slot = connection.mPlayerIndex;
+	if (slot < 1 || slot >= MAX_PLAYERS || requested == NetplayLobby::CHARACTER_NONE)
+		return;
+	if (mPicksLocked)
+		return;		// the game has started: every pick is fixed for this session
+	if (requested == connection.mCharacter)
+		return;		// the same request that is repeated every two seconds together with the name
+	if (!connection.mCharacterLimiter.allow(SDL_GetTicks()))
+	{
+		if (connection.mCharacterLimiter.mDropped == 1 || (connection.mCharacterLimiter.mDropped % 50) == 0)
+			RMX_LOG_INFO("Netplay host: character requests of player " << (slot + 1) << " dropped, too fast (" << connection.mCharacterLimiter.mDropped << " dropped so far)");
+		return;
+	}
+
+	// What a friend asks for is never trusted: it must be a character that this player can have and that is installed here
+	const NetplayLobby::CharacterList& list = mNetplayManager.getAvailableCharacters();
+	const int configured = mNetplayManager.getConfiguredPartyExtraSlot(slot);
+	bool adjusted = false;
+	const uint16 accepted = NetplayLobby::sanitizeCharacterPick(slot, requested, list, connection.mCharacter, &adjusted, configured);
+	if (adjusted)
+	{
+		RMX_LOG_INFO("Netplay host: player " << (slot + 1) << " (" << connection.mName << ") asked for a character that is not possible (" << (int)requested << "), it stays " << NetplayLobby::getCharacterName(accepted));
+		connection.mCharacterNotice = true;
+	}
+	else
+	{
+		connection.mCharacterNotice = false;
+	}
+	if (accepted != connection.mCharacter)
+	{
+		connection.mCharacter = accepted;
+		RMX_LOG_INFO("Netplay host: lobby: player " << (slot + 1) << " (" << connection.mName << ") plays as " << NetplayLobby::getCharacterName(accepted));
+		mLobbyLastKey.clear();
+	}
+}
+
+void NetplayHost::revalidateCharacters()
+{
+	// The installed characters can change while the lobby is open (a mod was switched on or off): everybody whose character is gone gets the default of their slot, and is told
+	const NetplayLobby::CharacterList& list = mNetplayManager.getAvailableCharacters();
+	for (PlayerConnection* connection : mPlayerConnections)
+	{
+		if (nullptr == connection || !connection->isActive() || connection->mPlayerIndex < 1 || connection->mPlayerIndex >= MAX_PLAYERS)
+			continue;
+		const int slot = connection->mPlayerIndex;
+		const int configured = mNetplayManager.getConfiguredPartyExtraSlot(slot);
+		if (connection->mCharacter == NetplayLobby::CHARACTER_NONE)
+		{
+			connection->mCharacter = NetplayLobby::defaultCharacterForSlot(slot, list, configured);
+			continue;
+		}
+		bool adjusted = false;
+		const uint16 fixedPick = NetplayLobby::sanitizeCharacterPick(slot, connection->mCharacter, list, NetplayLobby::defaultCharacterForSlot(slot, list, configured), &adjusted, configured);
+		if (adjusted)
+		{
+			RMX_LOG_INFO("Netplay host: the character of player " << (slot + 1) << " (" << NetplayLobby::getCharacterName(connection->mCharacter) << ") is not available any more, using " << NetplayLobby::getCharacterName(fixedPick));
+			connection->mCharacter = fixedPick;
+			connection->mCharacterNotice = true;
+			mLobbyLastKey.clear();
+		}
+	}
+	bool hostAdjusted = false;
+	const uint16 hostPick = NetplayLobby::sanitizeCharacterPick(0, mNetplayManager.getHostCharacterPick(), list, NetplayLobby::CHARACTER_MENU, &hostAdjusted);
+	if (hostAdjusted)
+	{
+		RMX_LOG_INFO("Netplay host: the host's own character is not available any more, using " << NetplayLobby::getCharacterName(hostPick));
+		mNetplayManager.setHostCharacterPick(hostPick);
+		mHostCharacterNotice = true;
+		mLobbyLastKey.clear();
+	}
+}
+
+void NetplayHost::lockCharacters()
+{
+	if (mPicksLocked)
+		return;
+	revalidateCharacters();		// the characters that are installed right now decide (a mod may have been switched off since the pick)
+	uint16 picks[MAX_PLAYERS];
+	for (int slot = 0; slot < MAX_PLAYERS; ++slot)
+		picks[slot] = getCharacterOfSlot(slot);
+	for (int slot = 0; slot < MAX_PLAYERS; ++slot)
+		mSessionPicks[slot] = picks[slot];
+	mPicksLocked = true;
+	mNetplayManager.setSessionCharacters(mSessionPicks);
+	mLobbyLastKey.clear();
 }
 
 int NetplayHost::getRelayedSlot() const
@@ -1248,6 +1436,7 @@ bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 				RMX_LOG_INFO("Netplay host: lobby: player " << (int)(connection.mPlayerIndex + 1) << " is called \"" << name << "\"");
 				connection.mName = name;
 			}
+			handleCharacterRequest(connection, packet.mCharacter);
 			const bool wasReady = connection.mLobbyReady;
 			connection.mLobbyReady = (packet.mReady != 0);
 			if (connection.mLobbyReady != wasReady || !connection.mLobbyAnnounced)

@@ -241,7 +241,7 @@ function void DropIn.placePlayer(u32 player, u16 px, u16 py, u16 layer, u16 spri
 	char.invuln.countdown = 60
 	char.drown_countdown = 30
 	// A rescue can leave water without the usual surface-crossing update.
-	setSpeedCapProperties(player == DropIn.P2 ? addressof(global.move.speedcap.tails) : addressof(global.move.speedcap))
+	setSpeedCapProperties(player == DropIn.P2 ? (DropIn.isPlayer2Actor() ? DropIn.P2_SPEED : addressof(global.move.speedcap.tails)) : addressof(global.move.speedcap))
 	if (player == DropIn.P2)
 	{
 		tails.ai_routine = 0x06

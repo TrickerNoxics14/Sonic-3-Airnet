@@ -73,6 +73,9 @@ function void DropIn.setPartyRings(u8 index, u16 rings)
 
 function u8 DropIn.partyExtraSlot(u8 index)
 {
+	// Playing online: the character that the player picked in the lobby (see charpick.lemon); otherwise the setting of this mod
+	if (DropIn.picksValid())
+		return DropIn.pickedExtraSlot(index)
 	return index == 2 ? option.dropin.party_slot3 : option.dropin.party_slot4
 }
 
@@ -82,14 +85,20 @@ function u8 DropIn.partyExtraSlot(u8 index)
 function u8 DropIn.resolvePartyCharacter(u8 index)
 {
 	u8 slot = DropIn.partyExtraSlot(index)
+	u8 fallback = index == 2 ? CHARACTER_KNUCKLES : CHARACTER_SONIC
 	if (slot == 0)
-		return index == 2 ? CHARACTER_KNUCKLES : CHARACTER_SONIC
+		return DropIn.pickedStockCharacter(index, fallback)		// (online: Sonic or Knuckles as picked; otherwise the old roles)
+	return DropIn.resolveExtraBaseCharacter(slot, fallback)
+}
 
+// The Sonic/Tails/Knuckles base of an extra character: its startup function says which one it is (and is not left active: the main character is restored).
+function u8 DropIn.resolveExtraBaseCharacter(u8 slot, u8 fallback)
+{
 	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")
 	u8 savedCharacters = global.characters
 	System.setGlobalVariableValueByName("global.xtrachar", slot)
 	bool available = System.callFunctionByName(stringformat("ExtraChar.startup_char%d", slot))
-	u8 character = available ? getMainCharacter() : (index == 2 ? CHARACTER_KNUCKLES : CHARACTER_SONIC)
+	u8 character = available ? getMainCharacter() : fallback
 	global.characters = savedCharacters
 	System.setGlobalVariableValueByName("global.xtrachar", savedExtraSlot)
 	return character
@@ -206,6 +215,7 @@ function void DropIn.updateParty()
 {
 	if (global.game_mode != 0x0c || competition_mode.active != 0)
 		return
+	DropIn.updatePlayer2Pick()		// online: player 2 becomes the character that it picked in the lobby (charpick.lemon)
 	for (u8 index = 2; index < 4; ++index)
 	{
 		u32 player = DropIn.partyPlayer(index)
@@ -420,18 +430,22 @@ function void updateCharacterSpritePatterns(u8 character, u8 animationSprite)
 
 function bool Standalone.onWriteToSpriteTable(s16 px, s16 py, u16 renderQueue)
 {
-	if (DropIn.partyIndex(A0) != 0)
+	// Player 2 when it was turned into another character than Tails (see charpick.lemon) is drawn the same way as the extra characters
+	bool player2Actor = (A0 == DropIn.P2 && DropIn.isPlayer2Actor())
+	if (DropIn.partyIndex(A0) != 0 || player2Actor)
 	{
+		u8 drawIndex = player2Actor ? 1 : DropIn.partyIndex(A0)
 		u8 flags = char.render_flags & (SPRITE_FLAG_FLIP_X | SPRITE_FLAG_FLIP_Y)
 		if (char.sprite_attributes & sprite_attribute.PRIORITY)
 			flags |= SPRITE_FLAG_PRIO
 		u8 savedSuper = super.active
 		super.active = 0
-		bool drawnByExtraSlot = DropIn.drawPartyExtraCharacter(DropIn.partyExtraSlot(DropIn.partyIndex(A0)), char.character, px, py, renderQueue)
+		bool drawnByExtraSlot = DropIn.drawPartyExtraCharacter(DropIn.partyExtraSlot(drawIndex), char.character, px, py, renderQueue)
 		if (!drawnByExtraSlot)
 			Standalone.drawCharacterSpriteDirect(char.character, px, py, char.animation.sprite, flags, 0x40 + char.character * 0x20, renderQueue)
 		super.active = savedSuper
-		DropIn.drawPlayerLabel(DropIn.partyIndex(A0), px, py - 28, 0xffffffff, 5, renderQueue + 1, 0xffff, stringformat("P%d", DropIn.partyIndex(A0) + 1))
+		if (!player2Actor)
+			DropIn.drawPlayerLabel(DropIn.partyIndex(A0), px, py - 28, 0xffffffff, 5, renderQueue + 1, 0xffff, stringformat("P%d", DropIn.partyIndex(A0) + 1))
 		return true
 	}
 	return base.Standalone.onWriteToSpriteTable(px, py, renderQueue)

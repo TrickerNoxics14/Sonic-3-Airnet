@@ -1,0 +1,10 @@
+{
+  "Metadata": {
+    "Name": "Test Extra Slot Character",
+    "UniqueID": "s3air-airnet-test-extraslot",
+    "Author": "Sonic 3 AirNet checks",
+    "Description": "A tiny extra-slot character for the automated checks (own code, no third-party content). Not distributed.",
+    "ModVersion": "1.0.0",
+    "GameVersion": "20.07.24.0"
+  }
+}

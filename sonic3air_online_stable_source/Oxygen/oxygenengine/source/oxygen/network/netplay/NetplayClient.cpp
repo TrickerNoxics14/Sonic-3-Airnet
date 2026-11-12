@@ -450,10 +450,34 @@ void NetplayClient::sendLobbyReady(bool ready)
 	mLobbyMyReady = ready;
 	if (mHostConnection.getState() != NetConnection::State::CONNECTED)
 		return;
+	if (mMyCharacter == NetplayLobby::CHARACTER_NONE)
+	{
+		// Developer test switch: pick without a key press
+		mMyCharacter = mNetplayManager.getCharacterPickFromEnvironment();
+	}
 	LobbyReadyPacket packet;
 	packet.mReady = ready ? 1 : 0;
 	packet.mName = mNetplayManager.getLocalPlayerName();
+	packet.mCharacter = mMyCharacter;	// (CHARACTER_NONE = no request, the host keeps the default of the slot)
 	mHostConnection.sendPacket(packet, NetConnection::SendFlags::NONE);
+}
+
+void NetplayClient::setMyCharacter(uint16 character)
+{
+	if (mLobbyCharactersLocked)
+		return;		// the game has started: the pick is fixed for this session
+	if (character == mMyCharacter)
+		return;
+	mMyCharacter = character;
+	RMX_LOG_INFO("Netplay client: lobby: asking the host to play as " << NetplayLobby::getCharacterName(character));
+	sendLobbyReady(mLobbyMyReady);
+}
+
+bool NetplayClient::takeCharacterNotice()
+{
+	const bool pending = mCharacterNoticePending;
+	mCharacterNoticePending = false;
+	return pending;
 }
 
 void NetplayClient::sendChat(int quickMessage, const std::string& freeText)
@@ -516,6 +540,37 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			}
 			mLobbyDelaySetting = packet.mDelaySetting;
 			mLobbyEffectiveDelay = packet.mEffectiveDelay;
+			{
+				// Characters: what the host accepted for everybody
+				bool charactersChanged = false;
+				for (int k = 0; k < 4; ++k)
+				{
+					// (nothing is trusted: only a pick that is possible for that slot is taken over)
+					uint16 pick = packet.mCharacters[k];
+					if (pick != NetplayLobby::CHARACTER_NONE && !NetplayLobby::isCharacterAllowedForSlot(k, pick, mNetplayManager.getAvailableCharacters(), mNetplayManager.getConfiguredPartyExtraSlot(k)) && !NetplayLobby::isExtraCharacter(pick))
+						pick = NetplayLobby::CHARACTER_NONE;
+					charactersChanged = charactersChanged || (mLobbyCharacters[k] != pick);
+					mLobbyCharacters[k] = pick;
+				}
+				mLobbyCharactersLocked = (packet.mCharactersLocked != 0);
+				const bool notice = (packet.mYourSlot < 4) && (((packet.mCharacterNotice >> packet.mYourSlot) & 1) != 0);
+				const uint16 mine = (packet.mYourSlot < 4) ? mLobbyCharacters[packet.mYourSlot] : NetplayLobby::CHARACTER_NONE;
+				if (mine != NetplayLobby::CHARACTER_NONE)
+				{
+					if (mMyCharacter == NetplayLobby::CHARACTER_NONE)
+						mMyCharacter = mine;		// the default of this slot
+					else if (mine != mMyCharacter && (notice || mLobbyCharactersLocked))
+						mMyCharacter = mine;		// the host did not accept the request: take over what it says
+				}
+				if (notice && !mCharacterNoticeSeen)
+				{
+					mCharacterNoticePending = true;
+					RMX_LOG_INFO("Netplay client: lobby: the host changed our character to " << NetplayLobby::getCharacterName(mine));
+				}
+				mCharacterNoticeSeen = notice;
+				if (charactersChanged)
+					RMX_LOG_INFO("Netplay client: lobby: characters " << NetplayLobby::getCharacterName(mLobbyCharacters[0]) << "," << NetplayLobby::getCharacterName(mLobbyCharacters[1]) << "," << NetplayLobby::getCharacterName(mLobbyCharacters[2]) << "," << NetplayLobby::getCharacterName(mLobbyCharacters[3]) << (mLobbyCharactersLocked ? " (fixed for this game)" : ""));
+			}
 			if (!mLobbyPingLogged && packet.mYourSlot < 4 && packet.mPingMs[packet.mYourSlot] != 0xffff)
 			{
 				mLobbyPingLogged = true;
@@ -700,6 +755,8 @@ void NetplayClient::handleJoinChallenge(uint32 hostNonce)
 	static const uint32 processToken = std::max<uint32>(NetplayAuth::randomNonce(), 1);
 	answer.mClientToken = processToken;
 	answer.mPreferredSlot = mResumeSession ? mPlayerIndex : (mLobbyRejoin ? mLobbyYourSlot : 0);		// After a connection loss, ask for the same player slot again
+	// Developer test switch: this friend speaks the lobby messages of the version before the character choice (the host must refuse it as another version)
+	answer.mLobbyProtocol = (nullptr != TestHooks::getEnv("S3AIR_NETPLAY_OLD_LOBBY_PROTOCOL")) ? (uint8)0 : NetplayLobby::LOBBY_PROTOCOL;
 	mHostConnection.sendPacket(answer, NetConnection::SendFlags::NONE);
 	mAuthSent = true;
 }
@@ -718,6 +775,14 @@ void NetplayClient::handleJoinReply(const JoinReplyPacket& packet)
 				// Somebody answered who does not know the code
 				mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 				fail(NetplayFailure::Reason::WRONG_CODE, "The other side does not know your code.");
+				return;
+			}
+			if (packet.mLobbyProtocol != NetplayLobby::LOBBY_PROTOCOL)
+			{
+				// A host of another version of the lobby messages (before the character choice, or a later one): both need the same version
+				RMX_LOG_INFO("Netplay client: the host speaks another version of the lobby messages (" << (int)packet.mLobbyProtocol << " instead of " << (int)NetplayLobby::LOBBY_PROTOCOL << ")");
+				mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+				fail(NetplayFailure::Reason::VERSION_MISMATCH);
 				return;
 			}
 			mHostVerified = true;
@@ -745,6 +810,11 @@ void NetplayClient::handleJoinReply(const JoinReplyPacket& packet)
 		case NetplayAuth::JoinResult::KICKED:
 			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
 			fail(NetplayFailure::Reason::KICKED);
+			return;
+
+		case NetplayAuth::JoinResult::VERSION_MISMATCH:
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(NetplayFailure::Reason::VERSION_MISMATCH);
 			return;
 
 		default:
@@ -792,6 +862,9 @@ void NetplayClient::startGame(const StartGamePacket& packet)
 			return;
 		}
 	}
+	// The characters of the players are fixed for this session (the same on every computer; the scripts read them from the shared memory)
+	mNetplayManager.setSessionCharacters(packet.mCharacterPicks);
+
 	// Read RNG state from packet
 	uint64* rngState = Application::instance().getSimulation().getSimulationState().getRandomNumberGenerator().accessState();
 	for (int k = 0; k < 4; ++k)
