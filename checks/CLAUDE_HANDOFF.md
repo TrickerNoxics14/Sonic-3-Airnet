@@ -675,3 +675,17 @@ Each reviewer finding was read against the code first.
 **Rejected:** none outright (items 3, 6, 8 were only partly as described, see above).
 
 **Verification (Windows, one computer, loopback):** build OK (incremental, path scrub ran); core tests PASS 0 failures; `run_online_backend_checks.ps1` in one go: ONLINE BACKEND CHECKS PASS, runtime stages 120 of 120 (K1a-i, K2, K3, K4 included), update checks PASS, 0 FAIL lines; `run_checks.ps1 -Quick` 25 of 25 (after `make_package.ps1`; includes new B4). The full default `run_checks.ps1` (local stages) was not rerun. Still true: real extra-slot mods (Reto, Modern Sonic) not run; only the interface, with the two own test characters.
+
+
+## Claude addendum 2026-11-12 (stage Z, final verification of the character pick, no new features)
+
+Verified from a clean tree at 70a059e, no stray Sonic3AIR.exe. Windows, one computer, loopback. Nothing pushed, tagged or released; GameBanana untouched; no parked patch applied.
+- `build_online_stable.ps1 -Rebuild`: full compile, exit 0, path scrub ran (4 ASCII + 12 UTF-16).
+- `run_online_core_tests.ps1`: ONLINE CORE TESTS PASS, 0 failures, 204 PASS lines.
+- `run_online_backend_checks.ps1` in one go: ONLINE BACKEND CHECKS PASS, no FAIL line (596 lines starting with PASS in the console output; includes stage K1-K4, W2i, X5b and the update stage).
+- `run_update_checks.ps1` on its own: UPDATE CHECKS PASS, 60 passed, 0 failed (normal package restored afterwards).
+- Full default `run_checks.ps1`: 383 of 384; the only failure is the known unrelated V1 (vanilla IceCap VRAM crash). The W2g timing flake did not occur this time. Online child run: 113 of 113.
+- `make_package.ps1` then `run_checks.ps1 -Only U`: 32 of 32.
+- Zip scan (own script) of Sonic3Airnet.zip (882 entries): no ROM/save/state/settings files (name matches were only the game's own layout .bin data, rom_manipulations.lemon, defines_rom.lemon and the shipped charpick.lemon), no testhooks marker, no test mod or harness, LICENSE.txt present, the builder's user name occurs in no file (ASCII and UTF-16 scan).
+- DropInCoop vs. before the feature: only README.txt, scripts/charpick.lemon (new), main.lemon, party.lemon, teamwork.lemon.
+- Still not done: real extra-slot mods (Reto, Modern Sonic) not run, only the own test characters 201/202; player 2 conversion only exercised in Angel Island 2.
