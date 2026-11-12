@@ -689,3 +689,33 @@ Verified from a clean tree at 70a059e, no stray Sonic3AIR.exe. Windows, one comp
 - Zip scan (own script) of Sonic3Airnet.zip (882 entries): no ROM/save/state/settings files (name matches were only the game's own layout .bin data, rom_manipulations.lemon, defines_rom.lemon and the shipped charpick.lemon), no testhooks marker, no test mod or harness, LICENSE.txt present, the builder's user name occurs in no file (ASCII and UTF-16 scan).
 - DropInCoop vs. before the feature: only README.txt, scripts/charpick.lemon (new), main.lemon, party.lemon, teamwork.lemon.
 - Still not done: real extra-slot mods (Reto, Modern Sonic) not run, only the own test characters 201/202; player 2 conversion only exercised in Angel Island 2.
+
+
+## Claude addendum 2026-11-12 (Blue Sphere special stage: every online player runs at the same time, online fork only)
+
+Scope: online fork scripts only (`sonic3air_online_stable_source/Oxygen/sonic3air/scripts`). No C++ change. DropInCoop NOT touched at all (the roster is read by name with `System.getGlobalVariableValueByName("dropin.joined" / "dropin.party_wants3" / "dropin.party_wants4")`; the stock game gets 0). Local split-screen/four-view untouched, no parked patch applied. Nothing pushed, tagged or released; GameBanana untouched.
+
+### What it does (design decisions are named constants in `level/special/defines_bluespheres.lemon`, documented in README_ONLINE.txt)
+- Active only when: online (`u8[0x8fff00] != 0`), plain Blue Sphere stage (not the minigame, not a rolling demo), and at least two players in the roster (host, player 2 joined, players 3/4 joined). Otherwise the stock path runs unchanged (offline golden check J9).
+- All runs are simulated by every computer in the same fixed order inside the one lockstep game (`BSMulti.simulateAll`); each runner has its own copy of the same layout and start (runner blocks in shared memory 0x8f8000..0x8f97ff, 0x600 each), its own controller slot (`Input.getController(r)`). Nothing is sent over the network.
+- What a computer shows differs (own run, or the one it watches), so the render phase (`renderViewed`) snapshots the work RAM it changes (undo set, `BSMulti.undoAddress`), draws, lets V-Int run and puts the RAM back in `BSMulti.onBeforeYield` (new call in `waitForNextFrame`, standalone.lemon, guarded by a flag). Hash of the shared-memory blocks reaches the work RAM through per-runner checksums (header at 0xffffe5c0.., see defines).
+- Fail = red sphere: runner status failed, its player watches the next running runner automatically, left/right switch. Complete = emerald walk per runner. Stage ends when nobody runs; cleared if at least one completed (emerald once, host results rules, friends get ring score, host-only lives/continues). Timeouts 30 s after the first finish, 7 min cap.
+- HUD: list of players with RUN/DONE/OUT/TIME and counts, banner for the failed player, ALL RINGS overlay. Constants: AUTOSTART_FRAMES 193, GRACE_AFTER_FIRST_FINISH 1800, MAX_STAGE_FRAMES 25200, RING_BONUS_FACTOR 10, PERFECT_BONUS 5000.
+- Files: new `level/special/bluespheres_multi.lemon`; edits in `bluespheres.lemon` (SpecialStage branch, `fn00903e` split into `SimulatePlayer` + `DrawPlayer`, red sphere/ring/complete branches, sound gating), `defines_bluespheres.lemon`, `_defines/defines_sharedmemory.lemon`, `standalone/standalone.lemon` (the new file is picked up by the script folder scan).
+
+### Tests (stage J in run_checks.ps1, also in run_online_backend_checks.ps1 and the delegated online stages; harness checks\harness\BSMultiHarness, own code, in the package guards)
+- J9 (offline unchanged vs. checks\golden\bs_offline_golden.txt recorded from the unmodified scripts; unit checks), J1 (4 players: one fails, one completes, one times out; spectator cycling), J2 (3 players, all fail), J3 (2 players + a spectator computer). Pictures in checks\last_logs (J1-*-bs-run.bmp, J1-host-bs-spectate.bmp, J1-*-bs-results.bmp). Also `checks\lint_lemon_oneline_if.ps1` (run before every game start).
+
+### Bugs found and fixed on the way (all in .claude/bug-patterns.md)
+1. Lemon refuses `if (cond) statement` on one line (compile error dialog blocks a run): lint script with self test.
+2. Stale `saves\scripts.bin` made a check run against OLD scripts: run_checks removes it when a script is newer (J9d now proves the offline run after the rebuild).
+3. Ternary with constant address returned the wrong value (harness).
+4. `stringformat` result limit 256 chars: reports split, check J*l.
+5. PowerShell wrapped-array returns (`,@()`) nested again in J1d via `@(...)`: fixed.
+6. REAL desync (this session): the viewer of a runner in the emerald sequence ran `Nemesis.loadDataToVRAM` when the view switched, which writes 0xffffaa00.. and stack leftovers 0xfffffdf6 into hashed RAM only on that computer: 3 repairs in J1. Found because the view probe now runs in the win sequence too; undo set extended (0xffffaa00 len 0x200, stack 0xfffffd00 len 0x100). My first extension (len 0x600) overlapped the sprite lists at 0xffffac00 and made the runner invisible; seen in the screenshot, range cut, guarded by unit check `bs unit undo` and check J3m (blue pixels where the runner stands). Undo scratch moved to 0x8fc000.
+
+### Honest limits
+- Every runner is drawn with the host's main character; a friend's own character pick is not shown in the stage. Giant ring and pause stay host only. The star post bonus stages and the Hidden Palace cave are not covered.
+- A friend who joins while a stage runs only watches. The grace/time limits, host-only lives, friend score-only are design defaults, not asked for.
+- Mutation checks were not run as separate runs; the undo-set probe and the runner-pixel check were each seen red on the real faulty code during development (probe: 499 differing bytes; picture: no runner).
+- getScreenExtend() is used by the HUD text objects and the player position inside the canonical RAM in the stock code; all test windows have the same size, so a pre-existing display-width dependency was not exercised.

@@ -56,3 +56,73 @@ define bluespheres.minigame_mode			=  u8[0xffffffd4]	// This is 1 when in lock-o
 //  - 0x02 = 1-up for 100 rings was granted
 //  - 0x04 = 1-up for 200 rings was granted
 //  - 0x80 = Rings display in HUD needs to be refreshed
+
+
+
+//-------------------------------------------------------//
+// Online multi-runner mode ("BSMulti")                  //
+//-------------------------------------------------------//
+
+// Every online player runs through the same stage at the same time. All runs are simulated by every computer, in the same fixed order, inside the one
+// lockstep game. See bluespheres_multi.lemon.
+
+// In the shared memory (not part of the sync hash, but saved in game states and cleared by a state load):
+define bsmulti.active				=  u8[0x8f9f08]		// 1 while the runners are active (0 in the stock game and offline)
+define bsmulti.view					=  u8[0x8f9f00]		// Runner whose run this computer shows (differs between computers, not game state)
+define bsmulti.view_role			=  u8[0x8f9f01]		// Online role for which the view was chosen (the view is chosen again when the role differs, e.g. after a state transfer)
+define bsmulti.art_state			=  u8[0x8f9f04]		// 0: the VRAM holds the ring art, 1: the emerald art (per computer, like the VRAM)
+define bsmulti.restore_pending		=  u8[0x8f9f09]		// 1 between the render phase and the next frame wait (see BSMulti.onBeforeYield)
+
+// In the work RAM (hashed, so a difference between computers is noticed): 0xffffe5c0 .. 0xffffe5ff
+//  -> This is the area of the Tails follower's position history in the stock stage; in multi mode Tails is not spawned. Only valid while "bsmulti.active" is 1!
+define bsmulti.header.marker		=  u8[0xffffe5c0]	// 0x5a once the header is set up
+define bsmulti.roster_mask			=  u8[0xffffe5c1]	// Bit n set: player n takes part (0 = host, 1 = player 2, 2 = player 3, 3 = player 4)
+define bsmulti.num_runners			=  u8[0xffffe5c2]	// Highest roster bit + 1
+define bsmulti.current				=  u8[0xffffe5c3]	// Runner whose code runs right now, 0xff if none
+define bsmulti.any_completed		=  u8[0xffffe5c8]
+define bsmulti.end_reason			=  u8[0xffffe5c9]	// 0: running, 1: every runner finished, 2: grace time after the first completion ran out, 3: maximum stage time ran out
+define bsmulti.finished				=  u8[0xffffe5ca]	// 1 once the stage end was handled
+define bsmulti.stage_frames			= u32[0xffffe5cc]
+define bsmulti.first_completion		= u32[0xffffe5d0]	// Frame of the first completion, 0 if nobody completed yet
+// 0xffffe5c4 .. 0xffffe5c7: status of each runner (u8 each); 0xffffe5d4: frame at which each runner finished (u32 each); 0xffffe5e4: checksums of the runner states (u32 each)
+// 0xffffe5f8: checksums of the runner grids (u16 each)
+
+constant u32 BSMulti.HEADER					= 0xffffe5c0
+constant u32 BSMulti.HEADER_STATUS			= 0xffffe5c4
+constant u32 BSMulti.HEADER_DONE_FRAME		= 0xffffe5d4
+constant u32 BSMulti.HEADER_STATE_CHECKSUM	= 0xffffe5e4
+constant u32 BSMulti.HEADER_GRID_CHECKSUM	= 0xffffe5f8
+constant u32 BSMulti.HEADER_SIZE			= 0x40
+
+// Status of a runner
+constant u8 BSMulti.STATUS_RUNNING		= 0
+constant u8 BSMulti.STATUS_COMPLETED	= 1
+constant u8 BSMulti.STATUS_FAILED		= 2		// Touched a red sphere
+constant u8 BSMulti.STATUS_TIMED_OUT	= 3
+constant u8 BSMulti.STATUS_ABSENT		= 4		// Not in the roster
+
+// Design defaults, all named here so they are easy to change (documented in README_ONLINE.txt)
+constant u8  BSMulti.MAX_RUNNERS			= 4
+constant u32 BSMulti.AUTOSTART_FRAMES		= 193		// The stage starts running by itself after 180 frames (the "Get Blue Spheres" text) plus 12 frames of text sliding out; deliberately not display dependent
+constant u32 BSMulti.GRACE_AFTER_FIRST_FINISH = 1800	// 30 seconds: the other runners may go on this long after the first runner completed the stage
+constant u32 BSMulti.MAX_STAGE_FRAMES		= 25200		// 7 minutes: after that every runner still running is timed out
+constant u16 BSMulti.CYCLE_PREV				= CONTROL_LEFT		// A spectator watches the previous / next running runner with these buttons
+constant u16 BSMulti.CYCLE_NEXT				= CONTROL_RIGHT
+constant u32 BSMulti.RING_BONUS_FACTOR		= 10		// Score of each friend per ring (like the stock results screen, which shows the host's)
+constant u32 BSMulti.PERFECT_BONUS			= 5000		// Score for collecting every ring, like the stock results screen
+
+// Runner blocks in the shared memory: a copy of everything that belongs to one run
+constant u32 BSMulti.BASE				= 0x8f8000
+constant u32 BSMulti.STRIDE				= 0x600
+constant u32 BSMulti.OFS_GRID			= 0x000		// 0x400 bytes, live: 0xfffff100
+constant u32 BSMulti.OFS_SLOTS			= 0x400		// 0x100 bytes, live: 0xffffa400 (collection animations)
+constant u32 BSMulti.OFS_STATE			= 0x500		// 0x40 bytes, live: 0xffffe420 .. 0xffffe45f (the bluespheres.* variables)
+constant u32 BSMulti.OFS_OBJECT			= 0x540		// 0x4a bytes, live: 0xffffb000 (the player object)
+constant u32 BSMulti.OFS_PLANEB			= 0x58c		// 2 bytes, live: 0xfffff618
+constant u32 BSMulti.LIVE_GRID			= 0xfffff100
+constant u32 BSMulti.LIVE_SLOTS			= 0xffffa400
+constant u32 BSMulti.LIVE_STATE			= 0xffffe420
+constant u32 BSMulti.LIVE_OBJECT		= 0xffffb000
+constant u32 BSMulti.LIVE_PLANEB		= 0xfffff618
+constant u32 BSMulti.SCRATCH_UNDO		= 0x8fc000	// Copy of the RAM areas that the render phase changes (see BSMulti.undoAddress)
+constant u32 BSMulti.SCRATCH_ART		= 0x8fa000	// Decompressed emerald art

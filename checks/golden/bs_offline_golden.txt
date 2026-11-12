@@ -1,0 +1,16 @@
+﻿mode0 layout mode 0 runners 1 active 0
+mode0 golden call 60 f0 act0 n1 mask0 mode34 em0 | r0 s0 x0200 y0588 d80 b102 g0 e0 h0aabde0d
+mode0 golden call 120 f0 act0 n1 mask0 mode34 em0 | r0 s0 x0250 y0808 dc0 b102 g0 e0 h99a13fd4
+mode0 golden call 300 f0 act0 n1 mask0 mode34 em0 | r0 s0 x0310 y0bfa d80 b102 g0 e0 h95f7df03
+mode0 end f0 act0 n1 mask0 mode48 em0 | r0 s0 x0500 y0c00 dc8 b101 g0 e0 ha7db52ad | status 0000 done 0 reason 0 any 0 zone_act 0001 cp 80
+mode1 layout mode 1 runners 1 active 0
+mode1 golden call 60 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y1000 d00 b3 g0 e0 he7bb7068
+mode1 golden call 120 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y1000 d00 b3 g0 e0 hae5f81ac
+mode1 golden call 300 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y06b8 d00 b3 g0 e0 h61494a07
+mode1 golden call 600 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 yf610 d00 b0 g1 e2 hd0a3e2ee
+mode1 end f0 act0 n1 mask0 mode48 em1 | r0 s0 x1000 yf000 d08 b0 g1 e4 he7d055c0 | status 0000 done 0 reason 0 any 0 zone_act 0001 cp 80
+mode2 layout mode 2 runners 1 active 0
+mode2 golden call 60 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y1000 d00 b1 g0 e0 hd687261f
+mode2 golden call 120 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y1000 d00 b1 g0 e0 hc0544cd3
+mode2 golden call 300 f0 act0 n1 mask0 mode34 em0 | r0 s0 x1000 y09b8 d00 b1 g1 e0 hae63f22c
+mode2 end f0 act0 n1 mask0 mode48 em0 | r0 s0 x1000 y0900 d08 b1 g1 e0 h3f5ef803 | status 0000 done 0 reason 0 any 0 zone_act 0001 cp 80

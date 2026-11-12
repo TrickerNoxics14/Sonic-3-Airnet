@@ -23,6 +23,9 @@ constant u16 SpecialStage.Tails.targetInVRAM		= 0xfd60
 //# address-hook(0x0081c6) end(0x00858e)
 function void SpecialStage()
 {
+	// Online with several players: everybody runs through the stage at the same time (see bluespheres_multi.lemon); 0 = the stock stage
+	u8 multiMask = BSMulti.decide()
+
 #if STANDALONE
 	playMusic(MUSIC_CTRL_FADEOUT)
 #else
@@ -136,9 +139,9 @@ function void SpecialStage()
 	level.height.bitmask = 0xffff
 
 	u32[0xffffb000] = 0x008faa			// Main Character
-	if (getNumPlayers() >= 2)
+	if (getNumPlayers() >= 2 && multiMask == 0)
 	{
-		u32[0xffffb04a] = 0x009212		// Second character Tails
+		u32[0xffffb04a] = 0x009212		// Second character Tails (in the multi-runner stage every player has his own runner instead)
 	}
 	u32[0xffffb094] = 0x008df8			// HUD Icons next to ring and spheres counters
 	u32[0xffffb0de] = 0x008e40			// "Get Blue Spheres" text
@@ -157,6 +160,11 @@ function void SpecialStage()
 	waitForNextFrame()
 
 	bluespheres.stage_exit_animation = 0
+	if (multiMask != 0)
+	{
+		// Every runner starts as a copy of this stage
+		BSMulti.initStage(multiMask)
+	}
 	VDP.Config.setRenderingModeConfiguration(true)		// Enable shadow/highlight palette mode
 
 	global.demo_countdown = 1800	// 30 seconds
@@ -176,7 +184,20 @@ function void SpecialStage()
 	VDP.Config.setActiveDisplay(true)
 	BlueSpheres.FadeIn()
 
-	while (true)
+	bool multiRan = false
+	if (bsmulti.active != 0)
+	{
+		BSMulti.mainLoop()
+		multiRan = true
+		if (global.game_mode == 0x0c)
+		{
+			// Restart (the stock loop leaves the same way)
+			BSMulti.cleanup()
+			return
+		}
+	}
+
+	while (!multiRan)
 	{
 		UpdateGamePause()
 		global.frame_state = 0x1c
@@ -234,7 +255,13 @@ function void SpecialStage()
 	palette_fade.range = 0x003f
 	global.fadeout_countdown = 0
 
-	while (true)
+	if (multiRan)
+	{
+		BSMulti.exitLoop()
+		BSMulti.cleanup()
+	}
+
+	while (!multiRan)
 	{
 		global.frame_state = 0x1c
 
@@ -661,7 +688,7 @@ function void fn008e94()
 			// Change text to "Perfect" in case it's needed afterwards
 			objA0.update_address = 0x008eec
 			objA0.animation.sprite += 2
-			if (bluespheres.movement_speed == 0)
+			if (bluespheres.movement_speed == 0 && bsmulti.active == 0)		// In multi mode, BSMulti starts the runners
 			{
 				// Player did not press [up], but it's time to start nonetheless
 				bluespheres.going_forward = 1
@@ -686,6 +713,9 @@ function void fn008e94()
 //# address-hook(0x008eec) end(0x008f1e)
 function void fn008eec()
 {
+	if (bsmulti.active != 0)
+		return		// What this shows depends on the runner, so it is not part of the shared game state (BSMulti draws its own "ALL RINGS" note)
+
 	if (bluespheres.rings_remaining != 0)
 		return
 
@@ -776,6 +806,20 @@ function void fn008faa()
 //# address-hook(0x00903e) end(0x00919e)
 function void fn00903e()
 {
+	if (bsmulti.active != 0)
+	{
+		// Multi-runner stage: BSMulti simulates every runner in its own turn and draws the viewed one in its render phase
+		return
+	}
+
+	BlueSpheres.SimulatePlayer()
+	BlueSpheres.DrawPlayer()
+}
+
+
+// The part of the player update that moves the runner and changes the game state (A0 = player object)
+function void BlueSpheres.SimulatePlayer()
+{
 	if (bluespheres.speedup_countdown != 0)
 	{
 		--bluespheres.speedup_countdown
@@ -792,7 +836,8 @@ function void fn00903e()
 				//  -> The music speed steps are: normal speed, +1/16, +1/12, +1/8, +1/4
 				//  -> Each for 30 seconds (or 45 seconds for generated stages)
 				D0.u8 = 0x48 - (bluespheres.current_gamespeed >> 8) * 2
-				changeMusicTempo(D0.u8)
+				if (BlueSpheres.audioEnabled())
+					changeMusicTempo(D0.u8)
 			}
 		}
 	}
@@ -842,7 +887,7 @@ function void fn00903e()
 			u32[A0 + 0x40] = 0xfff00000
 			bluespheres.jumping_flags.player1 = 0x80
 			bluespheres.next_direction = 0
-			playSound(SFX_JUMP)
+			BlueSpheres.sfx(SFX_JUMP)
 		}
 
 		if (bluespheres.jumping_flags.player1 & 0x80)
@@ -862,7 +907,12 @@ function void fn00903e()
 			u16[A0 + 0x36] = D0.u16
 		}
 	}
+}
 
+
+// The part of the player update that only draws the runner (A0 = player object)
+function void BlueSpheres.DrawPlayer()
+{
 	fn00950c()
 	fn00953e()
 	DrawObject()
@@ -1134,7 +1184,10 @@ function void fn009488()
 function void BlueSpheres.RenderCharacterSprites()
 {
 	A3 = 0x0094fc
-	for (u8 i = 0; i < getNumPlayers(); ++i)
+	u8 numCharacters = getNumPlayers()
+	if (bsmulti.active != 0)
+		numCharacters = 1		// Every player has his own runner, drawn as the main character
+	for (u8 i = 0; i < numCharacters; ++i)
 	{
 		u16[A6]   = u16[A3]
 		 u8[A6+2] =  u8[A3+2]
@@ -1351,21 +1404,29 @@ function void fn00972e()
 		D0.u16 = (bluespheres.position.x | bluespheres.position.y) & 0xe0
 		if (D0.u16 == 0 && bluespheres.stage_exit_animation == 0)
 		{
-			// Game over
-			bluespheres.stage_exit_animation = 1
-			global.game_mode = (bluespheres.minigame_mode == 0) ? 0x48 : 0x2c		// Special Stage results/Blue Sphere game menu
-			if (global.stage_type != 0)
+			if (bsmulti.active != 0)
 			{
-				global.zone_act = level.backup.zone_act
-				checkpoint.number |= 0x80
+				// Several runners: this runner is out, the stage goes on for the others (BSMulti decides when it ends)
+				BSMulti.onRunnerFailed()
 			}
-			playSound(0x6a)
+			else
+			{
+				// Game over
+				bluespheres.stage_exit_animation = 1
+				global.game_mode = (bluespheres.minigame_mode == 0) ? 0x48 : 0x2c		// Special Stage results/Blue Sphere game menu
+				if (global.stage_type != 0)
+				{
+					global.zone_act = level.backup.zone_act
+					checkpoint.number |= 0x80
+				}
+				playSound(0x6a)
 
-			#if STANDALONE
-				// Correct grid position to avoid jittering of the sphere sprites during the fade-out (noticable on the red sphere just touched)
-				bluespheres.position.x = (bluespheres.position.x + 0x80) & 0xff00
-				bluespheres.position.y = (bluespheres.position.y + 0x80) & 0xff00
-			#endif
+				#if STANDALONE
+					// Correct grid position to avoid jittering of the sphere sprites during the fade-out (noticable on the red sphere just touched)
+					bluespheres.position.x = (bluespheres.position.x + 0x80) & 0xff00
+					bluespheres.position.y = (bluespheres.position.y + 0x80) & 0xff00
+				#endif
+			}
 		}
 	}
 	else if (D2.u8 == 2)
@@ -1377,7 +1438,7 @@ function void fn00972e()
 			u8[A2] = 2
 			u32[A2 + 0x04] = A1
 		}
-		playSound(0x65)
+		BlueSpheres.sfx(0x65)
 	}
 	else if (D2.u8 == 3)
 	{
@@ -1387,7 +1448,7 @@ function void fn00972e()
 			bluespheres.object_standing_on = D1.u16
 			bluespheres.hitting_bumper = 1
 			bluespheres.going_forward = 0
-			playSound(0xaa)
+			BlueSpheres.sfx(0xaa)
 		}
 	}
 	else if (D2.u8 == 4)
@@ -1406,7 +1467,7 @@ function void fn00972e()
 			--bluespheres.rings_remaining
 			if (bluespheres.rings_remaining == 0)
 			{
-				playMusic(0x68)
+				BlueSpheres.music(0x68)
 			}
 		}
 
@@ -1419,15 +1480,18 @@ function void fn00972e()
 			if (bluespheres.rings_collected >= 50 && (bluespheres.rings_flags & 0x01) == 0)
 			{
 				bluespheres.rings_flags |= 0x01
-				++continues_counter
-				playMusic(0xac)
-
-			#if STANDALONE
-				if (continues_counter >= 5)
+				if (BlueSpheres.appliesToGame())
 				{
-					Game.setAchievementComplete(ACHIEVEMENT_CONTINUES)
+					++continues_counter
+					BlueSpheres.music(0xac)
+
+				#if STANDALONE
+					if (continues_counter >= 5)
+					{
+						Game.setAchievementComplete(ACHIEVEMENT_CONTINUES)
+					}
+				#endif
 				}
-			#endif
 				return
 			}
 
@@ -1445,7 +1509,7 @@ function void fn00972e()
 					grantExtraLife = true
 				}
 
-				if (grantExtraLife)
+				if (grantExtraLife && BlueSpheres.appliesToGame())
 				{
 				#if STANDALONE
 					if (!Game.getSetting(SETTING_INFINITE_LIVES))
@@ -1461,7 +1525,7 @@ function void fn00972e()
 			}
 		}
 
-		playSound(soundId)
+		BlueSpheres.sfx(soundId)
 	}
 	else if (D2.u8 == 5)
 	{
@@ -1473,7 +1537,7 @@ function void fn00972e()
 			{
 				u32[A0 + 0x40] = 0xffe80000
 				bluespheres.jumping_flags.player1 = 0x81
-				playSound(SFX_SPRING)
+				BlueSpheres.sfx(SFX_SPRING)
 			}
 		}
 	}
@@ -1678,7 +1742,7 @@ function void fn009b62()
 	if (bluespheres.stage_exit_state == 1)
 	{
 	#if STANDALONE
-		if (bluespheres.rings_remaining == 0)
+		if (bluespheres.rings_remaining == 0 && BlueSpheres.isOwnRun())
 		{
 			Game.setAchievementComplete(ACHIEVEMENT_BS_PERFECT)
 		}
@@ -1689,9 +1753,10 @@ function void fn009b62()
 		{
 			if (bluespheres.lifted_height == 0)
 			{
-				playMusic(0x66)
+				BlueSpheres.music(0x66)
 			#if STANDALONE
-				Input.setControllerRumble(-1, 0.4f, 1.0f, 400)
+				if (BlueSpheres.isOwnRun())
+					Input.setControllerRumble(-1, 0.4f, 1.0f, 400)
 			#endif
 			}
 			bluespheres.lifted_height += (bluespheres.lifted_height >= 0x7d) ? 4 : (bluespheres.lifted_height >= 0x3e) ? 3 : 2
@@ -1716,23 +1781,27 @@ function void fn009b62()
 		u16[0xffffe428] = 0x0800
 		bluespheres.emerald_jingle_countdown = 0x78
 
-		D0 = (bluespheres.minigame_mode == 0) ? global.next_bluespheres : u8[0xffffffa4]
-		A1 = 0x009d1e + (D0.s16 & 0x07) * 8
-		copyMemory(0xfffffc64, A1, 0x08)
+		if (bsmulti.active == 0)
+		{
+			D0 = (bluespheres.minigame_mode == 0) ? global.next_bluespheres : u8[0xffffffa4]
+			A1 = 0x009d1e + (D0.s16 & 0x07) * 8
+			copyMemory(0xfffffc64, A1, 0x08)
 
-		A1 = (global.sk_bluespheres) ? 0x0ae99e : 0x0ae3ec
-		Kosinski.addToDMAQueue(A1, 0xb4e0)		// Emerald sprites
+			A1 = (global.sk_bluespheres) ? 0x0ae99e : 0x0ae3ec
+			Kosinski.addToDMAQueue(A1, 0xb4e0)		// Emerald sprites
+		}
+		// In the multi-runner stage the emerald palette and sprites are set by BSMulti while that runner is shown
 	}
 	else if (bluespheres.stage_exit_state == 2)
 	{
-		if (kosinski.waiting_modules == 0)
+		if (bsmulti.active != 0 || kosinski.waiting_modules == 0)
 		{
 			bluespheres.lifted_height = 0
 			--bluespheres.emerald_jingle_countdown
 			if (bluespheres.emerald_jingle_countdown == 0)
 			{
 				++bluespheres.stage_exit_state
-				playMusic(MUSIC_CHAOSEMERALD)
+				BlueSpheres.music(MUSIC_CHAOSEMERALD)
 			}
 		}
 	}
@@ -1746,6 +1815,14 @@ function void fn009b62()
 			D0.u16 = (bluespheres.position.x | bluespheres.position.y) & 0xe0
 			if (D0.u16 == 0)
 			{
+				if (bsmulti.active != 0)
+				{
+					// Several runners: this runner completed the stage; the emerald is awarded once when the stage ends (BSMulti.finish)
+					++bluespheres.stage_exit_state
+					BSMulti.onRunnerCompleted()
+					return
+				}
+
 				if (bluespheres.minigame_mode == 0)
 				{
 					// Update either global.chaos_emeralds or global.super_emeralds
@@ -1785,6 +1862,14 @@ function void fn009b62()
 //# address-hook(0x009d5e) end(0x009d9c)
 function void fn009d5e()
 {
+	BlueSpheres.UpdatePlaneScroll()
+	BlueSpheres.SetScrollWords()
+}
+
+
+// The part that belongs to the run (the multi-runner stage does it for each runner)
+function void BlueSpheres.UpdatePlaneScroll()
+{
 	if (bluespheres.direction & 0x40)
 		D0.u16 = bluespheres.position.x - bluespheres.position.x.former
 	else
@@ -1797,13 +1882,19 @@ function void fn009d5e()
 	D0.s16 >>= 2
 	scrolloffset.y.planeB += D0.u16
 
+	bluespheres.position.x.former = bluespheres.position.x
+	bluespheres.position.y.former = bluespheres.position.y
+}
+
+
+// The part that only sets up the screen
+function void BlueSpheres.SetScrollWords()
+{
 #if STANDALONE
 	// Change scroll offsets in order to move planes to the right
 	u16[0xffffe000] = getScreenExtend()
 #endif
 	u16[0xffffe002] = bluespheres.direction * 4
-	bluespheres.position.x.former = bluespheres.position.x
-	bluespheres.position.y.former = bluespheres.position.y
 }
 
 
@@ -2039,7 +2130,7 @@ function void fn009ebc()
 		D1.u16 -= 2
 	}
 
-	playSound(SFX_SPILLRINGS)
+	BlueSpheres.sfx(SFX_SPILLRINGS)
 	D1 = 1
 	_setZeroFlagByValue(1)
 }
@@ -2713,6 +2804,12 @@ function void BlueSpheres.FadeIn()
 		// Draw our own widescreen version of the background
 		//  -> For this to work, we need to update the sprites as well
 		UpdateGameObjects()
+		if (bsmulti.active != 0)
+		{
+			// Multi-runner stage: the player object does not draw itself during the update, every runner starts alike
+			A0 = 0xffffb000
+			BlueSpheres.DrawPlayer()
+		}
 		RenderSprites()
 
 		if (global.game_mode != 0x30)	// Not in results screen of Blue Spheres mode
@@ -2805,11 +2902,11 @@ function void BlueSpheres.renderCustomCharacterShadows()
 {
 	if (Game.getSetting(SETTING_BS_VISUAL_STYLE) & 0x02)
 	{
-		Renderer.drawSprite(getNumPlayers() < 2 ? "bluespheres_shadow_1P_smooth" : "bluespheres_shadow_2P_smooth", 143 + getScreenExtend(), 149, 0x00, 0, 0x3100) 	// Slightly reposition drop shadows to match the original game, #contributed by mrgrassman14
+		Renderer.drawSprite((getNumPlayers() < 2 || bsmulti.active != 0) ? "bluespheres_shadow_1P_smooth" : "bluespheres_shadow_2P_smooth", 143 + getScreenExtend(), 149, 0x00, 0, 0x3100) 	// Slightly reposition drop shadows to match the original game, #contributed by mrgrassman14
 	}
 	else
 	{
-		Renderer.drawSprite(getNumPlayers() < 2 ? "bluespheres_shadow_1P_pixel" : "bluespheres_shadow_2P_pixel", 143 + getScreenExtend(), 149, 0x00, 0, 0x3100) 	// Slightly reposition drop shadows to match the original game, #contributed by mrgrassman14
+		Renderer.drawSprite((getNumPlayers() < 2 || bsmulti.active != 0) ? "bluespheres_shadow_1P_pixel" : "bluespheres_shadow_2P_pixel", 143 + getScreenExtend(), 149, 0x00, 0, 0x3100) 	// Slightly reposition drop shadows to match the original game, #contributed by mrgrassman14
 	}
 }
 

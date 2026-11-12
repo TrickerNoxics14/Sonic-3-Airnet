@@ -71,6 +71,31 @@ CHOOSING YOUR CHARACTER
   before); with two players each keeps its own full screen, also when player 2 was turned into another character. Not tested: player 2
   turned into another character during the intro of Angel Island 1 (the change waits until the intro is over) or in boss fights.
 
+BLUE SPHERE SPECIAL STAGES WITH SEVERAL PLAYERS
+  When the game enters a Blue Sphere special stage (a giant ring with the Chaos Emeralds) in an online game with at least two
+  players, EVERYBODY runs through the stage AT THE SAME TIME. Every player has his own runner on his own copy of the same stage
+  layout (same start position, same spheres), so it is a fair race: everybody collects blue spheres and rings, and each computer
+  shows your own run with the normal Blue Sphere look. A small list in the top left corner shows every player (name, RUN / DONE /
+  OUT / TIME, blue spheres left and rings collected).
+  - Touch a red sphere and you are OUT: you automatically watch the players that are still running. Left / Right switch between
+    them. A player who completed the stage also watches the others until everybody is done.
+  - The stage ends when nobody is running any more. It counts as CLEARED (you get the Chaos Emerald, once) if at least one player
+    completed it, even if the host failed. The host's normal rules for the results screen, continues (50 rings) and extra lives
+    (100 / 200 rings) are kept; the friends get the ring bonus (10 points per ring, 5000 for every ring) as score.
+  - Who takes part: the host, player 2 once he joined (any button), players 3 and 4 once they joined (Start), as in the level
+    before. A friend who is connected but never joined does not run: his computer just watches (Left / Right switch the view).
+  - A player who loses the connection just keeps running with whatever input the game has for him; the time limits below make sure that the stage always ends.
+  Defaults that were chosen (all named constants at the top of level\special\defines_bluespheres.lemon, easy to change):
+    BSMulti.AUTOSTART_FRAMES = 193           the runners start by themselves after about 3 seconds (the stock text time)
+    BSMulti.GRACE_AFTER_FIRST_FINISH = 1800  the others may go on for 30 seconds after the first player completed the stage
+    BSMulti.MAX_STAGE_FRAMES = 25200         7 minutes: after that everybody who is still running is timed out
+    BSMulti.CYCLE_PREV / CYCLE_NEXT          Left / Right for the spectator
+    BSMulti.RING_BONUS_FACTOR = 10, PERFECT_BONUS = 5000   friends' score from rings
+  Limits (honest status): every runner is drawn as the host's main character (a friend who picked another character is not shown
+  with his own sprites in the stage); only the host can touch the giant ring and pause; the other bonus stages (Slot Machine,
+  Glowing Spheres, Gumball) and the Hidden Palace emerald cave are single character stages and are not changed. A friend who joins
+  while a stage is running just watches. Tested by automated checks on one computer (stage J), not between two homes.
+
 IN THE LOBBY
   Names:    NAME sets the name the others see (12 letters, plain characters only, default "Player"). It is saved in
             settings.json (section Online, PlayerName). Everybody in the lobby, and the labels below the screens

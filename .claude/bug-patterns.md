@@ -418,3 +418,52 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Seed: run_checks.ps1 mirrors the repository's DropInCoop over %APPDATA%\Sonic3AIR\mods\DropInCoop at every run (needed: the engine only installs bundled mods from its working directory), without keeping what was there.
 - Fix: if the installed copy differs from the source (SHA-256 of every file), it is copied to %APPDATA%\Sonic3AIR\mods_backup\DropInCoop_<time> first (newest 3 kept; outside the mods folder so the game does not load it).
 - Lesson: a check that "installs the thing under test" into the user's real folders must back up what it replaces.
+
+## 2026-11-12 · lemon-oneline-if · lemon
+- Seed: checks/harness/BSMultiHarness/scripts/main.lemon:196 and :329 - 'if (cond) statement' on one line stops the game with a Script compilation error
+- Broken assumption: Lemon accepts the statement of an if on the same line, like C does
+- Search: `powershell -NoProfile -File checks/lint_lemon_oneline_if.ps1`
+- Siblings: BSMultiHarness main.lemon:196-198 fixed (three if (...) pad | = ... lines) · BSMultiHarness main.lemon:329 fixed (if (...) Checks.report(...)) · all 3034 other .lemon files in the repo not a bug (scan finds no other same-line if)
+- Guard: checks/lint_lemon_oneline_if.ps1 with -SelfTest (red on the old lines, green on the fix)
+
+## 2026-11-12 · stale-compiled-script-cache · powershell/engine
+- Seed: sonic3air_online_stable_source/Oxygen/sonic3air/saves/scripts.bin (the engine's compiled script cache) was older than the edited game scripts; the engine loaded it because only its core-module hash is compared, so a check "against the changed scripts" ran against the OLD ones with no message (first symptom: the harness reported "Unknown function name 'BSMulti.readRosterMask'" although the function was in the source; the offline "unchanged" comparison had passed trivially before that)
+- Broken assumption: edited game scripts are used by the next game start
+- Search: `rg -n "scripts.bin|loadBaseScriptFromBinary" sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/simulation/LemonScriptProgram.cpp checks/*.ps1`
+- Fix: run_checks.ps1 removes saves\scripts.bin when a game script is newer than it (the engine writes it again after compiling from source).
+- Guard: the removal message in the run output; J9 compares the offline run with the golden recording AFTER the cache was rebuilt from the new scripts (16 lines identical).
+- Lesson: when a check proves "no change", first prove that the changed code was actually the code that ran.
+
+## 2026-11-12 · lemon-ternary-mixed-constant-address · lemon
+- Seed: checks/harness/BSMultiHarness/scripts/main.lemon BSH.stateBase: `return BSH.active() ? (BSH.BLOCKS + runner * BSH.STRIDE + 0x500) : 0xffffe420` returned the wrong address (reads and writes both went to the block address although the condition was false), so layout edits never reached the running stage
+- Broken assumption: a ternary with a constant expression and a literal gives the chosen operand with the type of the other
+- Search: `rg -n "\? \(?[A-Za-z.]+ \+ .* : 0x" --glob "*.lemon"` and every ternary that returns an address
+- Fix: plain if/else with a typed local (production bluespheres_multi.lemon uses no ternary for addresses or u8 values)
+- Guard: the golden comparison J9 and the multi-runner checks read the layout back from the same RAM that the game uses.
+
+## 2026-11-12 · stock-memory-used-as-state-flag · lemon
+- Seed: first design of BSMulti read "active" from the work RAM header at 0xffffe5c0, which in the stock stage holds the Tails follower's position history (nonzero) so the stock path would have looked "active"
+- Broken assumption: a RAM area that is unused in the new mode is zero in the old mode
+- Search: `rg -n "0xffffe5[0-9a-f][0-9a-f]" --glob "*.lemon"`
+- Fix: the "active" flag lives in the shared memory (zero in the stock game), the RAM header is read only while that flag is 1; the harness reads the same flag.
+- Guard: J9 (offline run state equals the recording) and the unit check for the memory layout.
+
+## 2026-11-12 · powershell-wrapped-array-in-pipeline · powershell
+- Seed: checks/run_checks.ps1 Get-JReports returns `,@(...)`; `Get-JReports ... | ForEach-Object` then saw ONE object (the whole array), so a regex matched only the first report line and the spectator check reported "views: 0" although the log had views 0 and 1
+- Search: `rg -n "Get-(K|J)Reports .*\|" checks/run_checks.ps1`
+- Fix: iterate with foreach ($line in (Get-JReports ...)) .
+
+## 2026-11-12 · lemon-string-256-limit · lemon
+- Seed: checks/harness/BSMultiHarness/scripts/main.lemon BSH.stateLine()/"bs end" report: a state of four runners built as one stringformat result stopped the game with "Too long string" (lemon/utility/FastStringStream.h: every stringformat result is limited to 0x100 = 256 characters)
+- Broken assumption: a script string can be as long as needed (here: prefix plus 4 runner entries of about 55 characters each joined with " | ", plus a tail)
+- Search: `rg -n "stringformat\(\"%s" --glob "*.lemon" checks DropInCoop` (every stringformat that feeds a string back into itself in a loop or joins variable-length parts)
+- Fix: BSH.reportState emits one report line per runner (every part starts with "f<frame> ") and run_checks.ps1 puts the parts of a frame together; with one runner the line is unchanged (golden format). BSH.hexState (unbounded) removed; the probe list of differing bytes is capped at 12 entries.
+- Guard: check J*l requires every report text to be at most 250 characters, and "Too long string" is in the script error pattern of stage J.
+
+## 2026-11-12 · render-phase-ram-write-not-undone · lemon
+- Seed: sonic3air_online_stable_source/Oxygen/sonic3air/scripts/level/special/bluespheres_multi.lemon BSMulti.undoAddress - the render of a runner that shows the emerald art switched it back with Nemesis.loadDataToVRAM, which writes its decompression buffer 0xffffaa00 and stack leftovers 0xfffffdf6 into the hashed work RAM, only on the computer watching that runner: false desync repairs (3 in a 4 player run)
+- Broken assumption: everything the render phase writes into work RAM is in the undo set; the stage start probe (one frame, ring art only) proved that
+- Search: `rg -n "Nemesis\.|Kosinski\.|updateSpritePattern|Enigma\." sonic3air_online_stable_source/Oxygen/sonic3air/scripts/level/special/bluespheres_multi.lemon`
+- Siblings: bluespheres_multi.lemon BSMulti.updateEmeraldArt Nemesis path fixed (undo ranges 0xffffaa00 len 0x200 and the stack 0xfffffd00 len 0x100) · first fix used 0xffffaa00 len 0x600, which also covered the sprite lists at 0xffffac00: the runner vanished from the picture (seen in the screenshot) fixed, range cut to 0x200 · Kosinski.decompress in updateEmeraldArt not a bug (writes only the shared scratch area, probe at call 560/640 shows 0 bytes)
+- Guard: harness probe now runs at calls 100, 470, 560, 640 and also renders back to runner 0 (art switch both ways); unit check 'bs unit undo' (no undone range overlaps the sprite lists); check J3m counts runner pixels in the picture
+- Lesson: a probe must be run in every phase of the thing that is rendered (here the emerald sequence), not only at the start; and an undo range must be as small as the measured write

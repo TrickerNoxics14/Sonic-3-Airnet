@@ -1,0 +1,572 @@
+//# script-feature-level(2)
+
+// Stage J of the checks: the Blue Sphere special stage with several online players (and the same stage offline, as a regression guard).
+//
+// The harness enters the stage the way the giant ring does, replaces the stage layout of every runner by a known one, drives every runner with scripted
+// pads (offline/host-only: control.pad1) and reports on every computer what the runners did. The reports of all computers must be identical; the runner
+// of the checks compares them. Nothing is decided here.
+//
+// MODE: 0 = the stock layout of the ROM, scripted pad (golden, offline)       1 = synthetic layout, the runner clears the stage (golden)
+//       2 = synthetic layout, the runner touches a red sphere (golden)        3 = four runners: r0 fails, r1 clears, r2 never ends (timeout), r3 fails later
+//       4 = every runner fails (different times)                              5 = two runners, one clears and one fails, further friends never join
+//       6 = like 3 but the view of the failed player is cycled with scripted left/right presses
+//
+// The harness reads the work RAM header of the multi runner code directly (0xffffe5c0..), which stays zero in the stock game.
+
+constant u8 BSH.MODE = __MODE__
+constant u8 BSH.PLAYERS = __EXPECTED_PLAYERS__
+constant u8 BSH.OFFLINE = __OFFLINE__		// 1: this process starts a level by itself (no lobby)
+
+constant u32 BSH.HEADER = 0xffffe5c0
+constant u32 BSH.BLOCKS = 0x8f8000
+constant u32 BSH.STRIDE = 0x600
+
+global u32 bsh.frame
+global u32 bsh.level_frames
+global u32 bsh.stage_calls
+global u32 bsh.ready_frame
+global u8 bsh.entered
+global u8 bsh.grid_done
+global u8 bsh.stage_seen
+global u8 bsh.end_reported
+global u8 bsh.back_reported
+global u32 bsh.end_frame
+global u32 bsh.back_frames
+global u8 bsh.cap_run
+global u8 bsh.cap_spec
+global u8 bsh.cap_result
+global u32 bsh.spec_frames
+
+function void scriptMainEntryPoint()
+{
+	if (BSH.OFFLINE != 0)
+	{
+		global.zone_act = 0x0001
+		levelselect.characters = 0
+		System.setupCallFrame("EntryFunctions.actSelect")
+	}
+	else
+	{
+		base.scriptMainEntryPoint()
+	}
+}
+
+function bool BSH.active()
+{
+	return u8[0x8f9f08] == 1
+}
+
+function u8 BSH.h8(u32 offset)
+{
+	u8 value = 0
+	if (BSH.active())
+	{
+		value = u8[BSH.HEADER + offset]
+	}
+	return value
+}
+
+function u32 BSH.h32(u32 offset)
+{
+	u32 value = 0
+	if (BSH.active())
+	{
+		value = u32[BSH.HEADER + offset]
+	}
+	return value
+}
+
+function u32 BSH.stateBase(u8 runner)
+{
+	u32 base = 0xffffe420
+	if (BSH.active())
+	{
+		base = BSH.BLOCKS + u32(runner) * BSH.STRIDE + 0x500
+	}
+	return base
+}
+
+function u32 BSH.gridBase(u8 runner)
+{
+	u32 base = 0xfffff100
+	if (BSH.active())
+	{
+		base = BSH.BLOCKS + u32(runner) * BSH.STRIDE
+	}
+	return base
+}
+
+function u32 BSH.fnv(u32 hash, u32 address, u32 size)
+{
+	for (u32 i = 0; i < size; ++i)
+	{
+		hash = (hash ^ u8[address + i]) * 16777619
+	}
+	return hash
+}
+
+function u32 BSH.runnerHash(u8 runner)
+{
+	u32 hash = 2166136261
+	hash = BSH.fnv(hash, BSH.stateBase(runner), 0x40)
+	hash = BSH.fnv(hash, BSH.gridBase(runner), 0x400)
+	return hash
+}
+
+function u8 BSH.numRunners()
+{
+	u8 count = 1
+	if (BSH.active())
+	{
+		count = BSH.h8(2)
+	}
+	return count
+}
+
+// A layout for one runner. The runner starts in the middle of the field, facing the direction in which the y position counts down.
+//  kind: 1 clear (3 blue, 2 rings, a spring), 2 blue, ring, then red, 3 a ring and a red sphere at redAt, 4 one blue sphere ahead and a ring, 5 open field with a ring and two far blue spheres
+function void BSH.setupRunner(u8 runner, u8 kind, u8 redAt)
+{
+	u32 grid = BSH.gridBase(runner)
+	u32 state = BSH.stateBase(runner)
+	zeroMemory(grid, 0x400)
+	u16[state + 2] = 0x1000		// position.x
+	u16[state + 4] = 0x1000		// position.y
+	u8[state + 6] = 0			// direction
+	u16[state + 0x14] = 0x1000	// position.x.former
+	u16[state + 0x16] = 0x1000
+	u16[state + 8] = 0			// movement_speed
+	u8[state + 0x0a] = 0		// next_direction
+	u8[state + 0x10] = 0		// turning
+	u8[state + 0x11] = 0		// going_forward
+	u8[state + 0x30] = 0		// started_running
+	u8[state + 0x2c] = 0		// stage_exit_state
+
+	u16 blue = 0
+	u16 rings = 0
+	if (kind == 1)
+	{
+		u8[grid + (14 << 5) + 16] = 5
+		u8[grid + (5 << 5) + 16] = 2
+		u8[grid + (3 << 5) + 16] = 4
+		u8[grid + (1 << 5) + 16] = 2
+		u8[grid + (29 << 5) + 16] = 2
+		u8[grid + (27 << 5) + 16] = 4
+		blue = 3
+		rings = 2
+	}
+	else if (kind == 2)
+	{
+		u8[grid + (11 << 5) + 16] = 4
+		u8[grid + (8 << 5) + 16] = 2
+		u8[grid + (9 << 5) + 16] = 1
+		blue = 1
+		rings = 1
+	}
+	else if (kind == 3)
+	{
+		u8[grid + (10 << 5) + 16] = 4
+		u8[grid + (redAt << 5) + 16] = 1
+		u8[grid + (4 << 5) + 18] = 2		// a blue sphere that is never reached
+		blue = 1
+		rings = 1
+	}
+	else if (kind == 4)
+	{
+		u8[grid + (10 << 5) + 16] = 2
+		u8[grid + (8 << 5) + 16] = 4
+		blue = 1
+		rings = 1
+	}
+	else if (kind == 5)
+	{
+		u8[grid + (8 << 5) + 16] = 4
+		u8[grid + (20 << 5) + 20] = 2
+		u8[grid + (21 << 5) + 20] = 2
+		blue = 2
+		rings = 1
+	}
+	u16[state + 0x18] = blue
+	u16[state + 0x1a] = 0
+	u16[state + 0x22] = rings
+	u8[state + 0x1c] = 0xff		// bs_hud_dirty
+	u8[state + 0x1d] = 0x80		// rings_flags: refresh the rings counter
+}
+
+function void BSH.setupLayouts()
+{
+	if (BSH.MODE == 1)
+	{
+		BSH.setupRunner(0, 1, 0)
+	}
+	else if (BSH.MODE == 2)
+	{
+		BSH.setupRunner(0, 2, 0)
+	}
+	else if (BSH.MODE == 3 || BSH.MODE == 6)
+	{
+		BSH.setupRunner(0, 3, 12)
+		BSH.setupRunner(1, 4, 0)
+		BSH.setupRunner(2, 5, 0)
+		BSH.setupRunner(3, 3, 2)
+	}
+	else if (BSH.MODE == 4)
+	{
+		BSH.setupRunner(0, 3, 12)
+		BSH.setupRunner(1, 3, 8)
+		BSH.setupRunner(2, 3, 4)
+		BSH.setupRunner(3, 3, 2)
+	}
+	else if (BSH.MODE == 5)
+	{
+		BSH.setupRunner(0, 3, 12)
+		BSH.setupRunner(1, 4, 0)
+	}
+}
+
+function u16 BSH.scriptedPad(u32 frame)
+{
+	// MODE 0 only: up always, now and then a turn or a jump
+	u16 pad = CONTROL_UP
+	if (frame % 97 == 0)
+	{
+		pad |= CONTROL_LEFT
+	}
+	if (frame % 131 == 0)
+	{
+		pad |= CONTROL_RIGHT
+	}
+	if (frame % 173 == 0)
+	{
+		pad |= CONTROL_A
+	}
+	return pad
+}
+
+// The multi runner code asks for each runner's pad; in the scenarios every runner just runs straight
+function u16 BSMulti.runnerInput(u8 runner, u32 frame, u16 pad)
+{
+	return 0
+}
+
+// The player that watches (own runner out of the game): scripted presses in mode 6 so that the view cycles
+function u16 BSMulti.spectatorInput(u16 pad, u32 frame)
+{
+	if (BSH.MODE == 6)
+	{
+		if (frame % 90 == 0)
+			return ((frame / 90) & 1) ? CONTROL_LEFT : CONTROL_RIGHT
+		return 0
+	}
+	return pad
+}
+
+function string BSH.runnerLine(u8 runner)
+{
+	u32 state = BSH.stateBase(runner)
+	u8 status = BSH.h8(4 + runner)
+	string a = stringformat("r%d s%d x%04x y%04x d%02x", runner, status, u16[state + 2], u16[state + 4], u8[state + 6])
+	string b = stringformat("b%d g%d e%d h%08x", u16[state + 0x18], u16[state + 0x1a], u8[state + 0x2c], BSH.runnerHash(runner))
+	return stringformat("%s %s", a, b)
+}
+
+
+function string BSH.headerLine()
+{
+	return stringformat("f%d act%d n%d mask%d mode%02x em%d", BSH.h32(0x0c), BSH.active() ? 1 : 0, BSH.numRunners(), BSH.h8(1), global.game_mode, global.chaos_emeralds)
+}
+
+// The engine limits every stringformat result to 256 characters ("Too long string"), so a state with several runners is NOT built as one string:
+// with one runner it is one line (the format of the golden recording), with more it is one report line per part, every part starting with "f<frame> ",
+// and the runner of the checks puts the parts of a frame together. Every line stays far below the limit.
+function void BSH.reportState(string name, string lead, string trail)
+{
+	u8 n = BSH.numRunners()
+	if (n <= 1)
+	{
+		string line = stringformat("%s%s | %s", lead, BSH.headerLine(), BSH.runnerLine(0))
+		if (trail != "")
+			line = stringformat("%s | %s", line, trail)
+		Checks.report(name, 1, line)
+		return
+	}
+	u32 frame = BSH.h32(0x0c)
+	Checks.report(name, 1, stringformat("%s%s", lead, BSH.headerLine()))
+	for (u8 r = 0; r < n; ++r)
+	{
+		Checks.report(name, 1, stringformat("f%d %s", frame, BSH.runnerLine(r)))
+	}
+	if (trail != "")
+		Checks.report(name, 1, stringformat("f%d %s", frame, trail))
+}
+
+function string BSH.statuses()
+{
+	string line = ""
+	for (u8 r = 0; r < 4; ++r)
+	{
+		line = stringformat("%s%d", line, BSH.h8(4 + r))
+	}
+	return line
+}
+
+function void BSH.enterStage()
+{
+	bsh.entered = 1
+	Checks.report("bs decide", 1, stringformat("role %d roster %d rolling %d minigame %d", u8[0x8fff00], BSMulti.readRosterMask(), global.rolling_demo, bluespheres.minigame_mode))
+	A0 = 0xffffb000
+	fn01bb7e()
+	fn02d1cc()
+	global.sk_bluespheres = 0
+	global.stage_type = 1
+	global.in_extra_stage = 1
+	global.game_mode = 0x34		// Special Stage
+	Checks.report("bs enter", 1, stringformat("zone_act %04x frame %d players %d joined %d party %d", global.zone_act, bsh.frame, getNumPlayers(), dropin.joined ? 1 : 0, DropIn.partyCount()))
+}
+
+function void BSH.stageHook()
+{
+	++bsh.stage_calls
+	bsh.stage_seen = 1
+	if (BSH.MODE <= 2 || !BSH.active())
+	{
+		// Stock path: the scripted pad drives the one runner
+		if (BSH.MODE == 0)
+		{
+			control.pad1.state = BSH.scriptedPad(bsh.stage_calls)
+			control.pad1.pressed = control.pad1.state
+		}
+		else
+		{
+			control.pad1.state = 0
+			control.pad1.pressed = 0
+		}
+	}
+}
+
+function void UpdateGameObjects()
+{
+	++bsh.frame
+	if (bsh.frame == 1)
+	{
+		option.dropin.players = 4
+		option.dropin.require_join = 1
+		option.dropin.split = 1
+		option.dropin.p2_hurt = 1
+		option.dropin.idle_seconds = 0
+		System.setGlobalVariableValueByName("option.dropin.team_features", 1)
+		System.setGlobalVariableValueByName("option.dropin.team_moves", 1)
+		BSH.unitChecks()
+	}
+
+	bool inStage = (global.game_mode == 0x34)
+	if (inStage)
+		BSH.stageHook()
+
+	base.UpdateGameObjects()
+
+	if (inStage)
+	{
+		if (bsh.stage_calls >= 2 && bsh.grid_done == 0)
+		{
+			bsh.grid_done = 1
+			BSH.setupLayouts()
+			Checks.report("bs layout", 1, stringformat("mode %d runners %d active %d", BSH.MODE, BSH.numRunners(), BSH.active() ? 1 : 0))
+		}
+
+		if (bsh.stage_calls >= 2)
+		{
+			u32 n = bsh.stage_calls
+			bool golden = (BSH.MODE <= 2 || !BSH.active())
+			if (golden && (n == 60 || n == 120 || n == 300 || n == 600 || n == 900 || n == 1500))
+				BSH.reportState("bs golden", stringformat("call %d ", n), "")
+			else if (!golden && n % 30 == 0)
+				BSH.reportState("bs state", "", "")
+		}
+		if ((bsh.stage_calls == 100 || bsh.stage_calls == 470 || bsh.stage_calls == 560 || bsh.stage_calls == 640) && BSH.active())
+		{
+			BSH.diffProbe()
+		}
+		if (bsh.stage_calls == 230 && BSH.active())
+		{
+			string objText = "runner0"
+			for (u32 w = 0; w < 19; ++w)
+				objText = stringformat("%s %x", objText, u32[BSMulti.blockAddress(0) + BSMulti.OFS_OBJECT + w * 4])
+			Checks.report("bs obj", 1, objText)
+		}
+		if (bsh.cap_run == 0 && bsh.stage_calls == 230)
+		{
+			bsh.cap_run = 1
+			Checks.capture("bs-run")
+		}
+		if (BSH.active() && bsh.stage_calls % 60 == 0)
+		{
+			// What this computer shows (not compared between computers)
+			Checks.report("bs view", 1, stringformat("role %d view %d call %d own_status %d", u8[0x8fff00], u8[0x8f9f00], bsh.stage_calls, u8[0x8fff00] >= 1 && u8[0x8fff00] <= 4 ? BSH.h8(3 + u8[0x8fff00]) : 9))
+		}
+		if (BSH.active() && bsh.cap_spec == 0 && u8[0x8fff00] >= 1 && u8[0x8fff00] <= 4)
+		{
+			u8 ownStatus = BSH.h8(3 + u8[0x8fff00])
+			if (ownStatus == 2)
+			{
+				++bsh.spec_frames
+				if (bsh.spec_frames == 100)
+				{
+					bsh.cap_spec = 1
+					Checks.capture("bs-spectate")
+				}
+			}
+		}
+	}
+	else if (global.game_mode == 0x48 && bsh.stage_seen != 0)
+	{
+		// The fade out of the stage and the results screen
+		if (bsh.end_reported == 0)
+		{
+			bsh.end_reported = 1
+			bsh.end_frame = bsh.frame
+			string tail = stringformat("status %s done %d reason %d any %d", BSH.statuses(), BSH.h32(0x14), BSH.h8(9), BSH.h8(8))
+			BSH.reportState("bs end", "", stringformat("%s zone_act %04x cp %02x", tail, global.zone_act, checkpoint.number))
+		}
+		else if (bsh.cap_result == 0 && bsh.frame == bsh.end_frame + 200)
+		{
+			bsh.cap_result = 1
+			Checks.capture("bs-results")
+		}
+	}
+	else if (global.game_mode == 0x0c)
+	{
+		if (bsh.entered == 0)
+		{
+			++bsh.level_frames
+			bool everybodyIn = (BSH.PLAYERS <= 1) || (DropIn.partyCount() == BSH.PLAYERS && dropin.joined)
+			if (global.level_started > 0 && everybodyIn)
+			{
+				if (bsh.ready_frame == 0)
+					bsh.ready_frame = bsh.level_frames
+				if (bsh.level_frames >= bsh.ready_frame + 240)
+					BSH.enterStage()
+			}
+			else if (bsh.level_frames % 900 == 0)
+			{
+				Checks.report("bs waiting", 1, stringformat("started %d joined %d party %d players %d", global.level_started, dropin.joined ? 1 : 0, DropIn.partyCount(), BSH.PLAYERS))
+			}
+		}
+		else if (bsh.end_reported != 0 && bsh.back_reported == 0)
+		{
+			++bsh.back_frames
+			if (bsh.back_frames == 240)
+			{
+				bsh.back_reported = 1
+				string head = stringformat("zone_act %04x mode %02x emeralds %d lives %d", global.zone_act, global.game_mode, global.chaos_emeralds, lives_counter)
+				Checks.report("bs back", 1, stringformat("%s joined %d party %d score2 %d", head, dropin.joined ? 1 : 0, DropIn.partyCount(), player2.score))
+			}
+		}
+	}
+}
+
+
+//-------------------------------------------------------//
+// Unit checks of the pure functions                     //
+//-------------------------------------------------------//
+
+function void BSH.unit(string name, bool ok, string detail)
+{
+	Checks.report(name, ok ? 1 : 0, detail)
+}
+
+function void BSH.unitChecks()
+{
+	// Which runner is watched next (the running ones as bits)
+	BSH.unit("bs unit next1", BSMulti.nextRunning(0, 1, 0x0e) == 1, "from 0 forward, runners 1-3 running")
+	BSH.unit("bs unit next2", BSMulti.nextRunning(1, 1, 0x0a) == 3, "from 1 forward, 1 and 3 running: 3")
+	BSH.unit("bs unit next3", BSMulti.nextRunning(3, 1, 0x03) == 0, "wraps around")
+	BSH.unit("bs unit next4", BSMulti.nextRunning(0, -1, 0x09) == 3, "backwards wraps around")
+	BSH.unit("bs unit next5", BSMulti.nextRunning(2, 1, 0x00) == 2, "nobody running: stays")
+	BSH.unit("bs unit next6", BSMulti.nextRunning(2, -1, 0x05) == 0, "backwards, skips a runner that is not running")
+
+	// When the stage ends: the numbers
+	BSH.unit("bs unit end1", BSMulti.evaluateEnd(0, 10, 0) == 1, "nobody running: over")
+	BSH.unit("bs unit end2", BSMulti.evaluateEnd(2, 100, 0) == 0, "two running, nobody done: goes on")
+	BSH.unit("bs unit end3", BSMulti.evaluateEnd(1, 100 + BSMulti.GRACE_AFTER_FIRST_FINISH - 1, 100) == 0, "one frame before the grace time is over")
+	BSH.unit("bs unit end4", BSMulti.evaluateEnd(1, 100 + BSMulti.GRACE_AFTER_FIRST_FINISH, 100) == 2, "grace time over")
+	BSH.unit("bs unit end5", BSMulti.evaluateEnd(3, BSMulti.MAX_STAGE_FRAMES, 0) == 3, "maximum stage time")
+	BSH.unit("bs unit end6", BSMulti.evaluateEnd(3, BSMulti.MAX_STAGE_FRAMES - 1, 0) == 0, "one frame before the maximum time")
+
+	// Who takes part
+	BSH.unit("bs unit roster1", BSMulti.rosterMaskFromFlags(false, false, false) == 1, "the host alone")
+	BSH.unit("bs unit roster2", BSMulti.rosterMaskFromFlags(true, false, true) == 11, "host, player 2 and 4")
+	BSH.unit("bs unit roster3", BSMulti.countBits(11) == 3 && BSMulti.numRunnersFromMask(5) == 3 && BSMulti.numRunnersFromMask(1) == 1, "counting")
+
+	// The friends' score
+	BSH.unit("bs unit score1", BSMulti.scoreBonus(12, 0) == 5120, "12 rings and all rings: 120 + 5000")
+	BSH.unit("bs unit score2", BSMulti.scoreBonus(12, 3) == 120, "12 rings, 3 left: 120")
+
+	// The design defaults (a change of one of them has to be a deliberate decision)
+	BSH.unit("bs unit constants", BSMulti.GRACE_AFTER_FIRST_FINISH == 1800 && BSMulti.MAX_STAGE_FRAMES == 25200 && BSMulti.AUTOSTART_FRAMES == 193 && BSMulti.MAX_RUNNERS == 4, "30 s grace, 7 min maximum, start after 193 frames, 4 runners")
+	bool undoSafe = true
+	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
+	{
+		u32 start = BSMulti.undoAddress(i)
+		u32 end = start + BSMulti.undoLength(i)
+		if (start < 0xffffb000 && end > 0xffffac00)		// The lists of the objects to draw: the render phase empties them, restoring them makes the runner vanish (found with the first picture of a running stage)
+			undoSafe = false
+		if (start < 0xffff0000)
+			undoSafe = false
+	}
+	BSH.unit("bs unit undo", undoSafe, "no undone area overlaps the sprite lists at 0xffffac00..0xffffafff")
+	BSH.unit("bs unit memory", BSMulti.BASE + 4 * BSMulti.STRIDE <= BSMulti.SCRATCH_UNDO && BSMulti.OFS_PLANEB + 2 <= BSMulti.STRIDE && BSMulti.OFS_OBJECT + 0x4a <= BSMulti.OFS_PLANEB, "the four runner blocks fit in front of the scratch area")
+}
+
+
+//-------------------------------------------------------//
+// The view probe: does the render phase write anything into the RAM that depends on the viewed runner? //
+//-------------------------------------------------------//
+
+// Renders runner 0 and runner v from the same RAM and compares the whole work RAM afterwards, ignoring the areas that BSMulti puts back by design.
+// A difference outside of them would be a difference between computers that watch different runners (and a false desync repair).
+function string BSH.probeView(u8 v)
+{
+	string found = ""
+	u32 count = 0
+	copyMemory(0x880000, 0xffff0000, 0x10000)
+	u8 artBefore = bsmulti.art_state
+	bsmulti.art_state = 0
+	BSMulti.renderScriptPhase(0)
+	copyMemory(0x890000, 0xffff0000, 0x10000)
+	copyMemory(0xffff0000, 0x880000, 0x10000)
+	BSMulti.renderScriptPhase(v)
+	copyMemory(0x8a0000, 0xffff0000, 0x10000)
+	// Then back to runner 0: when v showed the emerald art, this puts the ring art back (the other direction of the art switch)
+	copyMemory(0xffff0000, 0x880000, 0x10000)
+	BSMulti.renderScriptPhase(0)
+	copyMemory(0x8b0000, 0xffff0000, 0x10000)
+	copyMemory(0xffff0000, 0x880000, 0x10000)
+	bsmulti.art_state = artBefore
+	for (u32 i = 0; i < 0x10000; i += 4)
+	{
+		if (u32[0x890000 + i] != u32[0x8a0000 + i] || u32[0x890000 + i] != u32[0x8b0000 + i])
+		{
+			for (u32 k = 0; k < 4; ++k)
+			{
+				if ((u8[0x890000 + i + k] != u8[0x8a0000 + i + k] || u8[0x890000 + i + k] != u8[0x8b0000 + i + k]) && !BSMulti.isUndone(0xffff0000 + i + k))
+				{
+					++count
+					if (count <= 12)
+						found = stringformat("%s %04x", found, 0xffff0000 + i + k)
+				}
+			}
+		}
+	}
+	return stringformat("view %d differs from view 0 outside of the undone areas in %d bytes:%s", v, count, found)
+}
+
+function void BSH.diffProbe()
+{
+	u8 n = BSH.numRunners()
+	for (u8 v = 1; v < n; ++v)
+	{
+		string text = BSH.probeView(v)
+		Checks.report("bs probe", 1, text)
+	}
+}

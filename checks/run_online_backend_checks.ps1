@@ -35,10 +35,10 @@ try {
     if ($packageExitCode -ne 0) { throw "Online package build/guard returned exit code $packageExitCode" }
     $results.Add("PASS online package built from the stable fork and passed content guards (no test-hooks marker shipped)")
 
-    # D join by code, E bad connection, M public matchmaking, N four players, R reconnect, L lobby,
+    # J Blue Sphere stage with every player running at once, D join by code, E bad connection, M public matchmaking, N four players, R reconnect, L lobby,
     # K character choice in the lobby (host, three friends, test extra-slot character, reconnects, stock-only fallback), S join secret (wrong code refused), X failure reasons and Retry, W a lag proxy with 200 ms / jitter / loss, L also the lobby features, Y relay fallback (direct path blocked) and attacks on the relay program, U the unzipped package ignores developer variables
     $runtimeScript = Join-Path $checksDir "run_checks.ps1"
-    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,W,Y,K,U 2>&1
+    $runtimeOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeScript -RuntimeOnly -EngineRoot $stableRoot -Only D,E,M,N,R,L,S,X,W,Y,K,J,U 2>&1
     $runtimeExitCode = $LASTEXITCODE
     $runtimeOutput | ForEach-Object {
         Write-Output $_

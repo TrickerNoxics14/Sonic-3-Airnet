@@ -59,3 +59,13 @@ define timeattack.animSpriteEx	= u16[0x801002]
 
 // 0x818000 .. 0x81807f	-> Vertical scroll offsets buffer, 32 * 2 words (used instead of 0xffffeeea .. 0xffffef39)
 // 0x818080				-> Single flag that is set to 1 if 0x818000 should be used at all
+
+
+// 0x8f8000 .. 0x8fdfff
+// Blue Spheres special stage with several online players ("BSMulti", see level/special/defines_bluespheres.lemon and bluespheres_multi.lemon)
+//  - 0x8f8000 .. 0x8f97ff	-> one block of 0x600 bytes for each of the 4 runners
+//  - 0x8fc000 .. 0x8fcfff	-> copy of the RAM that the render phase changes (undo set)
+//  - 0x8f9f00 .. 0x8f9fff	-> view and flags of this computer
+//  - 0x8fa000 .. 0x8fbfff	-> decompressed emerald art (0x8fd000 .. 0x8fdfff free)
+// 0x8fff00 .. 0x8fffff
+// Online play: role (0x8fff00), character picks (0x8fff50), player labels (0x8fff30)

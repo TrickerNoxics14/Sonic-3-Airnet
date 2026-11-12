@@ -1,0 +1,845 @@
+/*
+	This script file is part of the Sonic 3 A.I.R. script software distribution.
+	Copyright (C) 2017-2026 by Eukaryot
+
+	Published under the GNU GPLv3 open source software license, see license.txt
+	or https://www.gnu.org/licenses/gpl-3.0.en.html
+*/
+
+
+//-------------------------------------------------------//
+// Blue Spheres special stage with several online players //
+//-------------------------------------------------------//
+
+// "BSMulti": when the game enters a special stage in an online session with at least two players, every player runs through the stage at the same time.
+//
+//  - All runs are simulated by every computer, in the same fixed order (runner 0 = host, runner 1 = player 2, ...), inside the one lockstep game. Nothing needs
+//    to be sent: the inputs of all players already reach every computer (Input.getController(slot)). Every runner has its own copy of the same stage layout
+//    and the same start position (see the "runner blocks" in defines_bluespheres.lemon).
+//  - The sync hash covers only the work RAM. What a computer SHOWS differs (every player sees his own run, or the one he is watching), so the render phase
+//    takes a copy of the RAM that it changes ("undo set"), draws the viewed runner, lets V-Int run, and puts the RAM back before the frame ends
+//    (BSMulti.onBeforeYield, called from waitForNextFrame). The simulation never depends on the view.
+//  - A runner that touches a red sphere is out (status "failed"), and its player watches the runners that are still running (spectating).
+//  - The stage ends when no runner is running any more. It counts as cleared if at least one runner completed it.
+//
+// Not active (the stock code path, unchanged) when: offline, the stage is not the plain Blue Sphere special stage, or fewer than two players take part.
+
+
+// Stock hooks, so mods (and the checks) can drive the runners: the pad a runner uses in this frame, and the pad a spectator uses to switch the view
+function u16 BSMulti.runnerInput(u8 runner, u32 frame, u16 pad)
+{
+	return pad
+}
+
+function u16 BSMulti.spectatorInput(u16 pad, u32 frame)
+{
+	return pad
+}
+
+
+//-------------------------------------------------------//
+// Roster                                                //
+//-------------------------------------------------------//
+
+function u8 BSMulti.countBits(u8 mask)
+{
+	u8 count = 0
+	for (u8 i = 0; i < BSMulti.MAX_RUNNERS; ++i)
+	{
+		if ((mask & (1 << i)) != 0)
+			++count
+	}
+	return count
+}
+
+function u8 BSMulti.numRunnersFromMask(u8 mask)
+{
+	u8 count = 0
+	for (u8 i = 0; i < BSMulti.MAX_RUNNERS; ++i)
+	{
+		if ((mask & (1 << i)) != 0)
+			count = i + 1
+	}
+	return count
+}
+
+// Who takes part: the host, player 2 once he joined, players 3 and 4 once they joined (the co-op mod keeps these flags; the stock game gets 0 for them)
+function u8 BSMulti.rosterMaskFromFlags(bool joined2, bool joined3, bool joined4)
+{
+	u8 mask = 1
+	if (joined2)
+		mask |= 2
+	if (joined3)
+		mask |= 4
+	if (joined4)
+		mask |= 8
+	return mask
+}
+
+function u8 BSMulti.readRosterMask()
+{
+	bool joined2 = (System.getGlobalVariableValueByName("dropin.joined") != 0)
+	bool joined3 = (System.getGlobalVariableValueByName("dropin.party_wants3") != 0)
+	bool joined4 = (System.getGlobalVariableValueByName("dropin.party_wants4") != 0)
+	return BSMulti.rosterMaskFromFlags(joined2, joined3, joined4)
+}
+
+// Decides at the start of a special stage. Returns the roster mask, or 0 if the stage runs the stock way.
+function u8 BSMulti.decide()
+{
+	bsmulti.active = 0
+#if GAMEAPP
+	if (u8[0x8fff00] == 0)		// Not online (role byte written by the engine)
+		return 0
+	if (bluespheres.minigame_mode != 0 || global.rolling_demo != 0)
+		return 0
+	u8 mask = BSMulti.readRosterMask()
+	if (BSMulti.countBits(mask) < 2)
+		return 0
+	return mask
+#else
+	return 0
+#endif
+}
+
+
+//-------------------------------------------------------//
+// Runner blocks                                         //
+//-------------------------------------------------------//
+
+function u32 BSMulti.blockAddress(u8 runner)
+{
+	return BSMulti.BASE + u32(runner) * BSMulti.STRIDE
+}
+
+// Copies the runner's own data into the places where the stage code expects it
+function void BSMulti.swapIn(u8 runner)
+{
+	u32 block = BSMulti.blockAddress(runner)
+	copyMemory(BSMulti.LIVE_GRID, block + BSMulti.OFS_GRID, 0x400)
+	copyMemory(BSMulti.LIVE_SLOTS, block + BSMulti.OFS_SLOTS, 0x100)
+	copyMemory(BSMulti.LIVE_STATE, block + BSMulti.OFS_STATE, 0x40)
+	copyMemory(BSMulti.LIVE_OBJECT, block + BSMulti.OFS_OBJECT, 0x4a)
+	u16[BSMulti.LIVE_PLANEB] = u16[block + BSMulti.OFS_PLANEB]
+}
+
+function void BSMulti.swapOut(u8 runner)
+{
+	u32 block = BSMulti.blockAddress(runner)
+	copyMemory(block + BSMulti.OFS_GRID, BSMulti.LIVE_GRID, 0x400)
+	copyMemory(block + BSMulti.OFS_SLOTS, BSMulti.LIVE_SLOTS, 0x100)
+	copyMemory(block + BSMulti.OFS_STATE, BSMulti.LIVE_STATE, 0x40)
+	copyMemory(block + BSMulti.OFS_OBJECT, BSMulti.LIVE_OBJECT, 0x4a)
+	u16[block + BSMulti.OFS_PLANEB] = u16[BSMulti.LIVE_PLANEB]
+}
+
+function u8 BSMulti.status(u8 runner)
+{
+	return u8[BSMulti.HEADER_STATUS + runner]
+}
+
+function bool BSMulti.isRunning(u8 runner)
+{
+	return runner < BSMulti.MAX_RUNNERS && u8[BSMulti.HEADER_STATUS + runner] == BSMulti.STATUS_RUNNING
+}
+
+// Called once, right before the first frame of the stage: the stage is fully set up for runner 0 at this point, every runner starts as a copy of it
+function void BSMulti.initStage(u8 mask)
+{
+	zeroMemory(BSMulti.HEADER, BSMulti.HEADER_SIZE)
+	bsmulti.header.marker = 0x5a
+	bsmulti.roster_mask = mask
+	bsmulti.num_runners = BSMulti.numRunnersFromMask(mask)
+	bsmulti.current = 0xff
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		u8 initialStatus = BSMulti.STATUS_ABSENT
+		if ((mask & (1 << r)) != 0)
+			initialStatus = BSMulti.STATUS_RUNNING
+		u8[BSMulti.HEADER_STATUS + r] = initialStatus
+		BSMulti.swapOut(r)
+	}
+	bsmulti.view = 0
+	bsmulti.view_role = 0xff		// forces BSMulti.pickView to choose again
+	bsmulti.art_state = 0
+	bsmulti.restore_pending = 0
+	bsmulti.active = 1
+	BSMulti.updateChecksums()
+}
+
+// After the stage: the stock results screen reads the runner 0 state, which is what the live memory holds
+function void BSMulti.cleanup()
+{
+	BSMulti.swapIn(0)
+	bsmulti.active = 0
+	bsmulti.restore_pending = 0
+	zeroMemory(BSMulti.HEADER, BSMulti.HEADER_SIZE)
+}
+
+
+//-------------------------------------------------------//
+// Checksums, so that a difference inside the runner blocks (shared memory) shows up in the hashed RAM //
+//-------------------------------------------------------//
+
+function u32 BSMulti.sumWords(u32 address, u32 bytes, u32 seed)
+{
+	u32 sum = seed
+	for (u32 i = 0; i < bytes; i += 4)
+	{
+		sum = (sum ^ u32[address + i]) * 16777619 + (sum >> 15)
+	}
+	return sum
+}
+
+function void BSMulti.updateChecksums()
+{
+	u32 frame = bsmulti.stage_frames
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		u32 block = BSMulti.blockAddress(r)
+		u32 sum = BSMulti.sumWords(block + BSMulti.OFS_STATE, 0x40, 0x811c9dc5)
+		sum = BSMulti.sumWords(block + BSMulti.OFS_OBJECT, 0x48, sum)
+		u32[BSMulti.HEADER_STATE_CHECKSUM + r * 4] = sum
+		if ((frame & 7) == (u32(r) * 2))
+		{
+			// The grid and the collection slots change less often: one runner at a time
+			u32 gridSum = BSMulti.sumWords(block + BSMulti.OFS_GRID, 0x500, 0x811c9dc5)
+			u16[BSMulti.HEADER_GRID_CHECKSUM + r * 2] = u16(gridSum ^ (gridSum >> 16))
+		}
+	}
+}
+
+
+//-------------------------------------------------------//
+// Audio: only the viewed runner makes noise             //
+//-------------------------------------------------------//
+
+// The sound is not game state, so computers may differ in it
+function bool BlueSpheres.audioEnabled()
+{
+	if (bsmulti.active == 0)
+		return true
+	return bsmulti.current == bsmulti.view
+}
+
+function void BlueSpheres.sfx(u8 soundId)
+{
+	if (BlueSpheres.audioEnabled())
+		playSound(soundId)
+}
+
+function void BlueSpheres.music(u8 musicId)
+{
+	if (BlueSpheres.audioEnabled())
+		playMusic(musicId)
+}
+
+// The continue and extra-life counters belong to the host (runner 0), like the stock results screen
+function bool BlueSpheres.appliesToGame()
+{
+	if (bsmulti.active == 0)
+		return true
+	return bsmulti.current == 0
+}
+
+
+//-------------------------------------------------------//
+// Simulation                                            //
+//-------------------------------------------------------//
+
+function void BSMulti.simulateRunner(u8 runner)
+{
+	bsmulti.current = runner
+	BSMulti.swapIn(runner)
+
+	u32 frame = bsmulti.stage_frames
+	if (frame == BSMulti.AUTOSTART_FRAMES && bluespheres.movement_speed == 0)
+	{
+		// What the "Get Blue Spheres" text does in the stock stage
+		bluespheres.going_forward = 1
+		bluespheres.started_running = 1
+	}
+
+	// This runner's pad, as the controller of the player in the same slot (the stock stage reads control.pad1)
+	u16 oldState = control.pad1.state
+	u16 oldPressed = control.pad1.pressed
+	u16 pad = BSMulti.runnerInput(runner, frame, Input.getController(runner))
+	control.pad1.state = pad
+	control.pad1.pressed = pad & ~Input.getControllerPrevious(runner)
+
+	A0 = BSMulti.LIVE_OBJECT
+	BlueSpheres.SimulatePlayer()
+	fn009dde()
+	BlueSpheres.UpdatePlaneScroll()
+	fn009b62()
+
+	control.pad1.state = oldState
+	control.pad1.pressed = oldPressed
+	BSMulti.swapOut(runner)
+	bsmulti.current = 0xff
+}
+
+function void BSMulti.simulateAll()
+{
+	for (u8 r = 0; r < bsmulti.num_runners; ++r)
+	{
+		if (BSMulti.isRunning(r))
+			BSMulti.simulateRunner(r)
+	}
+	BSMulti.swapIn(0)
+}
+
+// Called by the stage code when the runner touches a red sphere
+function void BSMulti.onRunnerFailed()
+{
+	u8 runner = bsmulti.current
+	u8[BSMulti.HEADER_STATUS + runner] = BSMulti.STATUS_FAILED
+	u32[BSMulti.HEADER_DONE_FRAME + runner * 4] = bsmulti.stage_frames
+	BlueSpheres.sfx(0x6a)
+
+	// Correct the grid position (see the stock red sphere code)
+	bluespheres.position.x = (bluespheres.position.x + 0x80) & 0xff00
+	bluespheres.position.y = (bluespheres.position.y + 0x80) & 0xff00
+}
+
+// Called by the stage code when the runner reached the emerald
+function void BSMulti.onRunnerCompleted()
+{
+	u8 runner = bsmulti.current
+	u8[BSMulti.HEADER_STATUS + runner] = BSMulti.STATUS_COMPLETED
+	u32[BSMulti.HEADER_DONE_FRAME + runner * 4] = bsmulti.stage_frames
+	bsmulti.any_completed = 1
+	if (bsmulti.first_completion == 0)
+		bsmulti.first_completion = bsmulti.stage_frames
+	BlueSpheres.sfx(0x6a)
+
+	bluespheres.position.x = (bluespheres.position.x + 0x80) & 0xff00
+	bluespheres.position.y = (bluespheres.position.y + 0x80) & 0xff00
+}
+
+
+//-------------------------------------------------------//
+// End of the stage                                      //
+//-------------------------------------------------------//
+
+// The rule that ends a stage, as a pure function of the numbers (so it can be tested alone):
+//  0: goes on, 1: every runner finished, 2: the grace time after the first completion ran out, 3: the maximum stage time ran out
+function u8 BSMulti.evaluateEnd(u8 runningCount, u32 stageFrames, u32 firstCompletion)
+{
+	if (runningCount == 0)
+		return 1
+	if (firstCompletion != 0 && stageFrames >= firstCompletion + BSMulti.GRACE_AFTER_FIRST_FINISH)
+		return 2
+	if (stageFrames >= BSMulti.MAX_STAGE_FRAMES)
+		return 3
+	return 0
+}
+
+function u8 BSMulti.countRunning()
+{
+	u8 count = 0
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		if (BSMulti.isRunning(r))
+			++count
+	}
+	return count
+}
+
+// Score for one runner from his rings, like the stock results screen (ring bonus plus the "perfect" bonus)
+function u32 BSMulti.scoreBonus(u16 ringsCollected, u16 ringsRemaining)
+{
+	u32 bonus = u32(ringsCollected) * BSMulti.RING_BONUS_FACTOR
+	if (ringsRemaining == 0)
+		bonus += BSMulti.PERFECT_BONUS
+	return bonus
+}
+
+function void BSMulti.addFriendScore(u8 runner, u32 bonus)
+{
+	if (runner == 1)
+	{
+		player2.score = min(player2.score + bonus, 999999)
+	}
+	else if (runner == 2)
+	{
+		u32 score = u32(System.getGlobalVariableValueByName("dropin.score3"))
+		System.setGlobalVariableValueByName("dropin.score3", min(score + bonus, 999999))
+	}
+	else if (runner == 3)
+	{
+		u32 score = u32(System.getGlobalVariableValueByName("dropin.score4"))
+		System.setGlobalVariableValueByName("dropin.score4", min(score + bonus, 999999))
+	}
+}
+
+function void BSMulti.finish()
+{
+	bsmulti.finished = 1
+	bool cleared = (bsmulti.any_completed != 0)
+
+	// Friends keep what they collected as score (continues and extra lives are the host's, see BlueSpheres.appliesToGame)
+	for (u8 r = 1; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		if (BSMulti.status(r) != BSMulti.STATUS_ABSENT)
+		{
+			u32 block = BSMulti.blockAddress(r) + BSMulti.OFS_STATE
+			u16 ringsCollected = u16[block + 0x1a]
+			u16 ringsRemaining = u16[block + 0x22]
+			BSMulti.addFriendScore(r, BSMulti.scoreBonus(ringsCollected, ringsRemaining))
+		}
+	}
+
+	// The result of the stage for the game follows runner 0 (live memory), except that the stage counts as cleared if anybody completed it
+	BSMulti.swapIn(0)
+	if (cleared)
+	{
+		// Award the emerald once (the stock code does this when the player reaches it)
+		A2 = (global.sk_bluespheres) ? 0xffffffb1 : 0xffffffb0
+		if (u8[A2] < 7)
+		{
+			++u8[A2]
+			A1 = 0xffffffb2		// Start of emerald collection states
+			D0 = global.next_bluespheres
+			u8[A1 + D0.u16] |= 0x01
+		}
+		if (BSMulti.status(0) != BSMulti.STATUS_COMPLETED)
+		{
+			bluespheres.blue_remaining = 0
+			bluespheres.stage_exit_state = 4
+		}
+	}
+	BSMulti.swapOut(0)
+
+	// Everybody turns around fast during the fade-out, like the stock stage after the last sphere
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		u8[BSMulti.blockAddress(r) + BSMulti.OFS_STATE + 0x13] = 1		// stage_exit_animation
+	}
+	BSMulti.swapIn(0)
+
+	global.game_mode = 0x48		// Special Stage results
+	if (global.stage_type != 0)
+	{
+		global.zone_act = level.backup.zone_act
+		checkpoint.number |= 0x80
+	}
+	playSound(0x6a)
+}
+
+function void BSMulti.updateStageEnd()
+{
+	if (bsmulti.finished != 0)
+		return
+
+	u8 reason = BSMulti.evaluateEnd(BSMulti.countRunning(), bsmulti.stage_frames, bsmulti.first_completion)
+	if (reason >= 2)
+	{
+		// Time is up for everybody who is still running
+		for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+		{
+			if (BSMulti.isRunning(r))
+			{
+				u8[BSMulti.HEADER_STATUS + r] = BSMulti.STATUS_TIMED_OUT
+				u32[BSMulti.HEADER_DONE_FRAME + r * 4] = bsmulti.stage_frames
+			}
+		}
+	}
+	if (reason != 0)
+	{
+		bsmulti.end_reason = reason
+		BSMulti.finish()
+	}
+}
+
+
+//-------------------------------------------------------//
+// What this computer shows                              //
+//-------------------------------------------------------//
+
+// The next runner after "from" (in the direction "step", +1 or -1) that is running, as a pure function of the running bits; "from" itself if none
+function u8 BSMulti.nextRunning(u8 from, s8 step, u8 runningMask)
+{
+	for (u8 i = 1; i <= BSMulti.MAX_RUNNERS; ++i)
+	{
+		s8 index = s8(from) + step * s8(i)
+		index = index & 3
+		if ((runningMask & (1 << index)) != 0)
+			return u8(index)
+	}
+	return from
+}
+
+function u8 BSMulti.runningMask()
+{
+	u8 mask = 0
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		if (BSMulti.isRunning(r))
+			mask |= (1 << r)
+	}
+	return mask
+}
+
+// The runner of this computer's player, 0xff if there is none (he never joined, or this is only a spectator computer)
+function u8 BSMulti.ownRunner()
+{
+	u8 role = u8[0x8fff00]
+	if (role >= 1 && role <= BSMulti.MAX_RUNNERS)
+	{
+		u8 runner = role - 1
+		if (BSMulti.status(runner) != BSMulti.STATUS_ABSENT)
+			return runner
+	}
+	return 0xff
+}
+
+function void BSMulti.pickView()
+{
+	u8 role = u8[0x8fff00]
+	u8 own = BSMulti.ownRunner()
+	u8 mask = BSMulti.runningMask()
+	if (bsmulti.view_role != role)
+	{
+		// First frame on this computer, or after a state transfer: start with the own run
+		bsmulti.view_role = role
+		bsmulti.view = BSMulti.nextRunning(3, 1, mask)
+		if (own != 0xff)
+			bsmulti.view = own
+	}
+
+	if (own != 0xff && BSMulti.isRunning(own))
+	{
+		bsmulti.view = own
+		return
+	}
+
+	// The own run is over (or there is none): watch the others
+	if (bsmulti.view >= BSMulti.MAX_RUNNERS)
+		bsmulti.view = 0
+	if (role >= 1 && role <= BSMulti.MAX_RUNNERS)
+	{
+		u8 controller = role - 1
+		u16 pad = BSMulti.spectatorInput(Input.getController(controller), bsmulti.stage_frames)
+		u16 pressed = pad & ~Input.getControllerPrevious(controller)
+		if ((pressed & BSMulti.CYCLE_NEXT) != 0)
+			bsmulti.view = BSMulti.nextRunning(bsmulti.view, 1, mask)
+		else if ((pressed & BSMulti.CYCLE_PREV) != 0)
+			bsmulti.view = BSMulti.nextRunning(bsmulti.view, -1, mask)
+	}
+	if (!BSMulti.isRunning(bsmulti.view))
+	{
+		bsmulti.view = BSMulti.nextRunning(bsmulti.view, 1, mask)
+	}
+}
+
+
+//-------------------------------------------------------//
+// Render phase: everything the view changes in the RAM is undone before the frame ends //
+//-------------------------------------------------------//
+
+// The RAM areas (besides the runner windows) that the render phase writes depending on the viewed runner
+function u32 BSMulti.undoAddress(u8 index)
+{
+	if (index == 0)
+		return 0xfffff800		// Sprite table
+	if (index == 1)
+		return 0xfffffc60		// Palette entries of the ground and the emerald
+	if (index == 2)
+		return 0xffffe400		// Rotation temporaries of the player
+	if (index == 3)
+		return 0xffffe000		// Scroll words
+	if (index == 4)
+		return 0xffffaa00		// Decompression buffer of Nemesis.loadDataToVRAM (ring art back into the VRAM; stops before the sprite lists at 0xffffac00)
+	if (index == 5)
+		return 0xfffffd00		// System stack: what the same decompression leaves behind
+	return 0
+}
+
+function u16 BSMulti.undoLength(u8 index)
+{
+	if (index == 0)
+		return 0x280
+	if (index == 1)
+		return 0x20
+	if (index == 2)
+		return 0x20
+	if (index == 3)
+		return 0x04
+	if (index == 4)
+		return 0x200
+	if (index == 5)
+		return 0x100
+	return 0
+}
+
+constant u8 BSMulti.UNDO_COUNT = 6
+
+function void BSMulti.snapshotUndo()
+{
+	u32 target = BSMulti.SCRATCH_UNDO
+	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
+	{
+		copyMemory(target, BSMulti.undoAddress(i), BSMulti.undoLength(i))
+		target += BSMulti.undoLength(i)
+	}
+}
+
+function void BSMulti.restoreUndo()
+{
+	u32 source = BSMulti.SCRATCH_UNDO
+	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
+	{
+		copyMemory(BSMulti.undoAddress(i), source, BSMulti.undoLength(i))
+		source += BSMulti.undoLength(i)
+	}
+}
+
+// True for every address that the render phase may change without it counting as a difference between computers
+function bool BSMulti.isUndone(u32 address)
+{
+	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
+	{
+		u32 start = BSMulti.undoAddress(i)
+		if (address >= start && address < start + BSMulti.undoLength(i))
+			return true
+	}
+	if (address >= BSMulti.LIVE_GRID && address < BSMulti.LIVE_GRID + 0x400)
+		return true
+	if (address >= BSMulti.LIVE_SLOTS && address < BSMulti.LIVE_SLOTS + 0x100)
+		return true
+	if (address >= BSMulti.LIVE_STATE && address < BSMulti.LIVE_STATE + 0x40)
+		return true
+	if (address >= BSMulti.LIVE_OBJECT && address < BSMulti.LIVE_OBJECT + 0x4a)
+		return true
+	if (address >= BSMulti.LIVE_PLANEB && address < BSMulti.LIVE_PLANEB + 2)
+		return true
+	return false
+}
+
+// While the viewed runner has reached the emerald, the VRAM holds the emerald art instead of the ring art (the stock stage queues this in its win sequence)
+function void BSMulti.updateEmeraldArt()
+{
+	bool wantEmerald = (bluespheres.stage_exit_state >= 2)
+	if (wantEmerald)
+	{
+		if (bsmulti.art_state != 1)
+		{
+			u32 source = (global.sk_bluespheres) ? 0x0ae99e : 0x0ae3ec
+			u16 size = u16[source]
+			Kosinski.decompress(source + 2, BSMulti.SCRATCH_ART)
+			updateSpritePattern(BSMulti.SCRATCH_ART, 0xb4e0, size / 2)
+			bsmulti.art_state = 1
+		}
+		D0 = global.next_bluespheres
+		copyMemory(0xfffffc64, 0x009d1e + (D0.s16 & 0x07) * 8, 0x08)
+	}
+	else if (bsmulti.art_state != 0)
+	{
+		Nemesis.loadDataToVRAM(0x0adf60, 0xb4e0)		// Special stage ring sprites
+		bsmulti.art_state = 0
+	}
+}
+
+function string BSMulti.statusText(u8 status)
+{
+	if (status == BSMulti.STATUS_RUNNING)
+		return "RUN"
+	if (status == BSMulti.STATUS_COMPLETED)
+		return "DONE"
+	if (status == BSMulti.STATUS_FAILED)
+		return "OUT"
+	if (status == BSMulti.STATUS_TIMED_OUT)
+		return "TIME"
+	return "-"
+}
+
+function string BSMulti.runnerName(u8 runner)
+{
+	return Netplay.getPlayerLabel(runner)
+}
+
+function void BSMulti.drawText(s32 px, s32 py, string text, u32 color, u8 alignment)
+{
+	Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.6f)", px, py, text, color, alignment, 0, 0xe100, false)
+}
+
+// A small list of all runners (name, status, blue spheres left, rings) and a note for a spectator
+function void BSMulti.drawOverlay(u8 viewed)
+{
+	s32 py = 36
+	for (u8 r = 0; r < bsmulti.num_runners; ++r)
+	{
+		u8 status = BSMulti.status(r)
+		if (status != BSMulti.STATUS_ABSENT)
+		{
+			u32 block = BSMulti.blockAddress(r) + BSMulti.OFS_STATE
+			string marker = " "
+			if (r == viewed)
+				marker = ">"
+			string line = stringformat("%s%s %s", marker, BSMulti.runnerName(r), BSMulti.statusText(status))
+			line = stringformat("%s B%d R%d", line, u16[block + 0x18], u16[block + 0x1a])
+			u32 color = 0xffffffff
+			if (status == BSMulti.STATUS_FAILED)
+				color = 0xff8080ff
+			else if (status == BSMulti.STATUS_COMPLETED)
+				color = 0xff80ff80
+			BSMulti.drawText(4, py, line, color, 4)
+			py += 9
+		}
+	}
+	u8 own = BSMulti.ownRunner()
+	s32 bottom = getScreenHeight() - 12
+	if (own == 0xff)
+	{
+		BSMulti.drawText(getScreenWidth() / 2, bottom, stringformat("WATCHING %s  (LEFT/RIGHT: SWITCH)", BSMulti.runnerName(viewed)), 0xffffffff, 5)
+	}
+	else if (!BSMulti.isRunning(own))
+	{
+		u8 status = BSMulti.status(own)
+		if (status == BSMulti.STATUS_FAILED)
+			BSMulti.drawText(getScreenWidth() / 2, bottom, stringformat("YOU FAILED - WATCHING %s  (LEFT/RIGHT: SWITCH)", BSMulti.runnerName(viewed)), 0xff8080ff, 5)
+		else if (status == BSMulti.STATUS_COMPLETED)
+			BSMulti.drawText(getScreenWidth() / 2, bottom, stringformat("DONE - WATCHING %s  (LEFT/RIGHT: SWITCH)", BSMulti.runnerName(viewed)), 0xff80ff80, 5)
+		else
+			BSMulti.drawText(getScreenWidth() / 2, bottom, stringformat("TIME UP - WATCHING %s", BSMulti.runnerName(viewed)), 0xffffffff, 5)
+	}
+	if (bluespheres.rings_remaining == 0 && BSMulti.isRunning(viewed))
+	{
+		BSMulti.drawText(getScreenWidth() / 2, 30, "ALL RINGS", 0xff40ffff, 5)
+	}
+}
+
+// Everything the render phase does for the viewed runner, without the undo (the checks run this twice from the same RAM and compare)
+function void BSMulti.renderScriptPhase(u8 viewed)
+{
+	BSMulti.swapIn(viewed)
+
+	// The player (not drawn by the object update in multi mode)
+	A0 = BSMulti.LIVE_OBJECT
+	objA0.value3a = 0xff		// Upload the sprite pattern every frame: the VRAM may hold another runner's pose
+	BlueSpheres.DrawPlayer()
+
+	BSMulti.updateEmeraldArt()
+
+	RenderSprites()
+	BlueSpheres.RenderSpheres()
+	BlueSpheres.RenderCharacterSprites()
+	BlueSpheres.SetScrollWords()
+
+#if GAMEAPP
+	BlueSpheres.renderCustomGround()
+	BlueSpheres.renderCustomCharacterShadows()
+#endif
+
+	LoadRequiredSpritePatterns()
+	BSMulti.drawOverlay(viewed)
+
+	// The HUD counters are drawn by V-Int from the viewed runner's numbers
+	bluespheres.bs_hud_dirty = 0xff
+	bluespheres.rings_flags |= 0x80
+}
+
+function void BSMulti.renderViewed()
+{
+	BSMulti.snapshotUndo()
+	bsmulti.restore_pending = 1
+	BSMulti.renderScriptPhase(bsmulti.view)
+}
+
+// Called from waitForNextFrame, after V-Int and right before the frame ends
+function void BSMulti.onBeforeYield()
+{
+	if (bsmulti.restore_pending == 0)
+		return
+	bsmulti.restore_pending = 0
+	BSMulti.restoreUndo()
+	BSMulti.swapIn(0)
+}
+
+
+//-------------------------------------------------------//
+// The stage loops                                       //
+//-------------------------------------------------------//
+
+function void BSMulti.mainLoop()
+{
+	while (true)
+	{
+		UpdateGamePause()
+		global.frame_state = 0x1c
+
+		waitForNextFrame()
+
+		++level.framecounter
+		++bsmulti.stage_frames
+		BSMulti.pickView()
+		BSMulti.simulateAll()
+		UpdateGameObjects()
+		fn009d9e()
+		BSMulti.updateStageEnd()
+		BSMulti.updateChecksums()
+		BSMulti.renderViewed()
+
+		if (global.game_mode != 0x34)	// Blue Spheres Special Stage
+			break
+
+	#if STANDALONE
+		if (level.restart)
+		{
+			global.game_mode = 0x0c		// Main Game
+			return
+		}
+	#endif
+	}
+}
+
+// Everybody turns around while the screen fades to white
+function void BSMulti.exitLoop()
+{
+	global.demo_countdown = 60
+	palette_fade.range = 0x003f
+	global.fadeout_countdown = 0
+
+	while (true)
+	{
+		global.frame_state = 0x1c
+
+		waitForNextFrame()
+
+		for (u8 r = 0; r < bsmulti.num_runners; ++r)
+		{
+			BSMulti.swapIn(r)
+			if (bluespheres.stage_exit_animation != 0 && bluespheres.stage_exit_animation <= 0x60)
+			{
+				bluespheres.direction += 8
+				++bluespheres.stage_exit_animation
+			}
+			BSMulti.swapOut(r)
+		}
+		BSMulti.swapIn(0)
+		UpdateGameObjects()
+		fn009d9e()
+		BSMulti.pickView()
+		BSMulti.renderViewed()
+
+		--global.fadeout_countdown
+		if (s16(global.fadeout_countdown) < 0)
+		{
+			global.fadeout_countdown = 2
+			FadePaletteToWhite()
+		}
+
+		if (global.demo_countdown == 0)
+			break
+	}
+}
+
+
+// Achievements and rumble belong to the player of this computer: only his own run counts
+function bool BlueSpheres.isOwnRun()
+{
+	if (bsmulti.active == 0)
+		return true
+	return bsmulti.current == BSMulti.ownRunner()
+}

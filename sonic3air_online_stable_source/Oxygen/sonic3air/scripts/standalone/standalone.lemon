@@ -97,6 +97,9 @@ function void waitForNextFrame()
 	//	Input.setTouchInputMode(TOUCH_INPUT_MODE_FULLSCREEN_START)
 	//}
 
+	// Blue Spheres with several online players: puts back what the render phase of the viewed runner changed (does nothing otherwise)
+	BSMulti.onBeforeYield()
+
 	// Enough for this frame
 	yieldExecution()
 

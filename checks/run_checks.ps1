@@ -15,6 +15,7 @@ param(
 	[switch]$Package,
 	[switch]$Quick,
 	[switch]$RuntimeOnly,
+	[switch]$RecordBsGolden,	# Stage J: write checks\golden\bs_offline_golden.txt from this run instead of comparing with it (only with the scripts of a known good state)
 	[string]$EngineRoot = '',
 	[string[]]$Only = @()	# Only some of the game stages D, E, F, for example: -Only D,F
 )
@@ -62,7 +63,7 @@ $recoveryPath = Join-Path $checksDir '.run-recovery.json'
 $testHooksMarker = Join-Path $bin 'testhooks.enabled'
 $gameExitCode = 0
 # Online stages that only make sense on the stable online fork (U, the unzipped package, is engine independent and stays in this run).
-$onlineStageIds = @('D', 'E', 'M', 'N', 'R', 'L', 'S', 'X', 'W', 'Y', 'K')
+$onlineStageIds = @('D', 'E', 'M', 'N', 'R', 'L', 'S', 'X', 'W', 'Y', 'K', 'J')
 $delegatedOnlineStages = @()
 $delegatedOnlineWanted = @()
 if (-not $EngineRoot -and -not $Quick) {
@@ -503,7 +504,7 @@ try
 			$readmeOk = ($readmeText -match "Host \(works anywhere\)") -and ($readmeText -match "online_log\.txt")
 			Add-Result "A9" "Readme explains the join code and the log file" $readmeOk ""
 
-			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|CharPickHarness|ExtraSlotTestMod|_devtools|DropInTest' })
+			$testLeftovers = @($entries.Keys | Where-Object { $_ -match 'ChecksHarness|ActHarness|BossHarness|TeleportHarness|PartyHarness|NetPartyHarness|CharPickHarness|BSMultiHarness|ExtraSlotTestMod|_devtools|DropInTest' })
 			Add-Result "A10" "No developer test mods in the package" ($testLeftovers.Count -eq 0) ($testLeftovers -join ", ")
 
 				$markerEntries = @($entries.Keys | Where-Object { $_ -match '(?i)testhooks\.enabled' })
@@ -609,6 +610,20 @@ try
 	New-Item -ItemType Directory -Path $installedMod -Force | Out-Null
 	& robocopy $sourceMod $installedMod /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 	if ($LASTEXITCODE -ge 8) { throw "Could not update the installed co-op mod from the source (robocopy exit code $LASTEXITCODE)" }
+
+	# The engine loads the compiled script cache (saves\scripts.bin) when only its core hash matches, even if the game scripts were edited since: a check would then
+	# run against OLD game scripts without any message (found with stage J: the first offline "no change" comparison ran against the unmodified scripts).
+	# The cache is only a cache (the engine writes it again after compiling from source), so it is removed when a script is newer than it.
+	$scriptCache = Join-Path $game 'saves\scripts.bin'
+	if (Test-Path -LiteralPath $scriptCache)
+	{
+		$newestScript = (Get-ChildItem -Path $sourceScripts -Recurse -Filter *.lemon -File | Measure-Object -Property LastWriteTime -Maximum).Maximum
+		if ($newestScript -gt (Get-Item -LiteralPath $scriptCache).LastWriteTime)
+		{
+			Remove-Item -LiteralPath $scriptCache -Force
+			Write-Host 'The compiled script cache was older than the game scripts and was removed (the engine builds it again).' -ForegroundColor Yellow
+		}
+	}
 
 	# Save the player's own setup, the checks change it and put it back afterwards
 	$savedMods = Join-Path $appdata "mods\active-mods.json"
@@ -1939,6 +1954,336 @@ public class RelayFlood
 				}
 			}
 
+			# ---------------------------------------------------------------------------------------------------
+			$jWanted = @($Only | Where-Object { $_ -match '^J[0-9]$' })
+			if ((Wants 'J') -or ($jWanted.Count -gt 0)) {
+				Write-Step 'J. Blue Sphere special stage: every online player runs through the stage at the same time (offline stays as before)'
+				$lastLogs = Join-Path $checksDir 'last_logs'
+				New-Item -ItemType Directory -Path $lastLogs -Force | Out-Null
+				Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class JWin { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd); }' -ErrorAction SilentlyContinue
+				function Run-J([string]$name) { return (($jWanted.Count -eq 0) -or ($jWanted -contains $name)) }
+				$jErrorPattern = 'Script compile error|Script assertion failed|Invalid memory access|Unable to resolve|Invalid VRAM access|Failed to call|Invalid memory read|Invalid memory write|Too long string'
+
+				function Install-JHarness([int]$mode, [int]$players, [int]$offline)
+				{
+					# The harness is a fixture of the checks (never packaged); the production mod comes first because the harness imports from it
+					$modsFolder = Join-Path $appdata 'mods'
+					foreach ($name in @('BSMultiHarness', 'CharPickHarness', 'ExtraSlotTestMod'))
+					{
+						$target = Join-Path $modsFolder $name
+						if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+					}
+					Copy-Item (Join-Path $checksDir 'harness\BSMultiHarness') (Join-Path $modsFolder 'BSMultiHarness') -Recurse
+					$harnessMain = Join-Path $modsFolder 'BSMultiHarness\scripts\main.lemon'
+					$text = (Get-Content -Raw $harnessMain).Replace('__MODE__', [string]$mode).Replace('__EXPECTED_PLAYERS__', [string]$players).Replace('__OFFLINE__', [string]$offline)
+					Set-Content -Path $harnessMain -Value $text -Encoding utf8 -NoNewline
+					Set-ActiveMods @('DropInCoop', 'BSMultiHarness')
+					if ($offline -eq 1)
+					{
+						$configText = $savedConfigText.Replace('"StartPhase": "2"', '"StartPhase": "3"')
+						$configText = [regex]::Replace($configText, '(?m)^(\s*)"LoadSaveState": "([^"]*)",', '$1//"LoadSaveState": "$2",')
+						Set-Content -Path $configPath -Value $configText -Encoding utf8
+					}
+					else
+					{
+						# The lobby starts from the main menu: not the in-game start phase that the other stages use
+						Set-Content -Path $configPath -Value $savedConfigText -Encoding utf8 -NoNewline
+					}
+				}
+
+				function Get-JReports([string]$text, [string]$name)
+				{
+					return ,@([regex]::Matches($text, ('CHECK\|' + [regex]::Escape($name) + '\|PASS\|([^\r\n]*)')) | ForEach-Object { $_.Groups[1].Value })
+				}
+
+				function Invoke-JOffline([int]$mode, [string]$tag)
+				{
+					# One game window, one player, no network: the stage runs with the stock code path
+					Install-JHarness $mode 1 1
+					Stop-StartedProcesses
+					Remove-Item $logFile -ErrorAction SilentlyContinue
+					$proc = Start-GameProcess @{ 'S3AIR_CHECK_CAPTURE_DIR' = $lastLogs; 'S3AIR_CHECK_CAPTURE_PREFIX' = $tag }
+					$finished = Wait-Until { $t = (Read-SharedText $logFile); ($t -match 'CHECK\|bs end\|') -or ($t -match 'bs golden\|PASS\|call 1500 ') -or ($t -match $jErrorPattern) -or $proc.HasExited } 300
+					Start-Sleep -Seconds 2
+					$text = Read-SharedText $logFile
+					Stop-StartedProcesses
+					Set-Content -Path (Join-Path $lastLogs ($tag + '-logfile.txt')) -Value $text -Encoding utf8
+					return [pscustomobject]@{ Text = $text; Finished = $finished }
+				}
+
+				function Get-GoldenLines([string]$text, [int]$mode)
+				{
+					$lines = @()
+					foreach ($name in @('bs layout', 'bs golden', 'bs end'))
+					{
+						foreach ($m in [regex]::Matches($text, ('CHECK\|' + [regex]::Escape($name) + '\|PASS\|([^\r\n]*)'))) { $lines += ('mode' + $mode + ' ' + $name.Substring(3) + ' ' + $m.Groups[1].Value.Trim()) }
+					}
+					return ,$lines
+				}
+
+				$goldenPath = Join-Path $checksDir 'golden\bs_offline_golden.txt'
+
+				# --- J9: offline (and host only) behaviour is unchanged: the run state and layout of the stage at fixed frames, compared with the recording of the unmodified scripts
+				if (Run-J 'J9') {
+				try
+				{
+					$all = @()
+					$ranOk = $true
+					foreach ($mode in @(0, 1, 2))
+					{
+						$run = Invoke-JOffline $mode ("J9m" + $mode)
+						$errors = [regex]::Match($run.Text, ('(?im)^.*(' + $jErrorPattern + ').*$'))
+						$lines = Get-GoldenLines $run.Text $mode
+						$all += $lines
+						$ranOk = $ranOk -and $run.Finished -and (-not $errors.Success) -and ($lines.Count -ge 3)
+						Add-Result ("J9" + [char](97 + $mode)) ("Offline stage, scenario " + @('stock layout and scripted pad', 'synthetic layout, the runner clears the stage', 'synthetic layout, the runner touches a red sphere')[$mode] + ": ran without script errors and reported its run state ($($lines.Count) lines)") ($run.Finished -and (-not $errors.Success) -and ($lines.Count -ge 3)) $(if ($errors.Success) { $errors.Value } else { '' })
+					}
+					# Pure functions (next runner to watch, end rule, roster, score, design constants): reported by the harness of the first run
+					$unitText = (Read-SharedText (Join-Path $lastLogs 'J9m0-logfile.txt'))
+					$unitLines = @([regex]::Matches($unitText, 'CHECK\|bs unit (\w+)\|(PASS|FAIL)\|([^\r\n]*)'))
+					$unitFails = @($unitLines | Where-Object { $_.Groups[2].Value -eq 'FAIL' } | ForEach-Object { $_.Groups[1].Value + ' (' + $_.Groups[3].Value + ')' })
+					Add-Result 'J9e' 'Unit checks of the multi-runner rules (next runner to watch, end of the stage, roster, friends score, the named design defaults)' (($unitLines.Count -ge 20) -and ($unitFails.Count -eq 0)) ("$($unitLines.Count) checks, failed: " + ($unitFails -join ', '))
+					if ($RecordBsGolden)
+					{
+						New-Item -ItemType Directory -Path (Split-Path $goldenPath) -Force | Out-Null
+						Set-Content -Path $goldenPath -Value $all -Encoding utf8
+						Add-Result 'J9d' 'Golden file written from this run (-RecordBsGolden)' ($all.Count -gt 6) ("$($all.Count) lines in checks\golden\bs_offline_golden.txt")
+					}
+					else
+					{
+						if (-not (Test-Path -LiteralPath $goldenPath)) { Add-Result 'J9d' 'Offline run state equals the golden recording' $false 'checks\golden\bs_offline_golden.txt is missing' }
+						else
+						{
+							$golden = @(Get-Content -LiteralPath $goldenPath | Where-Object { $_ })
+							$diff = @(Compare-Object $golden $all)
+							Add-Result 'J9d' 'Offline run state (position, counters, grid hash at fixed frames, the end of the stage) equals the golden recording of the unmodified scripts' (($diff.Count -eq 0) -and ($all.Count -eq $golden.Count)) $(if ($diff.Count -gt 0) { 'first difference: ' + ($diff | Select-Object -First 2 | ForEach-Object { $_.InputObject }) -join ' // ' } else { "$($golden.Count) lines identical" })
+						}
+					}
+				}
+				catch { Add-Result 'J9a' 'Offline scenarios ran' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+				}
+
+				function Invoke-JScenario([string]$id, [int]$mode, [int]$friendCount, [string[]]$friendInputs, [int]$expectedPlayers, [int]$timeoutSeconds)
+				{
+					# One host and friends on this computer, all through the lobby screens; the host starts the stage AIZ 2, the harness enters the Blue Sphere stage by itself
+					Install-JHarness $mode $expectedPlayers 0
+					Stop-StartedProcesses
+					$code = New-SessionCode
+					$suffixes = @{ host = ('_j' + $id + 'h') }
+					$friendKeys = @('f1', 'f2', 'f3')[0..($friendCount - 1)]
+					foreach ($friendKey in $friendKeys) { $suffixes[$friendKey] = ('_j' + $id + $friendKey.Substring(1)) }
+					foreach ($suffix in $suffixes.Values) { Remove-Item (Join-Path $appdata ('logfile' + $suffix + '.txt')), (Join-Path $appdata ('online_log' + $suffix + '.txt')) -ErrorAction SilentlyContinue }
+					$common = @{ 'S3AIR_CHECK_CAPTURE_DIR' = $lastLogs }
+					$hostVars = $common.Clone()
+					$hostVars['S3AIR_LOBBY_OPEN'] = 'hostlan'; $hostVars['S3AIR_LOBBY_CODE'] = $code; $hostVars['S3AIR_LOGNAME'] = $suffixes.host; $hostVars['S3AIR_PLAYER_NAME'] = 'Hosty'
+					$hostVars['S3AIR_LOBBY_AUTOSTART'] = '85'; $hostVars['S3AIR_LOBBY_AUTOGAME'] = '0x0001'; $hostVars['S3AIR_CHECK_CAPTURE_PREFIX'] = ($id + '-host')
+					$procs = @{}
+					$procs.host = Start-GameProcess $hostVars
+					Start-Sleep -Seconds 12
+					$friendIndex = 0
+					$joinedOk = $true
+					foreach ($key in $friendKeys)
+					{
+						$friendIndex++
+						$vars = $common.Clone()
+						$vars['S3AIR_LOBBY_OPEN'] = 'join'; $vars['S3AIR_LOBBY_CODE'] = $code; $vars['S3AIR_LOGNAME'] = $suffixes[$key]; $vars['S3AIR_LOBBY_AUTOREADY'] = '1'
+						$vars['S3AIR_PLAYER_NAME'] = ('Friend ' + $friendIndex); $vars['S3AIR_CHECK_CAPTURE_PREFIX'] = ($id + '-' + $key)
+						$vars['S3AIR_NETPLAY_TEST_INPUT'] = $friendInputs[$friendIndex - 1]
+						$procs[$key] = Start-GameProcess $vars
+						$slotNumber = $friendIndex + 1
+						$in = Wait-Until { (Get-NetLog $suffixes.host) -match ('a friend proved the code and is player ' + $slotNumber) } 90
+						$joinedOk = $joinedOk -and $in
+					}
+					$allReady = Wait-Until { (Get-NetLog $suffixes.host) -match 'lobby: all players are ready' } 60
+					$started = Wait-Until { (Get-NetLog $suffixes.host) -match 'the host starts the level' } 120
+					$reported = Wait-Until {
+						$all = $true
+						foreach ($suffix in $suffixes.Values) { if ((Get-JReports (Get-NetLog $suffix) 'bs back').Count -eq 0) { $all = $false } }
+						$all
+					} $timeoutSeconds
+					Start-Sleep -Seconds 3
+					$texts = @{}
+					foreach ($key in $suffixes.Keys)
+					{
+						$texts[$key] = Get-NetLog $suffixes[$key]
+						$online = Read-SharedText (Join-Path $appdata ('online_log' + $suffixes[$key] + '.txt'))
+						Set-Content -Path (Join-Path $lastLogs ($id + '-' + $key + '.txt')) -Value $texts[$key] -Encoding utf8
+						Set-Content -Path (Join-Path $lastLogs ($id + '-' + $key + '-online.txt')) -Value $online -Encoding utf8
+						$texts[$key + '_online'] = $online
+					}
+					Stop-StartedProcesses
+					return [pscustomobject]@{ Texts = $texts; JoinedOk = $joinedOk; AllReady = $allReady; Started = $started; Reported = $reported; Keys = @($suffixes.Keys | Sort-Object) }
+				}
+
+				function Get-JStateMap([string]$text)
+				{
+					# A state with several runners arrives as several report lines that all start with "f<frame> " (the engine limits a script string to 256 characters): put the parts of a frame together
+					$map = @{}
+					foreach ($line in (Get-JReports $text 'bs state'))
+					{
+						$m = [regex]::Match($line, '^f(\d+) ')
+						if ($m.Success)
+						{
+							$frame = [int]$m.Groups[1].Value
+							if ($map.ContainsKey($frame)) { $map[$frame] = $map[$frame] + ' | ' + $line.Substring($m.Length) } else { $map[$frame] = $line }
+						}
+					}
+					return $map
+				}
+
+				function Get-JViews([string]$text)
+				{
+					$list = @()
+					foreach ($line in (Get-JReports $text "bs view")) { $m = [regex]::Match($line, 'role (\d+) view (\d+) call (\d+) own_status (\d+)'); $list += [pscustomobject]@{ Role = [int]$m.Groups[1].Value; View = [int]$m.Groups[2].Value; Call = [int]$m.Groups[3].Value; Own = [int]$m.Groups[4].Value } }
+					return ,$list
+				}
+
+				function Test-JScenario($run, [string]$id, [string]$expectStatuses, [int]$expectEmeraldDelta, [string]$what)
+				{
+					$t = $run.Texts
+					$peers = @($run.Keys)
+					$enterAll = $true; $endLines = @{}; $backLines = @{}
+					foreach ($k in $peers)
+					{
+						if ((Get-JReports $t[$k] 'bs enter').Count -eq 0) { $enterAll = $false }
+						$e = Get-JReports $t[$k] 'bs end'; if ($e.Count -gt 0) { $endLines[$k] = ($e -join ' | ') }
+						$b = Get-JReports $t[$k] 'bs back'; if ($b.Count -gt 0) { $backLines[$k] = $b[0] }
+					}
+					Add-Result ($id + 'a') ("Lobby and start ($what): every friend joined, everybody ready, the host started the level") ($run.JoinedOk -and $run.AllReady -and $run.Started) ("joined: $($run.JoinedOk), ready: $($run.AllReady), started: $($run.Started)")
+					Add-Result ($id + 'b') 'Every computer entered the Blue Sphere stage (the harness entered it at the same moment on all of them)' ($enterAll -and $peers.Count -ge 2) ("peers: $($peers -join ',')")
+
+					# The same run state on every computer, frame by frame: positions, counters, statuses and the hash of every runner's grid
+					$maps = @{}; foreach ($k in $peers) { $maps[$k] = Get-JStateMap $t[$k] }
+					$common = @($maps[$peers[0]].Keys | Where-Object { $f = $_; (@($peers | Where-Object { -not $maps[$_].ContainsKey($f) })).Count -eq 0 } | Sort-Object)
+					$mismatch = @($common | Where-Object { $f = $_; (@($peers | ForEach-Object { $maps[$_][$f] } | Select-Object -Unique)).Count -gt 1 })
+					$wasActive = ($common.Count -gt 0) -and ($maps[$peers[0]][$common[0]] -match 'act1')
+					$mismatchText = ''
+					if ($mismatch.Count -gt 0) { $mismatchText = ' (first at frame ' + $mismatch[0] + ': ' + (($peers | ForEach-Object { $maps[$_][$mismatch[0]] }) -join ' // ') + ')' }
+					Add-Result ($id + 'c') ("Same run state on every computer ($what): every 30 frames the position, speed, counters, status and grid hash of every runner are identical on all computers") (($common.Count -ge 10) -and ($mismatch.Count -eq 0) -and $wasActive) ("frames compared: $($common.Count), differing: $($mismatch.Count)$mismatchText, multi mode active: $wasActive")
+
+					$endSame = ($endLines.Count -eq $peers.Count) -and ((@($endLines.Values | Select-Object -Unique)).Count -eq 1)
+					$endText = ''
+					if ($endLines.Count -gt 0) { $endText = @($endLines.Values)[0] }
+					$statusMatch = [regex]::Match($endText, 'status (\d{4})')
+					$firstLine = ''
+					if ($common.Count -gt 0) { $firstLine = $maps[$peers[0]][$common[0]] }
+					$emStart = [regex]::Match($firstLine, ' em(\d+)')
+					$emEnd = [regex]::Match($endText, ' em(\d+)')
+					$emDelta = -99
+					if ($emStart.Success -and $emEnd.Success) { $emDelta = [int]$emEnd.Groups[1].Value - [int]$emStart.Groups[1].Value }
+					$emText = 'unchanged'
+					if ($expectEmeraldDelta -gt 0) { $emText = '+' + $expectEmeraldDelta }
+					Add-Result ($id + 'd') ("End of the stage ($what): the same end state on every computer, runner statuses $expectStatuses (0 running, 1 completed, 2 failed, 3 timed out, 4 not in the game), chaos emeralds $emText") ($endSame -and $statusMatch.Success -and ($statusMatch.Groups[1].Value -eq $expectStatuses) -and ($emDelta -eq $expectEmeraldDelta)) ("same end line: $endSame, statuses: $($statusMatch.Groups[1].Value), emerald change: $emDelta, line: $endText")
+					$backSame = ($backLines.Count -eq $peers.Count) -and ((@($backLines.Values | Select-Object -Unique)).Count -eq 1)
+					$backText = ''
+					if ($backLines.Count -gt 0) { $backText = @($backLines.Values)[0] }
+					Add-Result ($id + 'e') ("Back in the level ($what): every computer is in the same level again (game mode 0c, act restored) with the same emeralds, lives and scores") ($backSame -and ($backText -match 'zone_act 0001 mode 0c')) ("same: $backSame, line: $backText")
+					# The view probe: what the render phase writes into the RAM must not depend on the viewed runner (otherwise computers that watch different runners drift apart)
+					$probeLines = 0; $probeBad = @()
+					foreach ($k in $peers) { foreach ($line in (Get-JReports $t[$k] 'bs probe')) { $probeLines++; if ($line -notmatch 'in 0 bytes') { $probeBad += ($k + ': ' + $line) } } }
+					Add-Result ($id + 'p') ("View probe ($what): rendering any runner changes no work RAM outside of the areas that are put back (every computer compared the screens of all runners from the same memory)") (($probeLines -ge $peers.Count - 1) -and ($probeBad.Count -eq 0)) ("probe lines: $probeLines, with differences: $($probeBad.Count) $($probeBad -join ' // ')")				}
+
+				function Test-JSync($run, [string]$id, [string]$what)
+				{
+					$repairs = 0; $syncFrames = @()
+					foreach ($key in @('f1', 'f2', 'f3') | Where-Object { $run.Texts.ContainsKey($_ + '_online') })
+					{
+						foreach ($line in @($run.Texts[$key + '_online'] -split "`r?`n" | Where-Object { $_ -match '^\[friend\]' }))
+						{
+							$m = [regex]::Match($line, 'repairs=(\d+)'); if ($m.Success -and [int]$m.Groups[1].Value -gt $repairs) { $repairs = [int]$m.Groups[1].Value }
+						}
+						$inGameText = (@($run.Texts[$key + '_online'] -split "`r?`n" | Where-Object { $_ -match '^\[friend\].* state=5 ' }) -join "`n")
+						$frames = @([regex]::Matches($inGameText, 'last sync ok at frame (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+						$syncFrames += $(if ($frames.Count -gt 1) { ($frames | Measure-Object -Maximum).Maximum - ($frames | Measure-Object -Minimum).Minimum } else { 0 })
+					}
+					$minSync = ($syncFrames | Measure-Object -Minimum).Minimum
+					Add-Result ($id + 'f') ("Real sync check ($what): the game-state hash of every friend kept matching the host's while everybody ran through the stage and while the views differed, no repair was needed") (($repairs -eq 0) -and ($minSync -ge 1200)) ("repairs: $repairs, frames over which the sync check passed, per friend: " + ($syncFrames -join ', '))
+					$longest = 0
+					foreach ($k in $run.Keys) { foreach ($mm in [regex]::Matches($run.Texts[$k], 'CHECK\|[^|\r\n]*\|[^|\r\n]*\|([^\r\n]*)')) { if ($mm.Groups[1].Value.Length -gt $longest) { $longest = $mm.Groups[1].Value.Length } } }
+					Add-Result ($id + 'l') ("Report lines stay short ($what): no check report is longer than 250 characters (the engine refuses script strings over 256: 'Too long string')") ($longest -le 250 -and $longest -gt 0) ("longest report text: $longest characters")
+					$errors = (($run.Keys | ForEach-Object { $run.Texts[$_] }) -join "`n")
+					$m = [regex]::Match($errors, ('(?im)^.*(' + $jErrorPattern + ').*$'))
+					$errDetail = "all computers reported the end: $($run.Reported)"
+					if ($m.Success) { $errDetail = $m.Value }
+					Add-Result ($id + 'g') ("No script errors or crashes ($what)") ((-not $m.Success) -and $run.Reported) $errDetail
+				}
+
+				# --- J1: four players. Runner 0 (host) fails early, runner 1 completes, runner 2 never ends (time out), runner 3 fails later; spectators cycle the view
+				if (Run-J 'J1') {
+				try
+				{
+					$j1 = Invoke-JScenario 'J1' 6 3 @('128', '136', '132') 4 600
+					Test-JScenario $j1 'J1' '2132' 1 'four players, one fails, one completes, one times out'
+					Test-JSync $j1 'J1' 'four players'
+					$t = $j1.Texts
+					# What the computers showed: the host failed first and watched somebody else; the player of the runner that went on kept his own run
+					$hostViews = Get-JViews $t.host
+					$f2Views = Get-JViews $t.f2
+					$hostOwn = @($hostViews | Where-Object { $_.Own -eq 0 })
+					$hostOut = @($hostViews | Where-Object { $_.Own -eq 2 })
+					$viewsOk = ($hostOwn.Count -ge 1) -and (@($hostOwn | Where-Object { $_.View -ne 0 }).Count -eq 0) -and ($hostOut.Count -ge 3) -and (@($hostOut | Where-Object { $_.View -eq 0 }).Count -eq 0)
+					Add-Result 'J1h' 'Each computer shows its own run while the player is running, and after his red sphere the host watches another runner (never his own failed run)' $viewsOk ("host: own run shown $($hostOwn.Count) times, watching others $($hostOut.Count) times (views: " + (($hostOut | ForEach-Object { $_.View } | Select-Object -Unique) -join ',') + ")")
+					$cycled = @($hostOut | ForEach-Object { $_.View } | Select-Object -Unique)
+					Add-Result 'J1i' 'The spectator can switch between the runners that are still running with left/right (the scripted presses reached at least two different runners)' ($cycled.Count -ge 2) ("runners watched by the failed host: " + ($cycled -join ','))
+					Add-Result 'J1j' 'The player of the runner that never fails keeps seeing his own run' ((@($f2Views | Where-Object { $_.Own -eq 0 -and $_.View -ne 2 }).Count -eq 0) -and ($f2Views.Count -ge 3)) ("friend 2 views: " + (($f2Views | ForEach-Object { $_.View } | Select-Object -Unique) -join ','))
+					$pics = @(@('host', 'f1', 'f2', 'f3') | Where-Object { Test-Path (Join-Path $lastLogs ('J1-' + $_ + '-bs-run.bmp')) })
+					Add-Result 'J1k' 'A picture of the running stage exists for every computer (checks\last_logs\J1-*-bs-run.bmp, J1-host-bs-spectate.bmp, J1-*-bs-results.bmp)' (($pics.Count -eq 4) -and (Test-Path (Join-Path $lastLogs 'J1-host-bs-spectate.bmp'))) ("pictures: " + ($pics -join ','))
+				}
+				catch { Add-Result 'J1a' 'Blue Sphere scenario J1 ran' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- J2: three players, everybody fails at a different time: the stage ends when the last one is out, no emerald, the act is restored
+				if (Run-J 'J2') {
+				try
+				{
+					$j2 = Invoke-JScenario 'J2' 4 2 @('128', '136') 3 420
+					Test-JScenario $j2 'J2' '2224' 0 'three players, everybody fails'
+					Test-JSync $j2 'J2' 'three players'
+				}
+				catch { Add-Result 'J2a' 'Blue Sphere scenario J2 ran' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- J3: three computers, but only two players joined: the third computer is a spectator from the start; one player completes, one fails
+				if (Run-J 'J3') {
+				try
+				{
+					$j3 = Invoke-JScenario 'J3' 5 2 @('128', '0') 2 420
+					Test-JScenario $j3 'J3' '2144' 1 'two players and a spectator computer'
+					Test-JSync $j3 'J3' 'two players and a spectator'
+					$specViews = Get-JViews $j3.Texts.f2
+					Add-Result 'J3h' 'A connected friend who never joined has no run of his own: his computer shows a running runner (never an absent one)' (($specViews.Count -ge 3) -and (@($specViews | Where-Object { $_.View -ge 2 }).Count -eq 0)) ("views: " + (($specViews | ForEach-Object { $_.View } | Select-Object -Unique) -join ','))
+					# The picture of every running player must show his runner (Sonic is blue, the floor orange and brown): count blue pixels where the runner stands
+					Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+					$runnerPixels = @{}
+					foreach ($k in @('host', 'f1'))
+					{
+						$bmpPath = Join-Path $lastLogs ('J3-' + $k + '-bs-run.bmp')
+						$count = -1
+						if (Test-Path -LiteralPath $bmpPath)
+						{
+							$bmp = [System.Drawing.Bitmap]::FromFile($bmpPath)
+							$count = 0
+							for ($px = [int]($bmp.Width / 2 - 25); $px -lt [int]($bmp.Width / 2 + 25); $px++) { for ($py = [int]($bmp.Height * 0.5); $py -lt [int]($bmp.Height * 0.78); $py++) { $c = $bmp.GetPixel($px, $py); if (($c.B -gt $c.R + 50) -and ($c.B -gt $c.G + 20)) { $count++ } } }
+							$bmp.Dispose()
+						}
+						$runnerPixels[$k] = $count
+					}
+					Add-Result 'J3m' 'The picture of each running player shows his runner (blue pixels where Sonic stands; none means the runner was not drawn)' (($runnerPixels['host'] -ge 60) -and ($runnerPixels['f1'] -ge 60)) ("blue pixels: host $($runnerPixels['host']), friend 1 $($runnerPixels['f1'])")
+				}
+				catch { Add-Result 'J3a' 'Blue Sphere scenario J3 ran' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+				}
+
+				foreach ($name in @('BSMultiHarness', 'CharPickHarness', 'ExtraSlotTestMod'))
+				{
+					$target = Join-Path (Join-Path $appdata 'mods') $name
+					if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+				}
+			}
+
 			if ((Wants 'P') -or ($Only -contains 'P3') -or ($Only -contains 'P4') -or ($Only -contains 'T'))
 			{
 				Write-Step 'P. Three/four-player characters, independent movement, jumping and rendering'
@@ -2442,7 +2787,7 @@ public class RelayFlood
 		if (Test-Path $partyHarnessInstalled) { Remove-Item -LiteralPath $partyHarnessInstalled -Recurse -Force }
 		$netPartyHarnessInstalled = Join-Path $appdata 'mods\NetPartyHarness'
 		if (Test-Path $netPartyHarnessInstalled) { Remove-Item -LiteralPath $netPartyHarnessInstalled -Recurse -Force }
-		foreach ($leftover in @('CharPickHarness', 'ExtraSlotTestMod')) { $leftoverPath = Join-Path $appdata ("mods\" + $leftover); if (Test-Path $leftoverPath) { Remove-Item -LiteralPath $leftoverPath -Recurse -Force } }
+		foreach ($leftover in @('CharPickHarness', 'ExtraSlotTestMod', 'BSMultiHarness')) { $leftoverPath = Join-Path $appdata ("mods\" + $leftover); if (Test-Path $leftoverPath) { Remove-Item -LiteralPath $leftoverPath -Recurse -Force } }
 		if (Test-Path -LiteralPath $testHooksMarker) { Remove-Item -LiteralPath $testHooksMarker -Force }
 		Write-Host ""
 		Write-Host "Your mod list, config and settings were put back." -ForegroundColor DarkGray

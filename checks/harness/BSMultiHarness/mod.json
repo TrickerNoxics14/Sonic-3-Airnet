@@ -1,0 +1,10 @@
+{
+  "Metadata": {
+    "Name": "Blue Sphere Multi Harness",
+    "UniqueID": "dropin-bs-multi-harness",
+    "Author": "Development checks",
+    "Description": "Enters the Blue Sphere special stage by itself, builds known layouts and reports what every computer sees (stage J of the checks). Not distributed.",
+    "ModVersion": "1.0.0",
+    "GameVersion": "20.07.24.0"
+  }
+}
