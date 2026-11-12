@@ -181,6 +181,7 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mStateTimer = 0.0f;
 	}
 	mStateTimer += deltaSeconds;
+	mCharacterRequest.update(deltaSeconds);
 	if (mState == State::CONNECT_TO_SERVER && mStateTimer > 15.0f)
 	{
 		if (startRelayFallback("the game server did not answer"))
@@ -469,6 +470,7 @@ void NetplayClient::setMyCharacter(uint16 character)
 	if (character == mMyCharacter)
 		return;
 	mMyCharacter = character;
+	mCharacterRequest.request(character);
 	RMX_LOG_INFO("Netplay client: lobby: asking the host to play as " << NetplayLobby::getCharacterName(character));
 	sendLobbyReady(mLobbyMyReady);
 }
@@ -559,8 +561,8 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 				{
 					if (mMyCharacter == NetplayLobby::CHARACTER_NONE)
 						mMyCharacter = mine;		// the default of this slot
-					else if (mine != mMyCharacter && (notice || mLobbyCharactersLocked))
-						mMyCharacter = mine;		// the host did not accept the request: take over what it says
+					else if (mCharacterRequest.onHostState(mine, notice, mLobbyCharactersLocked))
+						mMyCharacter = mine;		// the host did not accept the request: take over what it says (an old lobby state that the host sent before it read a new request does not count)
 				}
 				if (notice && !mCharacterNoticeSeen)
 				{
@@ -863,7 +865,18 @@ void NetplayClient::startGame(const StartGamePacket& packet)
 		}
 	}
 	// The characters of the players are fixed for this session (the same on every computer; the scripts read them from the shared memory)
-	mNetplayManager.setSessionCharacters(packet.mCharacterPicks);
+	// (used exactly as the host sent them, or the start is refused: a pick that is replaced on this computer only would make this game run another character than the others)
+	{
+		std::string problem;
+		if (!mNetplayManager.setSessionCharacters(packet.mCharacterPicks, true, &problem))
+		{
+			mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			fail(NetplayFailure::Reason::MOD_MISMATCH, problem);
+			return;
+		}
+	}
+	if (mMyCharacter != NetplayLobby::CHARACTER_NONE && mPlayerIndex < MAX_PLAYERS && packet.mCharacterPicks[mPlayerIndex] != mMyCharacter)
+		RMX_LOG_INFO("Netplay client: the host fixed " << NetplayLobby::getCharacterName(packet.mCharacterPicks[mPlayerIndex]) << " as our character (we asked for " << NetplayLobby::getCharacterName(mMyCharacter) << "), the picks cannot change in a running game");
 
 	// Read RNG state from packet
 	uint64* rngState = Application::instance().getSimulation().getSimulationState().getRandomNumberGenerator().accessState();

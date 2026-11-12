@@ -31,3 +31,30 @@ function void ExtraChar.drawCharacterSprite_char201()
 	Renderer.drawRect(px - 7, py - 12, 14, 24, 0x30a0ffff, renderQueue, false)
 	push(true)
 }
+
+
+// A second extra character, based on KNUCKLES (slot 202). It exists so that the checks can tell a real lookup of the base character from the fallback of the
+// Drop-In Co-op mod (which is Sonic): if the mod did not find out that this character is a Knuckles one, the body would be a Sonic.
+// Declared exactly like the first one (a function without a return value; the caller asks for the base character through global.characters after calling it).
+global u32 extratest.draws202
+
+function void ExtraChar.startup_char202()
+{
+	++extratest.startups
+	global.characters = CHARS_KNUCKLES_ALONE
+}
+
+function void ExtraChar.drawCharacterSprite_char202()
+{
+	u64 key = pop()
+	bool asSmallGhost = pop()
+	s16 py = s16(pop())
+	s16 px = s16(pop())
+	u8 variant = pop()
+	u8 character = pop()
+	++extratest.draws
+	++extratest.draws202
+	u16 renderQueue = 0xa000 - char.sprite_priority
+	Renderer.drawRect(px - 7, py - 12, 14, 24, 0x40e060ff, renderQueue, false)
+	push(true)
+}

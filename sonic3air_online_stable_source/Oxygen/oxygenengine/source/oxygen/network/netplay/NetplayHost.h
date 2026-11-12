@@ -72,6 +72,7 @@ public:
 		NetplayLobby::ChatRateLimiter mChatLimiter;
 		uint16 mCharacter = NetplayLobby::CHARACTER_NONE;		// The character this player picked, as the host accepted it (CHARACTER_NONE until the slot is known)
 		bool mCharacterNotice = false;				// The host changed this player's request (not allowed or not installed): the player is told
+		bool mLateRequestLogged = false;			// A character request that came after the picks were fixed was logged
 		NetplayLobby::CharacterRateLimiter mCharacterLimiter;
 		inline bool isActive() const  { return mAuthenticated && !mLeaving && getState() == NetConnection::State::CONNECTED; }
 		uint32 mStartGamePacketID = 0;

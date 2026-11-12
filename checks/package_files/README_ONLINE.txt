@@ -57,9 +57,11 @@ CHOOSING YOUR CHARACTER
   Extra characters: if the extra-slot character mods (Extra Slots Unlimited and the characters made for it) are installed, their
   characters appear in the list of players 2, 3 and 4 as "EXTRA <slot>" (the well known slots 35 and 90 by their name). Everybody has
   to install the same mods: the join check refuses friends with other mods, so everybody's list is the same, and the host checks every
-  pick again. The list is read from the game's scripts when the lobby opens; without such a mod it is Sonic, Tails and Knuckles.
-  If a picked extra character is not installed any more when the game starts (the mod was switched off in between), that player gets
-  the default of the slot and the lobby says so; nothing breaks. An extra character is only checked to be a script mod
+  pick again. The list is read from the game's scripts and looked at again about once a second while the lobby is open (so it follows a mod that is switched on or off meanwhile; a pick whose mod went away becomes the default of its slot and that player is told in the lobby); without such a mod it is Sonic, Tails and Knuckles.
+  If a picked extra character is not installed any more on the host when the game starts (the mod was switched off in between), that player
+  gets the default of the slot and the lobby says so; nothing breaks. A friend never swaps a character on its own: if the host's start
+  message names an extra character that the friend's game cannot find (the mod is missing there or still loading), the friend refuses the
+  start with the 'different mods' message instead of playing another character than the others (the friend can press Retry). An extra character is only checked to be a script mod
   that provides ExtraChar.startup_charN (like the real ones); nobody checks what it looks like or whether its abilities work for players 2 to 4.
   Saving: if the host's pick is another character than the one the save slot was made for, this game does not write to that slot
   (so a Sonic save never gets Knuckles' progress). Play without a save slot, or with a slot of that character, to save.

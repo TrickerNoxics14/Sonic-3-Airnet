@@ -377,3 +377,44 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Siblings: the stock `Init` in standalone/enginecallbacks.lemon only re-derives values from settings (safe to repeat, it says so itself); `InitializeGameCharacters` runs at level start on every computer at the same frame (fine); the test harness mods keep their counters in globals that the state restores (fine).
 - Guard: K1f (a friend whose game connection breaks while playing is restored and reports the same bodies, with `joined` true, 1500 frames later). Not covered: other mod variables that are set once and never again; they are restored from the host now.
 - Lesson: a reset hook that runs "on load" must know whether the load brought state with it.
+
+## 2026-11-12 · host-decided-value-replaced-on-one-computer · cpp
+- Seed: NetplayManager::setSessionCharacters (used by the friend for the host's start message) re-checked each pick against the friend's own list of installed extra characters and silently put the slot default in its place. That list is cached for 1 s and is empty while the script program reloads, so a host pick (extra character 90) could become Knuckles on one computer only: different actors, and the sync hash (64 KB work RAM) does not cover the picks.
+- Root cause: a value that the host decided and that every computer must run identically was "sanitized" on the receiving side with local state. Sanitizing belongs to the authority; a receiver may only accept or refuse.
+- Fix: friends use the host's picks exactly as sent or refuse the start with the "different mods" failure and a reason (NetplayLobby::findUnusableSessionPick, strict setSessionCharacters; the list is re-read right then; the same picks again during a repair are not re-checked). The host adopts what its own manager made valid (no divergence between what it sends and what it runs).
+- Search: `grep -n "sanitize" -r sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/network/netplay` and ask for each call: who is the authority, and is this the authority?
+- Guard: core tests "a friend finds out whether it can use the host's picks exactly as sent ..." (mutating the helper turns them red). Not tested at runtime (a friend without the mod is refused earlier by the mod fingerprint; the stale-list window cannot be provoked reliably).
+- Lesson: never replace an authoritative value with a default on one peer; refuse instead.
+
+## 2026-11-12 · stale-state-undoes-local-choice · cpp
+- Seed: NetplayClient lobby state handler took over the host's pick whenever the "changed by the host" bit was set and the pick differed from the friend's request. The bit stays set until the host accepts a changed request, and lobby states are rebroadcast about once a second, so a state sent before the host read a new request reverted the friend's choice (and the next heartbeat then asked the host for the old pick).
+- Fix: NetplayLobby::CharacterRequestTracker: a fresh request is kept for 3 s or until the host's state shows it; only then a different pick with the bit set is taken over. Picks fixed at the start and host-side changes of a pick that the friend did not just ask for still apply at once.
+- Search: `grep -n "mCharacterNotice\|mLobbyCharacters" -r sonic3air_online_stable_source/Oxygen`; any "take over what the server says" code needs to know whether the server has seen our newest request.
+- Guard: core tests "an old lobby state ... does not undo a request that was just made" (settle time set to 0 turns them red).
+- Lesson: optimistic local state needs a pending marker, or every old broadcast undoes it.
+
+## 2026-11-12 · short-grace-timeout-discards-a-choice · cpp
+- Seed: NetplayHost::friendsHaveAnnounced let the game start after 3 s without a friend's first lobby message, which fixed the friend's character at the slot default, with nothing written down.
+- Fix: 10 s (NetplayLobby::ANNOUNCE_WAIT_SECONDS, messages are reliable so a friend silent for that long is about to time out), the host logs every friend that had not announced at the lock and every request that comes after the lock (once per friend), the friend logs when the fixed pick differs from what it asked for.
+- Guard: core test for the wait rule. Not tested at runtime (would need a delayed first message).
+- Lesson: when a fallback discards user input, say so in the log of both sides.
+
+## 2026-11-12 · test-fixture-shares-the-fallback-value · lemon
+- Seed: the only extra character of the checks was Sonic based and the mod's fallback for "base character unknown" is Sonic, so a broken base-character lookup (resolveExtraBaseCharacter) passed every check. Confirmed by mutation: with the lookup disabled the old K scenarios stay green; the new Knuckles-based slot 202 turns K3a red.
+- Fix: checks\harness\ExtraSlotTestMod got slot 202 (CHARS_KNUCKLES_ALONE), used for player 4 in K1 and player 2 in K3; the expected body is a Knuckles.
+- Lesson: a test double must differ from the default it is meant to be distinguished from.
+
+## 2026-11-12 · clear-memory-slot-without-owner-check · lemon
+- Seed: DropIn.convertPlayer2 cleared the object slot 0xffffcc9e (the dust cloud of the second character) unconditionally, the tails object at 0xffffcc0a only after an owner check.
+- Fix: DropIn.isPlayer2DustObject (owner field +0x42 = 0xb04a, or the unrun stock dust object); harness checks the guard on the live memory (K1i) and the dust is still there for a Tails player 2 (p2dust 1 in K2).
+- Search: `grep -n "zeroMemory" -r DropInCoop/scripts` (the other zeroMemory clears an actor slot that this mod itself created).
+
+## 2026-11-12 · private-memory-areas-without-declared-size · lemon
+- Seed: private scratch areas of players 2, 3 and 4 were bare numbers in three places; nothing said how large they are or that they must not overlap.
+- Measured: the legacy helpers use the dust object at A6 (0x4a bytes) and one word at A5 = A6 + 0x70, so the areas did not overlap (player 4: up to 0x8fe1f1, player 2 from 0x8fe200). Not a live defect, but unguarded.
+- Fix: constants SPEED_SIZE, SCRATCH_SIZE, PARTY_SCRATCH3/4 and check B4 (all six areas declared, no overlap). Third-party extra-character code may use A5/A6 differently: unknown.
+
+## 2026-11-12 · check-script-overwrites-the-players-copy · powershell
+- Seed: run_checks.ps1 mirrors the repository's DropInCoop over %APPDATA%\Sonic3AIR\mods\DropInCoop at every run (needed: the engine only installs bundled mods from its working directory), without keeping what was there.
+- Fix: if the installed copy differs from the source (SHA-256 of every file), it is copied to %APPDATA%\Sonic3AIR\mods_backup\DropInCoop_<time> first (newest 3 kept; outside the mods folder so the game does not load it).
+- Lesson: a check that "installs the thing under test" into the user's real folders must back up what it replaces.

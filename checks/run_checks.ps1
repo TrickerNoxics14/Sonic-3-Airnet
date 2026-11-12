@@ -539,6 +539,17 @@ try
 
 	$hookHits = @(Select-String -Path (Join-Path $sourceMod "scripts\*.lemon") -Pattern 'test\.frame|S3AIR_|Checks\.report' | ForEach-Object { $_.Filename + ":" + $_.LineNumber })
 	Add-Result "B2" "Co-op scripts contain no test hooks" ($hookHits.Count -eq 0) ($hookHits -join ", ")
+	# The private memory areas of the mod (speed caps and scratch space of players 2, 3 and 4) must not overlap: two characters that share them would corrupt each other
+	$modSource = (@($modScripts | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n")
+	$constants = @{}
+	foreach ($m in [regex]::Matches($modSource, '(?m)^constant\s+u32\s+DropIn\.(\w+)\s*=\s*(0x[0-9a-fA-F]+)')) { $constants[$m.Groups[1].Value] = [Convert]::ToUInt32($m.Groups[2].Value.Substring(2), 16) }
+	$regions = @()
+	$missing = @()
+	foreach ($name in @('PARTY_SPEED3', 'PARTY_SPEED4', 'P2_SPEED')) { if ($constants.ContainsKey($name) -and $constants.ContainsKey('SPEED_SIZE')) { $regions += [pscustomobject]@{ Name = $name; Start = [uint32]$constants[$name]; End = [uint32]($constants[$name] + $constants['SPEED_SIZE']) } } else { $missing += $name } }
+	foreach ($name in @('PARTY_SCRATCH3', 'PARTY_SCRATCH4', 'P2_SCRATCH')) { if ($constants.ContainsKey($name) -and $constants.ContainsKey('SCRATCH_SIZE')) { $regions += [pscustomobject]@{ Name = $name; Start = [uint32]$constants[$name]; End = [uint32]($constants[$name] + $constants['SCRATCH_SIZE']) } } else { $missing += $name } }
+	$overlaps = @()
+	for ($i = 0; $i -lt $regions.Count; $i++) { for ($j = $i + 1; $j -lt $regions.Count; $j++) { if ($regions[$i].Start -lt $regions[$j].End -and $regions[$j].Start -lt $regions[$i].End) { $overlaps += ($regions[$i].Name + '/' + $regions[$j].Name) } } }
+	Add-Result "B4" "Co-op scripts: the private speed-cap and scratch areas of players 2, 3 and 4 are all declared (with their sizes) and do not overlap" (($missing.Count -eq 0) -and ($overlaps.Count -eq 0) -and ($regions.Count -eq 6)) ("missing: " + ($missing -join ', ') + "; overlapping: " + ($overlaps -join ', '))
 	$signatures = @{}
 	foreach ($file in $modScripts) {
 		foreach ($definition in [regex]::Matches((Get-Content -Raw $file.FullName), '(?m)^function\s+\w+\s+([\w.]+)\(([^)]*)\)')) {
@@ -572,6 +583,29 @@ try
 	# build folder above, so the copy in the mods folder is brought up to date here. Without this a check that needs a new mod script runs against an old copy
 	# (found with stage K: the harness could not find a function that only the new script defines).
 	$installedMod = Join-Path $appdata 'mods\DropInCoop'
+	# The installed copy may be the player's own (edited, or newer than the repository): it is never overwritten without a copy. When it differs from the source, the whole
+	# folder is first copied to "<appdata>\mods_backup\DropInCoop_<time>" (outside the mods folder, so the game does not load it; the newest 3 are kept).
+	function Get-TreeSignature([string]$folder)
+	{
+		if (-not (Test-Path -LiteralPath $folder)) { return '' }
+		$sha = [System.Security.Cryptography.SHA256]::Create()
+		$lines = foreach ($file in (Get-ChildItem -LiteralPath $folder -Recurse -File | Sort-Object FullName))
+		{
+			$stream = [System.IO.File]::OpenRead($file.FullName)
+			try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)) } finally { $stream.Dispose() }
+			($file.FullName.Substring($folder.TrimEnd('\').Length).ToLowerInvariant() + '=' + $hash)
+		}
+		return ($lines -join "`n")
+	}
+	if ((Test-Path -LiteralPath $installedMod) -and (@(Get-ChildItem -LiteralPath $installedMod -Recurse -File).Count -gt 0) -and ((Get-TreeSignature $installedMod) -ne (Get-TreeSignature $sourceMod)))
+	{
+		$backupRoot = Join-Path $appdata 'mods_backup'
+		New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+		$backupFolder = Join-Path $backupRoot ('DropInCoop_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+		Copy-Item -LiteralPath $installedMod -Destination $backupFolder -Recurse
+		Write-Host "The installed co-op mod differed from the source: a copy was saved to $backupFolder" -ForegroundColor Yellow
+		@(Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'DropInCoop_*' | Sort-Object Name -Descending | Select-Object -Skip 3) | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+	}
 	New-Item -ItemType Directory -Path $installedMod -Force | Out-Null
 	& robocopy $sourceMod $installedMod /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 	if ($LASTEXITCODE -ge 8) { throw "Could not update the installed co-op mod from the source (robocopy exit code $LASTEXITCODE)" }
@@ -1757,12 +1791,12 @@ public class RelayFlood
 				if (Run-K 'K1') {
 				try
 				{
-					$k1 = Invoke-KScenario 'K1' $true @{ host = 'knuckles'; f1 = 'sonic'; f2 = 'extra201'; f3 = 'knuckles' } $true '0x0001'
+					$k1 = Invoke-KScenario 'K1' $true @{ host = 'knuckles'; f1 = 'sonic'; f2 = 'extra201'; f3 = 'extra202' } $true '0x0001'
 					$t = $k1.Texts
-					Add-Result 'K1a' 'Lobby: host and three friends join and are ready; the lobby lists the test extra-slot character as installed' ($k1.JoinedOk -and $k1.AllReady -and ($t.host -match 'characters that can be picked: Sonic, Tails, Knuckles, extra characters in the slots: 201')) ("joined: $($k1.JoinedOk), all ready: $($k1.AllReady)")
-					Add-Result 'K1b' 'Lobby: the host accepts every pick and everybody sees the same list of picks (host Knuckles, player 2 Sonic, player 3 the extra character, player 4 Knuckles)' (($t.host -match 'player 2 \(Friend 1\) plays as SONIC') -and ($t.host -match 'player 3 \(Friend 2\) plays as EXTRA 201') -and ($t.host -match 'player 4 \(Friend 3\) plays as KNUCKLES') -and ($t.host -match 'the host plays as KNUCKLES') -and ($t.f1 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES') -and ($t.f2 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES') -and ($t.f3 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,KNUCKLES')) ''
-					Add-Result 'K1c' 'Fixed at the start: every computer logs the same four characters for the game' (($t.host -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f1 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f2 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES') -and ($t.f3 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 KNUCKLES')) ''
-					$expected = 'picks 0002 0000 01c9 0002 bodies 2 0 0 2 p2actor 1 p2x 0 x3 201 x4 0 second 1 chars 3 party 4'
+					Add-Result 'K1a' 'Lobby: host and three friends join and are ready; the lobby lists the test extra-slot character as installed' ($k1.JoinedOk -and $k1.AllReady -and ($t.host -match 'characters that can be picked: Sonic, Tails, Knuckles, extra characters in the slots: 201 202')) ("joined: $($k1.JoinedOk), all ready: $($k1.AllReady)")
+					Add-Result 'K1b' 'Lobby: the host accepts every pick and everybody sees the same list of picks (host Knuckles, player 2 Sonic, player 3 the Sonic-based extra character 201, player 4 the Knuckles-based extra character 202)' (($t.host -match 'player 2 \(Friend 1\) plays as SONIC') -and ($t.host -match 'player 3 \(Friend 2\) plays as EXTRA 201') -and ($t.host -match 'player 4 \(Friend 3\) plays as EXTRA 202') -and ($t.host -match 'the host plays as KNUCKLES') -and ($t.f1 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,EXTRA 202') -and ($t.f2 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,EXTRA 202') -and ($t.f3 -match 'lobby: characters KNUCKLES,SONIC,EXTRA 201,EXTRA 202')) ''
+					Add-Result 'K1c' 'Fixed at the start: every computer logs the same four characters for the game' (($t.host -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 EXTRA 202') -and ($t.f1 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 EXTRA 202') -and ($t.f2 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 EXTRA 202') -and ($t.f3 -match 'characters of this game: player 1 KNUCKLES, player 2 SONIC, player 3 EXTRA 201, player 4 EXTRA 202')) ''
+					$expected = 'picks 0002 0000 01c9 01ca bodies 2 0 0 2 p2actor 1 p2x 0 x3 201 x4 202 second 1 chars 3 party 4 p2dust 0'
 					$allSame = $true; $allExpected = $true; $detail = @()
 					foreach ($key in @('host', 'f1', 'f2', 'f3'))
 					{
@@ -1772,17 +1806,25 @@ public class RelayFlood
 						$allExpected = $allExpected -and $ok
 						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
 					}
-					Add-Result 'K1d' 'In the game, on BOTH peers (all four computers): every slot has the character that was picked (Knuckles as main character with Tails, player 2 turned into Sonic, player 3 is the extra character on a Sonic base, player 4 Knuckles); the same again much later' $allExpected ($detail -join ' | ')
+					Add-Result 'K1d' 'In the game, on BOTH peers (all four computers): every slot has the character that was picked (Knuckles as main character with Tails, player 2 turned into Sonic, player 3 is the extra character 201 on a Sonic base, player 4 is the extra character 202 on a KNUCKLES base: the body is a Knuckles, which only a real lookup of the base character gives, the fallback would be a Sonic); the same again much later; and the dust object of Tails is gone because player 2 is not Tails any more' $allExpected ($detail -join ' | ')
 					$drawn = $true; $drawDetail = @()
 					foreach ($key in @('host', 'f1', 'f2', 'f3'))
 					{
 						$roleLine = Get-KReports $t[$key] 'charpick a role'
-						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+)') } else { $null }
-						$ok = ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0)
+						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+) draws202 (\d+)') } else { $null }
+						$ok = ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0) -and ([int]$m.Groups[3].Value -gt 0)
 						$drawn = $drawn -and $ok
 						$drawDetail += ($key + ': ' + $(if ($roleLine.Count -ge 1) { $roleLine[0] } else { 'no report' }))
 					}
 					Add-Result 'K1e' 'The test extra-slot character was really drawn by its own mod on every computer (not a stand-in)' $drawn ($drawDetail -join ' | ')
+					$guardOk = $true; $guardDetail = @()
+					foreach ($key in @('host', 'f1', 'f2', 'f3'))
+					{
+						$guardLine = Get-KReports $t[$key] 'charpick dustguard'
+						$guardOk = $guardOk -and ($guardLine.Count -ge 1) -and ($guardLine[0] -eq 'dustguard own 1 foreign 0')
+						$guardDetail += ($key + ': ' + $(if ($guardLine.Count -ge 1) { $guardLine[0] } else { 'no report' }))
+					}
+					Add-Result 'K1i' 'The converted player 2 only clears the dust object at 0xffffcc9e when it is player 2''s own (owner field 0xb04a): an object with another owner is left alone (tested on the live memory on every computer)' $guardOk ($guardDetail -join ' | ')
 					Add-Result 'K1f' 'Reconnect: a friend whose lobby connection broke came back to its slot and kept its pick (player 3 the extra character); a friend whose game connection broke while playing was restored and the picks did not change' (($t.f2 -match 'reconnected to the lobby, back in player slot 3') -and ($t.host -match 'player 3 keeps its character EXTRA 201') -and ($t.f3 -match 'reconnected and restored the existing session') -and ((Get-KReports $t.f3 'charpick b').Count -ge 1)) ''
 					Test-KSync $k1 'K1' 'all four characters different from the defaults'
 					$errors = ($t.host + $t.f1 + $t.f2 + $t.f3) -match $errorPattern
@@ -1803,7 +1845,7 @@ public class RelayFlood
 					$t = $k2.Texts
 					Add-Result 'K2a' 'Without an extra-slot mod only Sonic, Tails and Knuckles are on the list' ($k2.JoinedOk -and $k2.AllReady -and ($t.host -match 'characters that can be picked: Sonic, Tails, Knuckles(\r?\n)') -and -not ($t.host -match 'extra characters in the slots')) ("joined: $($k2.JoinedOk), all ready: $($k2.AllReady)")
 					Add-Result 'K2b' 'The host refuses a character that is not installed and a made-up number, tells those friends, and their picks stay the roles of old (Tails and Knuckles), and the lobby screen of those friends says so' (([regex]::Matches($t.host, 'asked for a character that is not possible')).Count -ge 2 -and ($t.f1 -match 'the host changed our character to TAILS') -and ($t.f1 -match 'Lobby: on screen: character notice') -and ($t.f2 -match 'the host changed our character to KNUCKLES') -and ($t.f2 -match 'Lobby: on screen: character notice') -and ($t.host -match 'characters of this game: player 1 GAME MENU, player 2 TAILS, player 3 KNUCKLES, player 4 SONIC')) ''
-					$expected = 'picks fffe 0001 0002 0000 bodies 0 1 2 0 p2actor 0 p2x 0 x3 0 x4 0 second 1 chars 0 party 4'
+					$expected = 'picks fffe 0001 0002 0000 bodies 0 1 2 0 p2actor 0 p2x 0 x3 0 x4 0 second 1 chars 0 party 4 p2dust 1'
 					$allExpected = $true; $detail = @()
 					foreach ($key in @('host', 'f1', 'f2', 'f3'))
 					{
@@ -1828,9 +1870,9 @@ public class RelayFlood
 				if (Run-K 'K3') {
 				try
 				{
-					$k3 = Invoke-KScenario 'K3' $true @{ f1 = 'extra201' } $false '0x0001' 1
+					$k3 = Invoke-KScenario 'K3' $true @{ f1 = 'extra202' } $false '0x0001' 1
 					$t = $k3.Texts
-					$expected = 'picks fffe 01c9 0002 0000 bodies 0 0 255 255 p2actor 1 p2x 201 x3 0 x4 0 second 1 chars 0 party 2'
+					$expected = 'picks fffe 01ca 0002 0000 bodies 0 2 255 255 p2actor 1 p2x 202 x3 0 x4 0 second 1 chars 0 party 2 p2dust 0'
 					$allExpected = $true; $detail = @()
 					foreach ($key in @('host', 'f1'))
 					{
@@ -1839,13 +1881,13 @@ public class RelayFlood
 						$allExpected = $allExpected -and $ok
 						$detail += ($key + ': ' + $(if ($reports.Count -ge 1) { $reports[0] } else { 'no report' }))
 					}
-					Add-Result 'K3a' 'Two players: player 2 is turned into the picked extra character (a Sonic base with its own mod drawing it) on both computers; the main character stays what the menu says' ($k3.JoinedOk -and $allExpected) ($detail -join ' | ')
+					Add-Result 'K3a' 'Two players: player 2 is turned into the picked extra character 202 (a Knuckles base: the body is a Knuckles, not the Sonic fallback; its own mod draws it) on both computers; the main character stays what the menu says' ($k3.JoinedOk -and $allExpected) ($detail -join ' | ')
 					$drawn = $true; $drawDetail = @()
 					foreach ($key in @('host', 'f1'))
 					{
 						$roleLine = Get-KReports $t[$key] 'charpick a role'
-						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+)') } else { $null }
-						$drawn = $drawn -and ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0)
+						$m = if ($roleLine.Count -ge 1) { [regex]::Match($roleLine[0], 'draws (\d+) startups (\d+) draws202 (\d+)') } else { $null }
+						$drawn = $drawn -and ($null -ne $m) -and $m.Success -and ([int]$m.Groups[1].Value -gt 0) -and ([int]$m.Groups[3].Value -gt 0)
 						$drawDetail += ($key + ': ' + $(if ($roleLine.Count -ge 1) { $roleLine[0] } else { 'no report' }))
 					}
 					Add-Result 'K3b' 'The extra character of player 2 was drawn by its own mod on both computers' $drawn ($drawDetail -join ' | ')
@@ -1869,7 +1911,7 @@ public class RelayFlood
 					$t = $k4.Texts
 					Add-Result 'K4a' 'Unavailable at the start: the host notices that the extra character is gone, gives player 3 the default of its slot and tells it (log and the lobby screen of that friend)' (($t.host -match 'character of player 3 \(EXTRA 201\) is not available any more, using KNUCKLES') -and ($t.f2 -match 'the host changed our character to KNUCKLES') -and ($t.f2 -match 'Lobby: on screen: character notice')) ''
 					Add-Result 'K4b' 'The game starts with that on every computer (player 3 Knuckles instead of the extra character, player 2 still turned into Sonic), the same everywhere, and nothing broke' (($t.host -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC') -and ($t.f1 -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC') -and ($t.f2 -match 'characters of this game: player 1 GAME MENU, player 2 SONIC, player 3 KNUCKLES, player 4 SONIC')) ''
-					$expected = 'picks fffe 0000 0002 0000 bodies 0 0 2 255 p2actor 1 p2x 0 x3 0 x4 0 second 1 chars 0 party 3'
+					$expected = 'picks fffe 0000 0002 0000 bodies 0 0 2 255 p2actor 1 p2x 0 x3 0 x4 0 second 1 chars 0 party 3 p2dust 0'
 					$allExpected = $true; $detail = @()
 					foreach ($key in @('host', 'f1', 'f2'))
 					{

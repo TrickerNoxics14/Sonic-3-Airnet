@@ -188,10 +188,10 @@ void NetplayHost::retireConnection(PlayerConnection* connection)
 
 bool NetplayHost::friendsHaveAnnounced() const
 {
-	// The game starts for a friend once it has said its name, readiness and character (its first lobby message comes right after the code check), or after three seconds at most.
+	// The game starts for a friend once it has said its name, readiness and character (its first lobby message comes right after the code check), or after NetplayLobby::ANNOUNCE_WAIT_SECONDS at most (a friend that is silent for that long gets the default of its slot, which is logged).
 	// Without this, a friend who joins without the lobby screen could be given the game before the host heard which character it wants.
 	for (const PlayerConnection* connection : mPlayerConnections)
-		if (nullptr != connection && connection->isActive() && !connection->mLobbyAnnounced && connection->mAuthSeconds < 3.0f)
+		if (nullptr != connection && connection->isActive() && NetplayLobby::mustWaitForAnnouncement(connection->mLobbyAnnounced, connection->mAuthSeconds))
 			return false;
 	return true;
 }
@@ -1105,7 +1105,15 @@ void NetplayHost::handleCharacterRequest(PlayerConnection& connection, uint16 re
 	if (slot < 1 || slot >= MAX_PLAYERS || requested == NetplayLobby::CHARACTER_NONE)
 		return;
 	if (mPicksLocked)
-		return;		// the game has started: every pick is fixed for this session
+	{
+		// the game has started: every pick is fixed for this session (said once per friend, so a request that comes too late is not lost without a trace)
+		if (requested != mSessionPicks[slot] && !connection.mLateRequestLogged)
+		{
+			connection.mLateRequestLogged = true;
+			RMX_LOG_INFO("Netplay host: player " << (slot + 1) << " asked for " << NetplayLobby::getCharacterName(requested) << " after the picks were fixed, it plays as " << NetplayLobby::getCharacterName(mSessionPicks[slot]));
+		}
+		return;
+	}
 	if (requested == connection.mCharacter)
 		return;		// the same request that is repeated every two seconds together with the name
 	if (!connection.mCharacterLimiter.allow(SDL_GetTicks()))
@@ -1178,13 +1186,21 @@ void NetplayHost::lockCharacters()
 	if (mPicksLocked)
 		return;
 	revalidateCharacters();		// the characters that are installed right now decide (a mod may have been switched off since the pick)
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive() && !connection->mLobbyAnnounced)
+			RMX_LOG_INFO("Netplay host: player " << (int)(connection->mPlayerIndex + 1) << " has not sent its first lobby message yet, its character is the default of its slot (" << NetplayLobby::getCharacterName(connection->mCharacter) << ")");
 	uint16 picks[MAX_PLAYERS];
 	for (int slot = 0; slot < MAX_PLAYERS; ++slot)
 		picks[slot] = getCharacterOfSlot(slot);
 	for (int slot = 0; slot < MAX_PLAYERS; ++slot)
 		mSessionPicks[slot] = picks[slot];
 	mPicksLocked = true;
-	mNetplayManager.setSessionCharacters(mSessionPicks);
+	if (!mNetplayManager.setSessionCharacters(mSessionPicks))
+	{
+		// (cannot happen right after revalidateCharacters, unless the list of installed characters changed in between: what is sent to the friends must be what this game uses)
+		for (int slot = 0; slot < MAX_PLAYERS; ++slot)
+			mSessionPicks[slot] = mNetplayManager.getSessionCharacter(slot);
+	}
 	mLobbyLastKey.clear();
 }
 

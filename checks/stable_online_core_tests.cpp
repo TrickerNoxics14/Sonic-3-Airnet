@@ -703,6 +703,56 @@ namespace
 			report("characters: the picks of a session are valid with the mods that were there, and not valid when a mod is gone", defaultsOk && validWithMods && invalidWithoutMods);
 		}
 
+		// A friend uses the host's picks exactly as sent, or refuses the start (finding: a pick replaced on one computer only makes the computers run other characters)
+		{
+			SessionCharacters session;
+			session.mPicks[1] = CHARACTER_SONIC;
+			session.mPicks[2] = makeExtraCharacter(90);
+			session.mPicks[3] = CHARACTER_KNUCKLES;
+			const int configured[4] = { 0, 0, 0, 0 };
+			CharacterList gone;										// the same mods, but the list could not be read right now (script program reloading)
+			const int usable = findUnusableSessionPick(session.mPicks, withExtras, configured);
+			const int missingExtra = findUnusableSessionPick(session.mPicks, stockOnly, configured);
+			const int missingEmpty = findUnusableSessionPick(session.mPicks, gone, configured);
+			report("characters: a friend finds out whether it can use the host's picks exactly as sent; an extra character that it does not have is reported (slot 3), never replaced", usable == -1 && missingExtra == 2 && missingEmpty == 2);
+			uint16 tailsForThree[4] = { CHARACTER_MENU, CHARACTER_TAILS, CHARACTER_TAILS, CHARACTER_SONIC };		// Tails exists once: slot 3 may not have it
+			report("characters: picks that no slot may have (Tails for player 3) are reported too, so a friend refuses a start message that could not come from a real host", findUnusableSessionPick(tailsForThree, withExtras, configured) == 2 && findUnusableSessionPick(tailsForThree, withExtras, nullptr) == 2);
+		}
+
+		// A friend's new request is not undone by lobby states that are older than the host's answer
+		{
+			CharacterRequestTracker tracker;
+			tracker.request(CHARACTER_SONIC);
+			// an old state: the host still shows Knuckles and the notice bit from an earlier refusal is still set
+			const bool oldStateTakenOver = tracker.onHostState(CHARACTER_KNUCKLES, true, false);
+			tracker.update(1.0f);
+			const bool stillOld = tracker.onHostState(CHARACTER_KNUCKLES, true, false);
+			const bool accepted = tracker.onHostState(CHARACTER_SONIC, false, false);		// the host's answer: accepted
+			const bool afterAccepted = tracker.onHostState(CHARACTER_SONIC, true, false);
+			report("characters: an old lobby state (old pick, notice bit still set) does not undo a request that was just made; once the host accepted it, nothing is taken over", !oldStateTakenOver && !stillOld && !accepted && !afterAccepted);
+
+			CharacterRequestTracker refused;
+			refused.request(makeExtraCharacter(201));
+			const bool early = refused.onHostState(CHARACTER_KNUCKLES, true, false);
+			refused.update(CHARACTER_REQUEST_SETTLE_SECONDS + 0.1f);
+			const bool late = refused.onHostState(CHARACTER_KNUCKLES, true, false);
+			const bool noNotice = CharacterRequestTracker().onHostState(CHARACTER_KNUCKLES, false, false);
+			report("characters: a request that the host really refuses is taken over once the host had time to answer (and a plain different pick without notice is not taken over)", !early && late && !noNotice);
+
+			CharacterRequestTracker changedByHost;		// the host changed the pick of somebody who is not asking for anything (a mod went away): taken over at once
+			const bool atOnce = changedByHost.onHostState(CHARACTER_KNUCKLES, true, false);
+			CharacterRequestTracker fixedStart;
+			fixedStart.request(CHARACTER_SONIC);
+			const bool atStart = fixedStart.onHostState(CHARACTER_KNUCKLES, false, true);		// the game started: what is fixed counts, whatever was asked
+			report("characters: a pick that the host changed by itself and the picks fixed at the start are taken over at once", atOnce && atStart);
+		}
+
+		// The host waits for the friends' first lobby message long enough
+		{
+			report("characters: the host waits for a silent friend's first lobby message for ten seconds (not three), never for one that has announced itself",
+				mustWaitForAnnouncement(false, 0.0f) && mustWaitForAnnouncement(false, 3.5f) && mustWaitForAnnouncement(false, 9.9f) && !mustWaitForAnnouncement(false, 10.1f) && !mustWaitForAnnouncement(true, 0.0f));
+		}
+
 		// Packets
 		{
 			LobbyReadyPacket ready;

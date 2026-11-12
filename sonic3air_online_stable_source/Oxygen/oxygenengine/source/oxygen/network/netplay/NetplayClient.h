@@ -175,6 +175,7 @@ private:
 	uint16 mMyCharacter = NetplayLobby::CHARACTER_NONE;		// The character this player asked for (CHARACTER_NONE until the host told which one is the default of the slot)
 	uint16 mLobbyCharacters[4] = { NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE, NetplayLobby::CHARACTER_NONE };
 	bool mLobbyCharactersLocked = false;
+	NetplayLobby::CharacterRequestTracker mCharacterRequest;		// Keeps a new request of this player safe from lobby states that are older than the host's answer
 	bool mCharacterNoticeSeen = false;
 	bool mCharacterNoticePending = false;
 	std::deque<ChatLine> mChatLog;

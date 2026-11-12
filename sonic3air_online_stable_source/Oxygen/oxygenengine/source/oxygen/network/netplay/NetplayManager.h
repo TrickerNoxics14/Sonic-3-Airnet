@@ -99,7 +99,7 @@ public:
 	// The picks that were fixed when the game started, identical on every computer. They are written to the shared memory every frame while a netplay game runs
 	// (PICKS_ADDRESS: u8 "valid", then four times a low byte and a high byte), which is where the game scripts read them.
 	static const uint32 PICKS_ADDRESS = 0x8fff50;
-	void setSessionCharacters(const uint16 picks[4]);
+	bool setSessionCharacters(const uint16 picks[4], bool strict = false, std::string* outProblem = nullptr);	// Strict: used exactly as they are or refused (false + reason); not strict: made valid here, false if something had to be replaced
 	void clearSessionCharacters();
 	inline bool hasSessionCharacters() const  { return mSessionCharactersValid; }
 	inline uint16 getSessionCharacter(int slot) const  { return (slot >= 0 && slot < 4) ? mSessionCharacters.mPicks[slot] : NetplayLobby::CHARACTER_NONE; }

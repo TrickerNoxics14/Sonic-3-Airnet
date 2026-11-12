@@ -341,19 +341,53 @@ void NetplayManager::setHostCharacterPick(uint16 pick)
 		mNetplayHost->onHostCharacterChanged();
 }
 
-void NetplayManager::setSessionCharacters(const uint16 picks[4])
+bool NetplayManager::setSessionCharacters(const uint16 picks[4], bool strict, std::string* outProblem)
 {
-	// What comes from the host is checked here as well (nothing is trusted): a pick that is not possible for the slot becomes the slot's default
+	// Strict (a friend, from the start message of the host): the picks are used exactly as they are, or not at all. The host decided them, and a pick that this computer
+	// replaced by something else would make this game run another character than the others (the sync check does not cover them). That is a mod mismatch: it is refused.
+	// Not strict (the host): what it fixes is made valid for this computer first, and what is sent to the friends is what the host really uses.
+	if (strict && mSessionCharactersValid && memcmp(mSessionCharacters.mPicks, picks, sizeof(mSessionCharacters.mPicks)) == 0)
+		return true;		// the same picks again (the host repairs our game state while we play): nothing to check, nothing changes
+
+	invalidateCharacterList();		// read the installed extra characters right now, not what was cached a moment ago
 	const NetplayLobby::CharacterList& list = getAvailableCharacters();
+	int configured[4];
 	for (int slot = 0; slot < 4; ++slot)
+		configured[slot] = getConfiguredPartyExtraSlot(slot);
+
+	bool allUsable = true;
+	if (strict)
 	{
-		bool adjusted = false;
-		mSessionCharacters.mPicks[slot] = NetplayLobby::sanitizeCharacterPick(slot, picks[slot], list, NetplayLobby::defaultCharacterForSlot(slot, list, getConfiguredPartyExtraSlot(slot)), &adjusted, getConfiguredPartyExtraSlot(slot));
-		if (adjusted)
-			RMX_LOG_INFO("Netplay: the character of player " << (slot + 1) << " (" << NetplayLobby::getCharacterName(picks[slot]) << ") is not available here, using " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[slot]));
+		const int bad = NetplayLobby::findUnusableSessionPick(picks, list, configured);
+		if (bad >= 0)
+		{
+			const bool programReady = Application::instance().getSimulation().getCodeExec().getLemonScriptRuntime().hasValidProgram();
+			std::string problem = "The host picked " + NetplayLobby::getCharacterName(picks[bad]) + " for player " + std::to_string(bad + 1) + ", which this game cannot use";
+			problem += NetplayLobby::isExtraCharacter(picks[bad]) ? (programReady ? " (that extra character is not installed here)." : " (the mods are still loading).") : ".";
+			RMX_LOG_INFO("Netplay: refusing the start: " << problem);
+			if (nullptr != outProblem)
+				*outProblem = problem;
+			return false;
+		}
+		for (int slot = 0; slot < 4; ++slot)
+			mSessionCharacters.mPicks[slot] = picks[slot];
+	}
+	else
+	{
+		for (int slot = 0; slot < 4; ++slot)
+		{
+			bool adjusted = false;
+			mSessionCharacters.mPicks[slot] = NetplayLobby::sanitizeCharacterPick(slot, picks[slot], list, NetplayLobby::defaultCharacterForSlot(slot, list, configured[slot]), &adjusted, configured[slot]);
+			if (adjusted)
+			{
+				allUsable = false;
+				RMX_LOG_INFO("Netplay: the character of player " << (slot + 1) << " (" << NetplayLobby::getCharacterName(picks[slot]) << ") is not available here, using " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[slot]));
+			}
+		}
 	}
 	mSessionCharactersValid = true;
 	RMX_LOG_INFO("Netplay: characters of this game: player 1 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[0]) << ", player 2 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[1]) << ", player 3 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[2]) << ", player 4 " << NetplayLobby::getCharacterName(mSessionCharacters.mPicks[3]));
+	return allUsable;
 }
 
 void NetplayManager::clearSessionCharacters()

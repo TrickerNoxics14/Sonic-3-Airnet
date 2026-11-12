@@ -649,6 +649,68 @@ namespace NetplayLobby
 	};
 
 
+	// A friend's start message carries the picks that the host fixed. They are used exactly as sent or not at all: a pick that cannot be used here (an extra
+	// character whose mod this computer does not have, or a character that slot may never have) must not be replaced by something else on this computer only,
+	// because then the computers would run different characters. Returns the first slot whose pick cannot be used as it is, or -1 if all can.
+	inline int findUnusableSessionPick(const uint16 picks[4], const CharacterList& available, const int configuredExtraSlots[4])
+	{
+		for (int slot = 0; slot < 4; ++slot)
+			if (!isCharacterAllowedForSlot(slot, picks[slot], available, (nullptr != configuredExtraSlots) ? configuredExtraSlots[slot] : 0))
+				return slot;
+		return -1;
+	}
+
+	// The host waits this long for a friend's first lobby message (name, ready, character) before it starts the game and fixes the picks without it. Messages are
+	// sent reliably (resent until confirmed), so a friend that is still silent after this long has a connection that is about to time out anyway.
+	static const float ANNOUNCE_WAIT_SECONDS = 10.0f;
+	inline bool mustWaitForAnnouncement(bool announced, float secondsSinceAuthenticated)
+	{
+		return !announced && secondsSinceAuthenticated < ANNOUNCE_WAIT_SECONDS;
+	}
+
+	// A friend who just asked for another character keeps what it asked for until the host has answered that request. Lobby states that the host sent BEFORE it read the
+	// request (they are rebroadcast about once a second and may be on their way for a while) still show the old pick, with the "changed by the host" bit still set from an
+	// earlier refusal; taking those over would undo the friend's choice, and the next heartbeat would then ask the host for the old pick again.
+	static const float CHARACTER_REQUEST_SETTLE_SECONDS = 3.0f;
+	struct CharacterRequestTracker
+	{
+		uint16 mRequested = CHARACTER_NONE;
+		float mAge = 0.0f;
+		bool mPending = false;
+
+		inline void request(uint16 character)  { mRequested = character; mAge = 0.0f; mPending = true; }
+		inline void update(float deltaSeconds)  { if (mPending) mAge += deltaSeconds; }
+
+		// "hostPick" is what the lobby state says this player plays as. Returns true if the friend has to take over the host's pick as its own.
+		inline bool onHostState(uint16 hostPick, bool notice, bool locked)
+		{
+			if (hostPick == CHARACTER_NONE)
+				return false;
+			if (locked)
+			{
+				mPending = false;
+				return hostPick != mRequested;
+			}
+			if (mPending)
+			{
+				if (hostPick == mRequested)
+				{
+					mPending = false;		// the host accepted it
+					return false;
+				}
+				if (mAge < CHARACTER_REQUEST_SETTLE_SECONDS)
+					return false;			// maybe an old state: the host has not answered the request yet
+			}
+			if (hostPick != mRequested && notice)
+			{
+				mPending = false;
+				return true;				// the host answered with another character and says that it changed the pick
+			}
+			return false;
+		}
+	};
+
+
 	// Why the host sends a friend away
 	enum class LeaveReason : uint8
 	{

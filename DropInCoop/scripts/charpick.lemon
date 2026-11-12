@@ -122,6 +122,17 @@ function bool DropIn.canConvertPlayer2()
 	return true
 }
 
+// Does the object at 0xffffcc9e belong to player 2 (the dust cloud / splash object that the game keeps for the second character)? Its "character address" field says
+// whose dust it is (0xb04a = the body of player 2); before its first update it is still the unset start object. Anything else (another use of that slot by a mod or
+// by a game state) is not ours and is left alone.
+function bool DropIn.isPlayer2DustObject()
+{
+	u32 dust = 0xffffcc9e
+	if (u16[dust + 0x42] == u16(DropIn.P2))
+		return true
+	return u32[dust] == 0x018b3e && u8[dust + 5] == 0		// the stock dust object, not yet run
+}
+
 // Turns the Tails body of player 2 into the picked character: the same body (position, camera, rings, score, the code that makes player 2 a team member all
 // stay), but its update is the one of Sonic, Knuckles or the extra character, like players 3 and 4 have it.
 function void DropIn.convertPlayer2()
@@ -152,7 +163,8 @@ function void DropIn.convertPlayer2()
 	// The tails of Tails (an object of their own that follows its owner) and his dust cloud: without Tails they must not be drawn or updated
 	if (u16[0xffffcc0a + 0x30] == u16(DropIn.P2))
 		zeroMemory(0xffffcc0a, 0x4a)
-	zeroMemory(0xffffcc9e, 0x4a)
+	if (DropIn.isPlayer2DustObject())
+		zeroMemory(0xffffcc9e, 0x4a)
 	setSpeedCapProperties(DropIn.P2_SPEED, false)
 	tails.ai_routine = 0x06
 	tails.control_counter = 600

@@ -18,6 +18,10 @@ global u16 dropin.dead3
 global u16 dropin.dead4
 constant u32 DropIn.PARTY_SPEED3 = 0x8fe000
 constant u32 DropIn.PARTY_SPEED4 = 0x8fe010
+constant u32 DropIn.SPEED_SIZE = 0x10				// Size of one set of private speed caps (players 3 and 4: PARTY_SPEED3/4, converted player 2: P2_SPEED in charpick.lemon)
+constant u32 DropIn.SCRATCH_SIZE = 0x80			// Size of one private scratch area for the legacy dust/look helpers: the dust object at A6 (0x4a bytes) and the camera offset word at A5 = A6 + 0x70
+constant u32 DropIn.PARTY_SCRATCH3 = 0x8fe100
+constant u32 DropIn.PARTY_SCRATCH4 = 0x8fe180
 global u8 dropin.party_updating
 global bool dropin.party_wants3
 global bool dropin.party_wants4
@@ -379,7 +383,7 @@ function void DropIn.partyActorUpdate()
 	level.HCZ_water_current_flags.player1 = 0
 	A4 = index == 2 ? DropIn.PARTY_SPEED3 : DropIn.PARTY_SPEED4
 	// Private scratch for legacy dust/look helpers, outside actor and globals storage.
-	A6 = index == 2 ? 0x8fe100 : 0x8fe180
+	A6 = index == 2 ? DropIn.PARTY_SCRATCH3 : DropIn.PARTY_SCRATCH4
 	A5 = A6 + 0x70
 	dropin.party_updating = index
 	u8 savedExtraSlot = System.getGlobalVariableValueByName("global.xtrachar")

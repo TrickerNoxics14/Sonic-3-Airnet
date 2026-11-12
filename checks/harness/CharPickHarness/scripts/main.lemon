@@ -24,6 +24,24 @@ function u32 CharPick.getDraws()
 	return u32(System.getGlobalVariableValueByName("extratest.draws"))
 }
 
+function u32 CharPick.getDraws202()
+{
+	return u32(System.getGlobalVariableValueByName("extratest.draws202"))
+}
+
+// The check of "whose object is at 0xffffcc9e" (charpick.lemon) on the live memory: the object is player 2's dust while its owner field says so, and not when that
+// field names something else. The field is put back right away (within the same frame, on every computer alike).
+function string CharPick.testDustGuard()
+{
+	u16 saved = u16[0xffffcc9e + 0x42]
+	u16[0xffffcc9e + 0x42] = 0xb04a
+	bool own = DropIn.isPlayer2DustObject()
+	u16[0xffffcc9e + 0x42] = 0x1234
+	bool foreignRaw = DropIn.isPlayer2DustObject()
+	u16[0xffffcc9e + 0x42] = saved
+	return stringformat("dustguard own %d foreign %d", own ? 1 : 0, foreignRaw ? 1 : 0)
+}
+
 // One line with the facts that must be identical on every computer (no role in it)
 function string CharPick.describe()
 {
@@ -40,7 +58,8 @@ function string CharPick.describe()
 	string picks = stringformat("picks %04x %04x %04x %04x", pick0, pick1, pick2, pick3)
 	string bodies = stringformat("bodies %d %d %d %d", c1, c2, c3, c4)
 	string extras = stringformat("p2actor %d p2x %d x3 %d x4 %d", DropIn.isPlayer2Actor() ? 1 : 0, dropin.p2_converted_slot, DropIn.partyExtraSlot(2), DropIn.partyExtraSlot(3))
-	string game = stringformat("second %d chars %d party %d", getSecondCharacter() == 0xff ? 0 : 1, global.characters, DropIn.partyCount())
+	// p2dust: is the dust object that the game keeps for the second character still there? (a converted player 2 removes it, a Tails player 2 must keep it)
+	string game = stringformat("second %d chars %d party %d p2dust %d", getSecondCharacter() == 0xff ? 0 : 1, global.characters, DropIn.partyCount(), u32[0xffffcc9e] != 0 ? 1 : 0)
 	return stringformat("%s %s %s %s", picks, bodies, extras, game)
 }
 
@@ -73,7 +92,8 @@ function void UpdateGameObjects()
 			{
 				charpick.report_a = charpick.frame
 				Checks.report("charpick a", 1, CharPick.describe())
-				Checks.report("charpick a role", 1, stringformat("role %d draws %d startups %d", DropIn.role(), CharPick.getDraws(), u32(System.getGlobalVariableValueByName("extratest.startups"))))
+				Checks.report("charpick a role", 1, stringformat("role %d draws %d startups %d draws202 %d", DropIn.role(), CharPick.getDraws(), u32(System.getGlobalVariableValueByName("extratest.startups")), CharPick.getDraws202()))
+				Checks.report("charpick dustguard", 1, CharPick.testDustGuard())
 			}
 			else if (charpick.report_a != 0 && charpick.report_b == 0 && charpick.frame >= charpick.report_a + 1500)
 			{
