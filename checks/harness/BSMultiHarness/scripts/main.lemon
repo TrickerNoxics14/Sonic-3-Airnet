@@ -10,6 +10,7 @@
 //       2 = synthetic layout, the runner touches a red sphere (golden)        3 = four runners: r0 fails, r1 clears, r2 never ends (timeout), r3 fails later
 //       4 = every runner fails (different times)                              5 = two runners, one clears and one fails, further friends never join
 //       6 = like 3 but the view of the failed player is cycled with scripted left/right presses
+//       7 = two runners, r0 fails, r1 never ends and its player sends no button at all (idleInput hook) (idle forfeit: the stage must end 30 s after the start, not after 7 minutes)
 //
 // The harness reads the work RAM header of the multi runner code directly (0xffffe5c0..), which stays zero in the stock game.
 
@@ -222,6 +223,11 @@ function void BSH.setupLayouts()
 		BSH.setupRunner(0, 3, 12)
 		BSH.setupRunner(1, 4, 0)
 	}
+	else if (BSH.MODE == 7)
+	{
+		BSH.setupRunner(0, 3, 12)
+		BSH.setupRunner(1, 5, 0)
+	}
 }
 
 function u16 BSH.scriptedPad(u32 frame)
@@ -247,6 +253,14 @@ function u16 BSH.scriptedPad(u32 frame)
 function u16 BSMulti.runnerInput(u8 runner, u32 frame, u16 pad)
 {
 	return 0
+}
+
+// Mode 7: the player of runner 1 sends no button at all
+function u16 BSMulti.idleInput(u8 runner, u16 pad)
+{
+	if (BSH.MODE == 7 && runner == 1)
+		return 0
+	return pad
 }
 
 // The player that watches (own runner out of the game): scripted presses in mode 6 so that the view cycles
@@ -387,6 +401,11 @@ function void UpdateGameObjects()
 		{
 			BSH.diffProbe()
 		}
+		if (bsh.stage_calls == 100 && BSH.active())
+		{
+			BSH.pauseProbe()
+			BSH.checksumProbe()
+		}
 		if (bsh.stage_calls == 230 && BSH.active())
 		{
 			string objText = "runner0"
@@ -466,6 +485,25 @@ function void UpdateGameObjects()
 }
 
 
+// After the stage: the render phase of the last frame must have been put back (the loops end right after it, without a frame wait)
+function void BSMulti.cleanup()
+{
+	u8 pending = bsmulti.restore_pending
+	base.BSMulti.cleanup()
+	u32 diff = 0
+	u32 source = BSMulti.SCRATCH_UNDO
+	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
+	{
+		for (u32 k = 0; k < BSMulti.undoLength(i); ++k)
+		{
+			if (u8[BSMulti.undoAddress(i) + k] != u8[source + k])
+				++diff
+		}
+		source += BSMulti.undoLength(i)
+	}
+	Checks.report("bs cleanup", 1, stringformat("pending %d diff %d", pending, diff))
+}
+
 //-------------------------------------------------------//
 // Unit checks of the pure functions                     //
 //-------------------------------------------------------//
@@ -503,6 +541,17 @@ function void BSH.unitChecks()
 	BSH.unit("bs unit score2", BSMulti.scoreBonus(12, 3) == 120, "12 rings, 3 left: 120")
 
 	// The design defaults (a change of one of them has to be a deliberate decision)
+	// Decision: offline, minigame, rolling demo, host alone and the normal case (global.stage_type is 1 in the normal special stage and is not a criterion)
+	BSH.unit("bs unit decide1", BSMulti.decideFrom(0, 0, 0, 3) == 0, "offline (role 0): stock stage")
+	BSH.unit("bs unit decide2", BSMulti.decideFrom(1, 0, 0, 1) == 0, "online host without a friend: stock stage")
+	BSH.unit("bs unit decide3", BSMulti.decideFrom(1, 0, 0, 3) == 3, "online host and player 2: runners")
+	BSH.unit("bs unit decide4", BSMulti.decideFrom(2, 1, 0, 3) == 0 && BSMulti.decideFrom(2, 0, 1, 3) == 0, "minigame and rolling demo: stock stage")
+	// Role after the session ended
+	BSH.unit("bs unit role", BSMulti.effectiveRole(3, 2) == 3 && BSMulti.effectiveRole(0, 2) == 2, "the last role is kept when the engine writes 0")
+	// Idle forfeit
+	BSH.unit("bs unit idle1", BSMulti.nextIdle(5, 0) == 6 && BSMulti.nextIdle(5, 0x80) == 0 && BSMulti.nextIdle(0xffff, 0) == 0xffff, "counts frames without a button, a button resets, no wrap")
+	BSH.unit("bs unit idle2", !BSMulti.isIdleForfeit(u16(BSMulti.IDLE_FORFEIT_FRAMES - 1)) && BSMulti.isIdleForfeit(u16(BSMulti.IDLE_FORFEIT_FRAMES)), "forfeit exactly at the limit")
+	BSH.unit("bs unit idle3", BSMulti.IDLE_FORFEIT_FRAMES == 1800 && BSMulti.OFS_IDLE + 2 <= BSMulti.STRIDE && BSMulti.OFS_IDLE >= BSMulti.OFS_PLANEB + 2, "30 s, the counter lies inside the runner block behind the plane B word")
 	BSH.unit("bs unit constants", BSMulti.GRACE_AFTER_FIRST_FINISH == 1800 && BSMulti.MAX_STAGE_FRAMES == 25200 && BSMulti.AUTOSTART_FRAMES == 193 && BSMulti.MAX_RUNNERS == 4, "30 s grace, 7 min maximum, start after 193 frames, 4 runners")
 	bool undoSafe = true
 	for (u8 i = 0; i < BSMulti.UNDO_COUNT; ++i)
@@ -559,6 +608,70 @@ function string BSH.probeView(u8 v)
 		}
 	}
 	return stringformat("view %d differs from view 0 outside of the undone areas in %d bytes:%s", v, count, found)
+}
+
+// The pause menu draws the viewed runner again before each of its frames and the RAM is put back afterwards, like in a normal frame
+function void BSH.pauseProbe()
+{
+	// The state a pause frame starts from: a normal frame was drawn and its RAM put back (the lists of objects to draw are empty then)
+	BSMulti.renderViewed()
+	BSMulti.onBeforeYield()
+	copyMemory(0x880000, 0xffff0000, 0x10000)
+	u8 pendingBefore = bsmulti.restore_pending
+	BSMulti.onPauseFrame()
+	u8 pendingAfterDraw = bsmulti.restore_pending
+	u32 changed = 0
+	u32 spriteTable = 0
+	for (u32 i = 0; i < 0x10000; ++i)
+	{
+		if (u8[0x880000 + i] != u8[0xffff0000 + i])
+		{
+			++changed
+			if (i >= 0xf800 && i < 0xfa80)
+				++spriteTable
+		}
+	}
+	BSMulti.onBeforeYield()
+	u32 diff = 0
+	u32 firstDiff = 0
+	for (u32 i = 0; i < 0x10000; ++i)
+	{
+		if (u8[0x880000 + i] != u8[0xffff0000 + i])
+		{
+			if (diff == 0)
+				firstDiff = 0xffff0000 + i
+			++diff
+		}
+	}
+	Checks.report("bs pause", 1, stringformat("pending %d/%d/%d bytes drawn %d sprite table bytes drawn %d work RAM bytes different afterwards %d first %08x", pendingBefore, pendingAfterDraw, bsmulti.restore_pending, changed, spriteTable, diff, firstDiff))
+}
+
+// The checksums of a runner block (shared memory, outside the hashed RAM) must notice a change of every word that matters, including the ones the word loops do not reach
+function void BSH.checksumProbe()
+{
+	u32 block = BSMulti.blockAddress(1)
+	u32 address = BSMulti.HEADER_STATE_CHECKSUM + 4
+	u32 saved = u32[address]
+	BSMulti.updateChecksums()
+	u32 base = u32[address]
+	u16 oldPlane = u16[block + BSMulti.OFS_PLANEB]
+	u16 oldTail = u16[block + BSMulti.OFS_OBJECT + 0x48]
+	u16 oldIdle = u16[block + BSMulti.OFS_IDLE]
+	u16[block + BSMulti.OFS_PLANEB] = oldPlane ^ 0x55
+	BSMulti.updateChecksums()
+	bool planeSeen = (u32[address] != base)
+	u16[block + BSMulti.OFS_PLANEB] = oldPlane
+	u16[block + BSMulti.OFS_OBJECT + 0x48] = oldTail ^ 0x33
+	BSMulti.updateChecksums()
+	bool tailSeen = (u32[address] != base)
+	u16[block + BSMulti.OFS_OBJECT + 0x48] = oldTail
+	u16[block + BSMulti.OFS_IDLE] = oldIdle ^ 0x07
+	BSMulti.updateChecksums()
+	bool idleSeen = (u32[address] != base)
+	u16[block + BSMulti.OFS_IDLE] = oldIdle
+	BSMulti.updateChecksums()
+	bool restored = (u32[address] == base)
+	Checks.report("bs csum", 1, stringformat("planeb %d tail %d idle %d restored %d", planeSeen ? 1 : 0, tailSeen ? 1 : 0, idleSeen ? 1 : 0, restored ? 1 : 0))
 }
 
 function void BSH.diffProbe()

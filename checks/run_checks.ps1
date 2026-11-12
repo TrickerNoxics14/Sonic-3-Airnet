@@ -2042,7 +2042,11 @@ public class RelayFlood
 					$unitText = (Read-SharedText (Join-Path $lastLogs 'J9m0-logfile.txt'))
 					$unitLines = @([regex]::Matches($unitText, 'CHECK\|bs unit (\w+)\|(PASS|FAIL)\|([^\r\n]*)'))
 					$unitFails = @($unitLines | Where-Object { $_.Groups[2].Value -eq 'FAIL' } | ForEach-Object { $_.Groups[1].Value + ' (' + $_.Groups[3].Value + ')' })
-					Add-Result 'J9e' 'Unit checks of the multi-runner rules (next runner to watch, end of the stage, roster, friends score, the named design defaults)' (($unitLines.Count -ge 20) -and ($unitFails.Count -eq 0)) ("$($unitLines.Count) checks, failed: " + ($unitFails -join ', '))
+					Add-Result 'J9e' 'Unit checks of the multi-runner rules (next runner to watch, end of the stage, roster, friends score, the named design defaults)' (($unitLines.Count -ge 27) -and ($unitFails.Count -eq 0)) ("$($unitLines.Count) checks, failed: " + ($unitFails -join ', '))
+						# The pause menu has to call the redraw hook before each of its frames (the pause is not run by the stage loop, so no runtime scenario reaches it)
+						$pauseSource = Get-Content -Raw -LiteralPath (Join-Path $game 'scripts\maingame\game_pause.lemon')
+						$pauseHook = [regex]::Match($pauseSource, 'BSMulti\.onPauseFrame\(\)[^\r\n]*\r?\n\s*waitForNextFrame\(\)')
+						Add-Result 'J9f' 'The pause menu calls BSMulti.onPauseFrame() right before each waitForNextFrame() of its loop (the runner stays visible while paused)' $pauseHook.Success ('game_pause.lemon: ' + $(if ($pauseHook.Success) { 'hook found' } else { 'hook missing' }))
 					if ($RecordBsGolden)
 					{
 						New-Item -ItemType Directory -Path (Split-Path $goldenPath) -Force | Out-Null
@@ -2182,7 +2186,19 @@ public class RelayFlood
 					# The view probe: what the render phase writes into the RAM must not depend on the viewed runner (otherwise computers that watch different runners drift apart)
 					$probeLines = 0; $probeBad = @()
 					foreach ($k in $peers) { foreach ($line in (Get-JReports $t[$k] 'bs probe')) { $probeLines++; if ($line -notmatch 'in 0 bytes') { $probeBad += ($k + ': ' + $line) } } }
-					Add-Result ($id + 'p') ("View probe ($what): rendering any runner changes no work RAM outside of the areas that are put back (every computer compared the screens of all runners from the same memory)") (($probeLines -ge $peers.Count - 1) -and ($probeBad.Count -eq 0)) ("probe lines: $probeLines, with differences: $($probeBad.Count) $($probeBad -join ' // ')")				}
+					Add-Result ($id + 'p') ("View probe ($what): rendering any runner changes no work RAM outside of the areas that are put back (every computer compared the screens of all runners from the same memory)") (($probeLines -ge $peers.Count - 1) -and ($probeBad.Count -eq 0)) ("probe lines: $probeLines, with differences: $($probeBad.Count) $($probeBad -join ' // ')")
+					# Checksums of the runner blocks notice every word that matters; the pause menu draws the viewed runner and puts the RAM back; the render phase of the last frame is put back before the results screen
+					$csumLines = 0; $csumBad = @(); $pauseLines = 0; $pauseBad = @(); $cleanLines = 0; $cleanBad = @()
+					foreach ($k in $peers)
+					{
+						foreach ($line in (Get-JReports $t[$k] 'bs csum')) { $csumLines++; if ($line -notmatch 'planeb 1 tail 1 idle 1 restored 1') { $csumBad += ($k + ': ' + $line) } }
+						foreach ($line in (Get-JReports $t[$k] 'bs pause')) { $pauseLines++; if (($line -notmatch 'pending 0/1/0') -or ($line -match 'bytes drawn 0 ') -or ($line -match 'table bytes drawn 0 ') -or ($line -notmatch 'afterwards 0 first')) { $pauseBad += ($k + ': ' + $line) } }
+						foreach ($line in (Get-JReports $t[$k] 'bs cleanup')) { $cleanLines++; if ($line -notmatch 'pending 1 diff 0$') { $cleanBad += ($k + ': ' + $line) } }
+					}
+					Add-Result ($id + 'q') ("Checksums ($what): a change of the runner's plane B word, of the last object bytes or of the idle counter changes the checksum that reaches the hashed RAM") (($csumLines -ge $peers.Count) -and ($csumBad.Count -eq 0)) ("lines: $csumLines, bad: $($csumBad -join ' // ')")
+					Add-Result ($id + 'r') ("Pause ($what): drawing the viewed runner for a pause frame changes the sprite table and the RAM is exactly as before after the frame") (($pauseLines -ge $peers.Count) -and ($pauseBad.Count -eq 0)) ("lines: $pauseLines, bad: $($pauseBad -join ' // ')")
+					Add-Result ($id + 's') ("End of the stage ($what): the render phase of the last frame is put back when the stage code cleans up (the undone RAM areas hold what they held before the render, on every computer)") (($cleanLines -ge $peers.Count) -and ($cleanBad.Count -eq 0)) ("lines: $cleanLines, bad: $($cleanBad -join ' // ')")
+				}
 
 				function Test-JSync($run, [string]$id, [string]$what)
 				{
@@ -2243,6 +2259,25 @@ public class RelayFlood
 					Test-JSync $j2 'J2' 'three players'
 				}
 				catch { Add-Result 'J2a' 'Blue Sphere scenario J2 ran' $false $_.Exception.Message }
+				finally { Stop-StartedProcesses }
+				}
+
+				# --- J4: two players, one of them sends no button at all (a player who left): the stage must end by the idle forfeit 30 s after the start, not after the 7 minute cap
+				if (Run-J 'J4') {
+				try
+				{
+					$j4 = Invoke-JScenario 'J4' 7 1 @('128') 2 420
+					Test-JScenario $j4 'J4' '2344' 0 'two players, one fails, the other one sends no input'
+					Test-JSync $j4 'J4' 'two players, one idle'
+					$endText4 = ''
+					$e4 = Get-JReports $j4.Texts.host 'bs end'
+					if ($e4.Count -gt 0) { $endText4 = ($e4 -join ' | ') }
+					$doneMatch = [regex]::Match($endText4, 'reason (\d+)')
+					$reason = -1
+					if ($doneMatch.Success) { $reason = [int]$doneMatch.Groups[1].Value }
+					Add-Result 'J4h' 'The runner of a player who sends no button is timed out by the idle forfeit (30 s after the start of the run): the stage ends because every runner finished (reason 1), not by the 7 minute cap (reason 3)' ($reason -eq 1) ("end line: $endText4")
+				}
+				catch { Add-Result 'J4a' 'Blue Sphere scenario J4 ran' $false $_.Exception.Message }
 				finally { Stop-StartedProcesses }
 				}
 

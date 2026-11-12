@@ -84,16 +84,18 @@ BLUE SPHERE SPECIAL STAGES WITH SEVERAL PLAYERS
     (100 / 200 rings) are kept; the friends get the ring bonus (10 points per ring, 5000 for every ring) as score.
   - Who takes part: the host, player 2 once he joined (any button), players 3 and 4 once they joined (Start), as in the level
     before. A friend who is connected but never joined does not run: his computer just watches (Left / Right switch the view).
-  - A player who loses the connection just keeps running with whatever input the game has for him; the time limits below make sure that the stage always ends.
+  - A player who presses no button at all for 30 seconds in a row during his run (for example somebody who lost the connection) is TIMED OUT (status TIME), so
+    that nobody has to watch a ghost runner. The other time limits below make sure that the stage always ends. The pause menu (host only) keeps showing the run.
   Defaults that were chosen (all named constants at the top of level\special\defines_bluespheres.lemon, easy to change):
     BSMulti.AUTOSTART_FRAMES = 193           the runners start by themselves after about 3 seconds (the stock text time)
     BSMulti.GRACE_AFTER_FIRST_FINISH = 1800  the others may go on for 30 seconds after the first player completed the stage
     BSMulti.MAX_STAGE_FRAMES = 25200         7 minutes: after that everybody who is still running is timed out
+    BSMulti.IDLE_FORFEIT_FRAMES = 1800       30 seconds without any button: that runner is timed out
     BSMulti.CYCLE_PREV / CYCLE_NEXT          Left / Right for the spectator
     BSMulti.RING_BONUS_FACTOR = 10, PERFECT_BONUS = 5000   friends' score from rings
   Limits (honest status): every runner is drawn as the host's main character (a friend who picked another character is not shown
   with his own sprites in the stage); only the host can touch the giant ring and pause; the other bonus stages (Slot Machine,
-  Glowing Spheres, Gumball) and the Hidden Palace emerald cave are single character stages and are not changed. A friend who joins
+  Glowing Spheres, Gumball) and the Hidden Palace emerald cave are single character stages and are not changed (every normal giant ring special stage is covered). A friend who joins
   while a stage is running just watches. Tested by automated checks on one computer (stage J), not between two homes.
 
 IN THE LOBBY

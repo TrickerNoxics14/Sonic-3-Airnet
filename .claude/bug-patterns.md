@@ -467,3 +467,31 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Siblings: bluespheres_multi.lemon BSMulti.updateEmeraldArt Nemesis path fixed (undo ranges 0xffffaa00 len 0x200 and the stack 0xfffffd00 len 0x100) · first fix used 0xffffaa00 len 0x600, which also covered the sprite lists at 0xffffac00: the runner vanished from the picture (seen in the screenshot) fixed, range cut to 0x200 · Kosinski.decompress in updateEmeraldArt not a bug (writes only the shared scratch area, probe at call 560/640 shows 0 bytes)
 - Guard: harness probe now runs at calls 100, 470, 560, 640 and also renders back to runner 0 (art switch both ways); unit check 'bs unit undo' (no undone range overlaps the sprite lists); check J3m counts runner pixels in the picture
 - Lesson: a probe must be run in every phase of the thing that is rendered (here the emerald sequence), not only at the start; and an undo range must be as small as the measured write
+
+## 2026-11-12 · render-phase-ram-write-not-undone · lemon
+- Seed: bluespheres_multi.lemon BSMulti.cleanup: clears restore_pending without restoring the undo set; the last render's RAM stayed in hashed work RAM when the stage ended
+- Broken assumption: the stage loops always do a frame wait after the last render, which restores the RAM
+- Search: `rg -n 'restore_pending' sonic3air_online_stable_source --glob *.lemon`
+- Siblings: bluespheres_multi.lemon BSMulti.cleanup fixed (calls onbeforeyield first) · BSMulti.mainLoop level.restart return path fixed (same cleanup) · game_pause.lemon pause loop: waitForNextFrame without a render fixed (bsmulti.onpauseframe) · 0xfffff62c sprite count written by RenderSprites not in the undo set fixed (undo index 6)
+- Guard: harness override of BSMulti.cleanup reports pending/diff; J*s (red on old code: diff 9); pause probe J*r; J9f source check
+
+## 2026-11-12 · ghost-participant-never-leaves · lemon
+- Seed: bluespheres_multi.lemon roster fixed at stage start; a player who left keeps a zero-input runner that counts as running (up to 7 minutes)
+- Broken assumption: a roster member keeps playing or fails by himself
+- Search: `rg -n 'STATUS_RUNNING|isRunning' sonic3air_online_stable_source --glob *bluespheres_multi.lemon`
+- Siblings: evaluateEnd end rule fixed through bsmulti.updateidle (30 s without any button = timed out)
+- Guard: unit checks idle1-3, scenario J4 (end reason 1 at frame ~1992, not the 7 minute cap)
+
+## 2026-11-12 · checksum-misses-fields · lemon
+- Seed: bluespheres_multi.lemon BSMulti.updateChecksums: object hashed 0x48 of 0x4a bytes, plane B word of runners 1-3 not hashed
+- Broken assumption: word loops over a block cover every field that matters
+- Search: `rg -n 'sumWords' sonic3air_online_stable_source --glob *.lemon`
+- Siblings: grid checksum 16 bit sampled once per 8 frames not a bug (design trade-off, state checksum changes with every collection)
+- Guard: harness checksum probe J*q (changes plane B, tail bytes, idle counter; red on the old sum)
+
+## 2026-11-12 · lost-session-role-byte · lemon
+- Seed: bluespheres_multi.lemon pickView/ownRunner read u8[0x8fff00] which the engine sets to 0 when the session ends mid-stage
+- Broken assumption: the online role byte stays valid while the stage runs
+- Search: `rg -n '0x8fff00' sonic3air_online_stable_source/Oxygen/sonic3air/scripts --glob *.lemon`
+- Siblings: BSMulti.decide reads it only at the stage start not a bug
+- Guard: unit check bs unit role (effectiveRole)

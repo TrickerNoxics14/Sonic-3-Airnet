@@ -158,6 +158,7 @@ function void GamePause.Menu()
 			}
 
 			enableCustomPlaneReset = false	// Maintain custom planes that were set before the pause
+			BSMulti.onPauseFrame()			// Blue Spheres with several online players: draw the viewed runner again (does nothing otherwise)
 			waitForNextFrame()
 			enableCustomPlaneReset = false	// ...also for the next frame (relevant in case of e.g. restart)
 

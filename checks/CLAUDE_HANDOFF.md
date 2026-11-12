@@ -719,3 +719,22 @@ Scope: online fork scripts only (`sonic3air_online_stable_source/Oxygen/sonic3ai
 - A friend who joins while a stage runs only watches. The grace/time limits, host-only lives, friend score-only are design defaults, not asked for.
 - Mutation checks were not run as separate runs; the undo-set probe and the runner-pixel check were each seen red on the real faulty code during development (probe: 499 differing bytes; picture: no runner).
 - getScreenExtend() is used by the HUD text objects and the player position inside the canonical RAM in the stock code; all test windows have the same size, so a pre-existing display-width dependency was not exercised.
+
+## Claude addendum 2026-11-12 (review findings of the Blue Sphere multi-runner stage, online fork only)
+
+Scope: online fork scripts + stage J of the checks. No C++ change, DropInCoop not touched, nothing pushed. One stock script got one line: `maingame/game_pause.lemon` (`BSMulti.onPauseFrame()` before the pause menu's waitForNextFrame; does nothing unless the multi-runner stage is active).
+
+Fixed (each logged in .claude/bug-patterns.md, exterminator method):
+- BSMulti.cleanup() cleared `restore_pending` without putting the RAM back: the last render's sprite table/palette/scroll words stayed in hashed work RAM (REAL; the cleanup probe showed 9 differing bytes on the old code). cleanup now calls `onBeforeYield()` first (also covers the level.restart path). Guard: harness overrides `BSMulti.cleanup`, checks J*s.
+- Same bug shape found while testing the pause: pause frames did not redraw the runner (the restore ran after the first pause frame). New `BSMulti.onPauseFrame()`, called from the pause menu loop; probe J*r + source check J9f (a real Start press cannot be scripted: the pause menu only resumes on a real button). Sibling: `0xfffff62c` (sprite count written by RenderSprites) was not in the undo set and showed as residue of the render; added as undo area 6.
+- Ghost runner of a player who left: new idle forfeit, 30 s (`BSMulti.IDLE_FORFEIT_FRAMES = 1800`) without any button on the runner's controller after the start text -> status TIMED_OUT, so the stage ends when everybody else is out. State: 2 bytes per runner block (`OFS_IDLE`), part of the checksum. Hook `BSMulti.idleInput` (harness uses it in mode 7). Scenario J4: end at frame 1992 with reason 1 (not the 7 min cap). Also applies to a connected player who just does not press anything for 30 s (design default, documented in README_ONLINE.txt). NOT tested with a really dropped connection.
+- Checksum gaps: tail of the object (2 bytes), runner plane B word and the idle counter are now in the per-runner checksum (probe J*q). The grid checksum stays 16 bit, one runner per 8 frames: kept (design trade-off; any collection also changes the state checksum).
+- Online role byte becomes 0 when the session ends mid-stage: `BSMulti.currentRole()` keeps the last role seen (`bsmulti.own_role`, shared memory 0x8f9f02); unit check. Inputs after a host drop still come by slot; only the view/own-runner mapping is kept.
+
+Rejected / corrected:
+- "Roster read per computer without agreement": the dropin flags are Lemon globals, which are serialized in the runtime state, set by the lockstep game from synchronized input; the lobby refuses a mod mismatch (NetplayClient MOD_MISMATCH). Not changed.
+- "Star-post stage_type != 0 not excluded": premise wrong. `global.stage_type` is 1 in the normal giant-ring special stage (defines_global.lemon); excluding `!= 0` made the multi stage never start (seen in the first J4 run, then reverted). The star post bonus stages (Gumball, Glowing Spheres, Slots) do not run this code. README now says "every normal giant ring special stage is covered"; the decision is a pure function `BSMulti.decideFrom` (unit checks).
+- "J9 only covers one player": partly wrong. The offline golden runs have getNumPlayers() == 2 (Sonic with the Tails follower, seen in the `bs enter` log line); the part that is not compared is the drawing of the Tails follower (golden holds state only). The online host without friend takes the early return of decideFrom (unit checks, not a recording). CHECKLIST wording corrected.
+- README/CHECKLIST contradiction about a lost connection: both now describe the idle forfeit.
+
+Verification: stage J 60/60 on the first full run, J9 again after adding J9f (6/6, 28 unit checks, golden 16 lines identical). Mutation: with the cleanup restore removed J4s is red (diff 9).

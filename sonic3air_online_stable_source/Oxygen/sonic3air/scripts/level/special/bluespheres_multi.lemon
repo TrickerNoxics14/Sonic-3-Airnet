@@ -36,6 +36,12 @@ function u16 BSMulti.spectatorInput(u16 pad, u32 frame)
 	return pad
 }
 
+// The pad that counts for the idle forfeit (see BSMulti.updateIdle): the raw controller of the runner's player
+function u16 BSMulti.idleInput(u8 runner, u16 pad)
+{
+	return pad
+}
+
 
 //-------------------------------------------------------//
 // Roster                                                //
@@ -84,19 +90,26 @@ function u8 BSMulti.readRosterMask()
 	return BSMulti.rosterMaskFromFlags(joined2, joined3, joined4)
 }
 
+// The decision as a pure function of the numbers (so it can be tested alone). Returns the roster mask, or 0 if the stage runs the stock way:
+// offline, the Blue Sphere minigame, a rolling demo, or fewer than two players. (global.stage_type is NOT a criterion: it is 1 in the normal special stage
+// that the giant rings lead to; the star post bonus stages gumball/glowing spheres/slots do not run this code at all.)
+function u8 BSMulti.decideFrom(u8 role, u8 minigameMode, u8 rollingDemo, u8 mask)
+{
+	if (role == 0)
+		return 0
+	if (minigameMode != 0 || rollingDemo != 0)
+		return 0
+	if (BSMulti.countBits(mask) < 2)
+		return 0
+	return mask
+}
+
 // Decides at the start of a special stage. Returns the roster mask, or 0 if the stage runs the stock way.
 function u8 BSMulti.decide()
 {
 	bsmulti.active = 0
 #if GAMEAPP
-	if (u8[0x8fff00] == 0)		// Not online (role byte written by the engine)
-		return 0
-	if (bluespheres.minigame_mode != 0 || global.rolling_demo != 0)
-		return 0
-	u8 mask = BSMulti.readRosterMask()
-	if (BSMulti.countBits(mask) < 2)
-		return 0
-	return mask
+	return BSMulti.decideFrom(u8[0x8fff00], u8(bluespheres.minigame_mode), u8(global.rolling_demo), BSMulti.readRosterMask())
 #else
 	return 0
 #endif
@@ -158,11 +171,13 @@ function void BSMulti.initStage(u8 mask)
 			initialStatus = BSMulti.STATUS_RUNNING
 		u8[BSMulti.HEADER_STATUS + r] = initialStatus
 		BSMulti.swapOut(r)
+		u16[BSMulti.blockAddress(r) + BSMulti.OFS_IDLE] = 0
 	}
 	bsmulti.view = 0
 	bsmulti.view_role = 0xff		// forces BSMulti.pickView to choose again
 	bsmulti.art_state = 0
 	bsmulti.restore_pending = 0
+	bsmulti.own_role = u8[0x8fff00]
 	bsmulti.active = 1
 	BSMulti.updateChecksums()
 }
@@ -170,6 +185,9 @@ function void BSMulti.initStage(u8 mask)
 // After the stage: the stock results screen reads the runner 0 state, which is what the live memory holds
 function void BSMulti.cleanup()
 {
+	// The last render phase may still be pending (the loops end right after it, without another frame wait): put the RAM back first, or the
+	// sprite table, palette and scroll words of the viewed runner would stay in the hashed RAM and differ between computers
+	BSMulti.onBeforeYield()
 	BSMulti.swapIn(0)
 	bsmulti.active = 0
 	bsmulti.restore_pending = 0
@@ -199,6 +217,10 @@ function void BSMulti.updateChecksums()
 		u32 block = BSMulti.blockAddress(r)
 		u32 sum = BSMulti.sumWords(block + BSMulti.OFS_STATE, 0x40, 0x811c9dc5)
 		sum = BSMulti.sumWords(block + BSMulti.OFS_OBJECT, 0x48, sum)
+		// What the word loops do not reach: the last two bytes of the object, the runner's plane B scroll word (outside the hashed RAM for runners 1-3) and the idle counter
+		sum = (sum ^ u32(u16[block + BSMulti.OFS_OBJECT + 0x48])) * 16777619
+		sum = (sum ^ u32(u16[block + BSMulti.OFS_PLANEB])) * 16777619
+		sum = (sum ^ u32(u16[block + BSMulti.OFS_IDLE])) * 16777619
 		u32[BSMulti.HEADER_STATE_CHECKSUM + r * 4] = sum
 		if ((frame & 7) == (u32(r) * 2))
 		{
@@ -287,6 +309,42 @@ function void BSMulti.simulateAll()
 			BSMulti.simulateRunner(r)
 	}
 	BSMulti.swapIn(0)
+}
+
+// A runner whose controller shows no button for IDLE_FORFEIT_FRAMES in a row is timed out (a player who left the game sends no input, and his runner would
+// otherwise run on as a ghost that everybody has to wait for). Pure functions of the numbers, so they can be tested alone.
+function u16 BSMulti.nextIdle(u16 idle, u16 rawPad)
+{
+	if (rawPad != 0)
+		return 0
+	if (idle < 0xffff)
+		return u16(idle + 1)
+	return idle
+}
+
+function bool BSMulti.isIdleForfeit(u16 idle)
+{
+	return u32(idle) >= BSMulti.IDLE_FORFEIT_FRAMES
+}
+
+// Called every frame after the runners were simulated. Counts only after the start text (the players do not have to press anything before that)
+function void BSMulti.updateIdle()
+{
+	if (bsmulti.stage_frames < BSMulti.AUTOSTART_FRAMES)
+		return
+	for (u8 r = 0; r < BSMulti.MAX_RUNNERS; ++r)
+	{
+		if (BSMulti.isRunning(r))
+		{
+			u32 address = BSMulti.blockAddress(r) + BSMulti.OFS_IDLE
+			u16[address] = BSMulti.nextIdle(u16[address], BSMulti.idleInput(r, Input.getController(r)))
+			if (BSMulti.isIdleForfeit(u16[address]))
+			{
+				u8[BSMulti.HEADER_STATUS + r] = BSMulti.STATUS_TIMED_OUT
+				u32[BSMulti.HEADER_DONE_FRAME + r * 4] = bsmulti.stage_frames
+			}
+		}
+	}
 }
 
 // Called by the stage code when the runner touches a red sphere
@@ -481,10 +539,27 @@ function u8 BSMulti.runningMask()
 	return mask
 }
 
+// The online role of this computer: the engine writes 0 into the role byte when its session ends (e.g. the host dropped during the stage); the last role
+// seen is kept then, so the player still sees and steers his own runner
+function u8 BSMulti.effectiveRole(u8 liveRole, u8 lastRole)
+{
+	if (liveRole != 0)
+		return liveRole
+	return lastRole
+}
+
+function u8 BSMulti.currentRole()
+{
+	u8 live = u8[0x8fff00]
+	if (live != 0)
+		bsmulti.own_role = live
+	return BSMulti.effectiveRole(live, bsmulti.own_role)
+}
+
 // The runner of this computer's player, 0xff if there is none (he never joined, or this is only a spectator computer)
 function u8 BSMulti.ownRunner()
 {
-	u8 role = u8[0x8fff00]
+	u8 role = BSMulti.currentRole()
 	if (role >= 1 && role <= BSMulti.MAX_RUNNERS)
 	{
 		u8 runner = role - 1
@@ -496,7 +571,7 @@ function u8 BSMulti.ownRunner()
 
 function void BSMulti.pickView()
 {
-	u8 role = u8[0x8fff00]
+	u8 role = BSMulti.currentRole()
 	u8 own = BSMulti.ownRunner()
 	u8 mask = BSMulti.runningMask()
 	if (bsmulti.view_role != role)
@@ -553,6 +628,8 @@ function u32 BSMulti.undoAddress(u8 index)
 		return 0xffffaa00		// Decompression buffer of Nemesis.loadDataToVRAM (ring art back into the VRAM; stops before the sprite lists at 0xffffac00)
 	if (index == 5)
 		return 0xfffffd00		// System stack: what the same decompression leaves behind
+	if (index == 6)
+		return 0xfffff62c		// Number of sprites that RenderSprites counted (depends on what is drawn: the runner seen, the lists of the frame)
 	return 0
 }
 
@@ -570,10 +647,12 @@ function u16 BSMulti.undoLength(u8 index)
 		return 0x200
 	if (index == 5)
 		return 0x100
+	if (index == 6)
+		return 0x01
 	return 0
 }
 
-constant u8 BSMulti.UNDO_COUNT = 6
+constant u8 BSMulti.UNDO_COUNT = 7
 
 function void BSMulti.snapshotUndo()
 {
@@ -747,6 +826,15 @@ function void BSMulti.renderViewed()
 	BSMulti.renderScriptPhase(bsmulti.view)
 }
 
+// Called by the pause menu before each of its frames: the pause does not run the stage loop, so the viewed runner is drawn again here (otherwise the first
+// frame after the restore below would show the RAM without the runner). Nothing is simulated.
+function void BSMulti.onPauseFrame()
+{
+	if (bsmulti.active == 0 || bsmulti.restore_pending != 0)
+		return
+	BSMulti.renderViewed()
+}
+
 // Called from waitForNextFrame, after V-Int and right before the frame ends
 function void BSMulti.onBeforeYield()
 {
@@ -777,6 +865,7 @@ function void BSMulti.mainLoop()
 		BSMulti.simulateAll()
 		UpdateGameObjects()
 		fn009d9e()
+		BSMulti.updateIdle()
 		BSMulti.updateStageEnd()
 		BSMulti.updateChecksums()
 		BSMulti.renderViewed()

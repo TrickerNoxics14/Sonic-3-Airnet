@@ -71,6 +71,7 @@ define bsmulti.active				=  u8[0x8f9f08]		// 1 while the runners are active (0 i
 define bsmulti.view					=  u8[0x8f9f00]		// Runner whose run this computer shows (differs between computers, not game state)
 define bsmulti.view_role			=  u8[0x8f9f01]		// Online role for which the view was chosen (the view is chosen again when the role differs, e.g. after a state transfer)
 define bsmulti.art_state			=  u8[0x8f9f04]		// 0: the VRAM holds the ring art, 1: the emerald art (per computer, like the VRAM)
+define bsmulti.own_role				=  u8[0x8f9f02]		// Last online role seen while the netplay session was running (the engine writes 0 into the role byte when the session ends, e.g. the host dropped)
 define bsmulti.restore_pending		=  u8[0x8f9f09]		// 1 between the render phase and the next frame wait (see BSMulti.onBeforeYield)
 
 // In the work RAM (hashed, so a difference between computers is noticed): 0xffffe5c0 .. 0xffffe5ff
@@ -108,6 +109,7 @@ constant u32 BSMulti.GRACE_AFTER_FIRST_FINISH = 1800	// 30 seconds: the other ru
 constant u32 BSMulti.MAX_STAGE_FRAMES		= 25200		// 7 minutes: after that every runner still running is timed out
 constant u16 BSMulti.CYCLE_PREV				= CONTROL_LEFT		// A spectator watches the previous / next running runner with these buttons
 constant u16 BSMulti.CYCLE_NEXT				= CONTROL_RIGHT
+constant u32 BSMulti.IDLE_FORFEIT_FRAMES	= 1800		// 30 seconds without any button on the runner's controller (a player who left the game, or is away): his runner is timed out, so the others never wait for a ghost
 constant u32 BSMulti.RING_BONUS_FACTOR		= 10		// Score of each friend per ring (like the stock results screen, which shows the host's)
 constant u32 BSMulti.PERFECT_BONUS			= 5000		// Score for collecting every ring, like the stock results screen
 
@@ -124,5 +126,6 @@ constant u32 BSMulti.LIVE_SLOTS			= 0xffffa400
 constant u32 BSMulti.LIVE_STATE			= 0xffffe420
 constant u32 BSMulti.LIVE_OBJECT		= 0xffffb000
 constant u32 BSMulti.LIVE_PLANEB		= 0xfffff618
+constant u32 BSMulti.OFS_IDLE			= 0x590		// 2 bytes: frames in a row without any button on this runner's controller
 constant u32 BSMulti.SCRATCH_UNDO		= 0x8fc000	// Copy of the RAM areas that the render phase changes (see BSMulti.undoAddress)
 constant u32 BSMulti.SCRATCH_ART		= 0x8fa000	// Decompressed emerald art
