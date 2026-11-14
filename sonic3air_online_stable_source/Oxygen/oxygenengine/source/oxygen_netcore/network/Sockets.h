@@ -217,6 +217,16 @@ public:
 	inline uint64 getRelayDatagramsIn() const  { return mRelayDatagramsIn; }
 	inline uint64 getRelayDatagramsOut() const  { return mRelayDatagramsOut; }
 
+	// Direct connections between the players (WebRTC data channels, browser build only so far, see DirectLink.h): an optional shortcut around the relay.
+	// Signalling goes through the relay; as soon as a direct channel works the datagrams to that peer use it, and when it fails they use the relay again.
+	// Set before startRelay(). "iceServers" is a comma separated list of STUN URLs.
+	static void setDirectConnectionConfig(bool enabled, const std::string& iceServers)  { mDirectEnabled = enabled;  mDirectIceServers = iceServers; }
+	bool isDirectTo(const SocketAddress& peerAddress) const;		// True while datagrams to this relayed peer go over a direct channel
+	inline bool isDirectActive() const  { return mDirectSupported; }	// The platform can do direct connections and they are switched on
+	inline uint64 getDirectDatagramsIn() const  { return mDirectDatagramsIn; }
+	inline uint64 getDirectDatagramsOut() const  { return mDirectDatagramsOut; }
+	int getDirectPeerCount() const;		// How many peers are reached directly right now
+
 	// Developer test: pretend to have a bad connection (environment variables S3AIR_NET_LAG in ms and S3AIR_NET_LOSS in percent)
 	void flushDelayedPackets();
 
@@ -235,6 +245,9 @@ public:
 
 private:
 	static inline std::string mRelayWebSocketURL;
+	static inline bool mDirectEnabled = true;
+	static inline std::string mDirectIceServers;
+	void updateDirect();
 	bool receiveInternal(ReceiveResult& outReceiveResult);
 	bool handleLanPacket(ReceiveResult& outReceiveResult);
 	bool sendDataNow(const uint8* data, size_t length, const SocketAddress& destinationAddress);
@@ -257,6 +270,14 @@ private:
 	double mRelayLastHello = -1000.0;
 	uint64 mRelayDatagramsIn = 0;
 	uint64 mRelayDatagramsOut = 0;
+	bool mDirectSupported = false;
+	uint64 mDirectDatagramsIn = 0;
+	uint64 mDirectDatagramsOut = 0;
+	uint32 mDirectRejoinSeen = 0;
+	int mDirectFailures = 0;			// Consecutive failed attempts of the friend (slows the retries down)
+	double mDirectLastStart = -1000.0;
+	bool mDirectWorkedSinceStart = false;
+	int mDirectLastStates[17] = {};	// Last observed DirectLink::State per peer number (for the log lines)
 
 	uint64 mLanHostSession = 0;
 	std::vector<std::string> mLanRequesterIPs;

@@ -55,8 +55,16 @@ namespace RelayProtocol
 		DATA_C2R		= 6,	// friend -> relay: token, payload
 		DATA_R2C		= 7,	// relay -> friend: token, payload
 		DATA_H2R		= 8,	// host -> relay: host token, friend id, payload
-		DATA_R2H		= 9		// relay -> host: host token, friend id, payload
+		DATA_R2H		= 9,	// relay -> host: host token, friend id, payload
+		// Signalling for the optional direct connections (see DirectLink.h): the same layout as the data messages (so a signalling message of a friend
+		// is SIGNAL_C2R + token + text, and the relay adds the friend id when it passes it to the host), but not counted as game traffic and rate limited separately.
+		// A relay or a game that does not know them drops them as unknown messages, so old and new versions can share a lobby.
+		SIGNAL_C2R		= 10,	// friend -> relay: token, payload
+		SIGNAL_R2C		= 11,	// relay -> friend: token, payload
+		SIGNAL_H2R		= 12,	// host -> relay: host token, friend id, payload
+		SIGNAL_R2H		= 13	// relay -> host: host token, friend id, payload
 	};
+	static const size_t MAX_SIGNAL_PAYLOAD_SIZE = 3000;
 
 	enum Refusal : uint8_t
 	{

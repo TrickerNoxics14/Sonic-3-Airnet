@@ -185,6 +185,32 @@ bool NetplayManager::resolveServerSetting(const std::string& setting, SocketAddr
 		return false;
 	UDPSocket::setRelayWebSocketURL(url);
 	outAddress.set("websocket.relay", 1);
+
+	// Direct connections: the page link (?p2p=off, ?stun=none or ?stun=stun:host:port,...) wins, then the settings; the page's owner can set S3AIR_STUN_SERVERS / S3AIR_P2P in relay_config.js
+	auto askPage = [](const char* script) -> std::string
+	{
+		const char* result = emscripten_run_script_string(script);
+		return (nullptr != result) ? std::string(result) : std::string();
+	};
+	const std::string p2pParam = askPage("(function(){try{return new URLSearchParams(location.search).get('p2p')||'';}catch(e){return '';}})()");
+	const std::string pageP2P = askPage("(function(){try{return (typeof S3AIR_P2P==='boolean')?(S3AIR_P2P?'on':'off'):'';}catch(e){return '';}})()");
+	bool direct = Configuration::instance().mOnlineDirectConnection;
+	if (pageP2P == "off")
+		direct = false;
+	if (p2pParam == "off" || p2pParam == "0")
+		direct = false;
+	else if (p2pParam == "on" || p2pParam == "1")
+		direct = true;
+	std::string stun = askPage("(function(){try{return new URLSearchParams(location.search).get('stun')||'';}catch(e){return '';}})()");
+	if (stun.empty())
+	{
+		stun = askPage("(function(){try{return (typeof S3AIR_STUN_SERVERS==='string')?S3AIR_STUN_SERVERS:'';}catch(e){return '';}})()");
+		if (stun.empty())
+			stun = Configuration::instance().mOnlineStunServers;
+	}
+	if (stun == "none")
+		stun.clear();
+	UDPSocket::setDirectConnectionConfig(direct, stun);
 	return true;
 #endif
 
@@ -811,6 +837,10 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 		fprintf(file, "[friend] t=%us state=%d frame=%u fps=%.1f delay=%d frames, repairs=%d, last sync ok at frame %u, receiving game=%d, relay=%d\n",
 			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayClient->getState(), (unsigned)frame, fps, mNetplayClient->getCurrentLatency(),
 			mNetplayClient->getDesyncCount(), (unsigned)mNetplayClient->getLastSyncOkFrame(), mNetplayClient->isReceivingGameState() ? 1 : 0, mNetplayClient->isUsingRelay() ? 1 : 0);
+#ifdef PLATFORM_WEB
+		fprintf(file, "[p2p] t=%us transport=%s direct_in=%llu direct_out=%llu relay_in=%llu relay_out=%llu\n", (unsigned)(SDL_GetTicks() / 1000), (mUDPSocket.getDirectPeerCount() > 0) ? "p2p" : "relay",
+			(unsigned long long)mUDPSocket.getDirectDatagramsIn(), (unsigned long long)mUDPSocket.getDirectDatagramsOut(), (unsigned long long)mUDPSocket.getRelayDatagramsIn(), (unsigned long long)mUDPSocket.getRelayDatagramsOut());
+#endif
 	}
 	else
 	{
@@ -827,6 +857,10 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 		}
 		fprintf(file, "[host] t=%us state=%d frame=%u fps=%.1f friends=%d, delay=%d frames, repairs=%d, inputdelay=%d, ping=%d, relayed=%d\n",
 			(unsigned)(SDL_GetTicks() / 1000), (int)mNetplayHost->getHostState(), (unsigned)frame, fps, connected, latency, mNetplayHost->getResyncCount(), mNetplayHost->getEffectiveInputDelay(), worstPing, mNetplayHost->getRelayedFriendCount());
+#ifdef PLATFORM_WEB
+		fprintf(file, "[p2p] t=%us transport=%s direct_in=%llu direct_out=%llu relay_in=%llu relay_out=%llu\n", (unsigned)(SDL_GetTicks() / 1000), (mUDPSocket.getDirectPeerCount() > 0) ? "p2p" : "relay",
+			(unsigned long long)mUDPSocket.getDirectDatagramsIn(), (unsigned long long)mUDPSocket.getDirectDatagramsOut(), (unsigned long long)mUDPSocket.getRelayDatagramsIn(), (unsigned long long)mUDPSocket.getRelayDatagramsOut());
+#endif
 	}
 	fclose(file);
 }

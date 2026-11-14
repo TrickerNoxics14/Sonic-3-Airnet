@@ -113,6 +113,11 @@ public:
 	inline bool isRelayHostConfigured() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST; }
 	inline uint64 getRelayDatagramsIn() const  { return mUDPSocket.getRelayDatagramsIn(); }
 	inline uint64 getRelayDatagramsOut() const  { return mUDPSocket.getRelayDatagramsOut(); }
+	// Direct connections (browser build, see DirectLink.h): a shortcut around the relay; the relay stays the fallback
+	inline bool isPeerDirect(const SocketAddress& address) const  { return mUDPSocket.isDirectTo(address); }
+	inline uint64 getDirectDatagramsIn() const  { return mUDPSocket.getDirectDatagramsIn(); }
+	inline uint64 getDirectDatagramsOut() const  { return mUDPSocket.getDirectDatagramsOut(); }
+	inline int getDirectPeerCount() const  { return mUDPSocket.getDirectPeerCount(); }
 
 	// The name other players see (the option "Online player name", default "Player"); always clean, see NetplayLobby::sanitizeName
 	std::string getLocalPlayerName() const;

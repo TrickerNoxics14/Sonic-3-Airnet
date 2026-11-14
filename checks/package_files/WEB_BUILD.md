@@ -42,9 +42,25 @@ also speaks UDP to Windows games, so browser and Windows players can be in the s
   measured deviation). A lost WebSocket packet holds back everything behind it (TCP), which shows as a short stutter, not as a desync.
 - A lost relay connection is made again by itself (every 0.5 to 8 s); the friend's game connection then restarts and the host puts
   it back into its slot (the friend tries for up to 90 s, then is told that the connection was lost).
+- **Direct connections (WebRTC, peer to peer).** Once two browsers are in a lobby, the friend offers the host a WebRTC data channel
+  (unordered, no retransmissions: it behaves like UDP, which the game's protocol was written for). The offer, the answer and the ICE
+  candidates travel through the relay as new message types (SIGNAL_*, the relay needs no change in its data path and stays the lobby and
+  the signalling server). When the channel works, the game's datagrams go over it and the relay carries (almost) nothing; the lobby shows
+  "Direct connection to the host (peer to peer)". If no channel opens within 8 s, or it dies or goes silent later, the game uses the relay
+  again at once (both paths stay open for receiving; the game's protocol already handles lost, repeated and reordered datagrams). A friend
+  whose attempt never worked asks again after 12 s, 24 s, ... (at most every 96 s); one that worked and died asks again after 12 s.
+  **Privacy:** a direct connection shows each player's IP address to the other player (WebRTC), which a relay-only game does not.
+  Switch it off with `?p2p=off` in the page link, `"Online": { "DirectConnection": false }` in the browser's settings.json, or
+  `window.S3AIR_P2P = false` in `relay_config.js`. STUN servers (they tell a browser its public address; they never see game data):
+  default two public Google STUN servers; change with `?stun=stun:host:port,...` (`?stun=none` = none, then only players in the same
+  network connect directly), `"Online": { "StunServers": "..." }`, or `window.S3AIR_STUN_SERVERS` in `relay_config.js`. **No TURN
+  server is used**: players behind NATs that STUN cannot cross (symmetric NAT, some mobile and company networks) simply stay on the relay.
+  The Windows game has no WebRTC (see the handoff): a lobby with a Windows player keeps using the relay for that player, and a browser
+  friend's offer to a Windows host is simply never answered.
 - Keep the tab visible while playing: browsers slow hidden tabs down to about one frame per second, which stalls the game for everybody.
-- Tested: see the handoff (headless Chrome, relay on 127.0.0.1). Not tested: a real internet relay, a real GPU, Firefox, Safari, phones.
-- Automated check: `node checks/web_net/run_web_net_checks.mjs` (browser sessions), `--native` adds the Windows game sessions.
+- Tested: see the handoff (headless Chrome, relay on 127.0.0.1, direct connections between two Chrome instances on this PC with STUN off). Not tested:
+  a real internet relay, real NATs / STUN / TURN-needing networks, a real GPU, Firefox, Safari, phones.
+- Automated check: `node checks/web_net/run_web_net_checks.mjs` (browser sessions A, B, C and P = direct connections), `--native` adds the Windows game sessions.
 - Netplay, relay and Blue Sphere multi-runner code are the same as in the Windows version; the Blue Sphere multi-runner was not tried in the browser.
 
 ## Differences to the Windows version

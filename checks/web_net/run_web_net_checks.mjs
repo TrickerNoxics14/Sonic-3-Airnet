@@ -6,6 +6,8 @@
 // Sessions:  A two browsers through the relay (join, play in sync, relay drop and reconnect, host drop)
 //            B two browsers through a line with delay, jitter and stalls (TCP lag proxy)
 //            C one browser: no relay set, wrong code, unreachable relay
+//            P direct (WebRTC) connections between two browsers: P1 works (traffic on the data channel, relay idle), P2 blocked (relay carries the game),
+//              P3 the host cannot do it (old client / Windows game), P4 the channel dies during the game (closed, silent, one-way, long)
 //            N a Windows game and a browser in one lobby (both ways round)
 // Everything it starts (relay, web server, browsers, game) is stopped at the end; the ROM is only served from where the game keeps it, to 127.0.0.1.
 import fs from 'node:fs';
@@ -22,7 +24,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,N').split(',');
 const withNative = args.includes('--native');
 const webDir = path.join(root, 'web_build');
 
@@ -391,6 +393,179 @@ async function sessionN(relay) {
 }
 
 // =====================================================================================================================
+// =====================================================================================================================
+// Session P: direct (WebRTC) connections between two browsers, with the relay as lobby, signalling and fallback.
+// STUN is switched off (?stun=none): only the computer's own addresses are tried, nothing outside this PC is contacted.
+const RTC_TRACK = `(() => { const Real = window.RTCPeerConnection; if (!Real) return; window.__pcs = [];
+	class T extends Real { constructor(...a) { super(...a); window.__pcs.push(this); } }
+	window.RTCPeerConnection = T;
+	const send = RTCDataChannel.prototype.send; window.__blackhole = false;
+	RTCDataChannel.prototype.send = function (d) { if (window.__blackhole) return; return send.call(this, d); }; })();`;
+// "the direct path is blocked": neither side learns the other's candidates (no connectivity checks can start), like a pair of strict NATs without TURN
+const RTC_BLOCK = `(() => { const Real = window.RTCPeerConnection; window.__pcs = [];
+	class T extends Real {
+		constructor(...a) { super(...a); window.__pcs.push(this); }
+		addIceCandidate() { return Promise.resolve(); }
+		setRemoteDescription(d) { if (d && d.sdp) d = { type: d.type, sdp: d.sdp.split('\\r\\n').filter((l) => !l.startsWith('a=candidate') && !l.startsWith('a=end-of-candidates')).join('\\r\\n') }; return super.setRemoteDescription(d); }
+	}
+	window.RTCPeerConnection = T; })();`;
+// "this player cannot do direct connections" (an old browser, or the Windows game, which has no WebRTC)
+const RTC_NONE = `(() => { window.RTCPeerConnection = undefined; })();`;
+
+const p2pInfo = (inst) => inst.eval(`(() => { const G = globalThis.__s3p2p; if (!G) return null; return { enabled: G.enabled, msgsIn: G.msgsIn, msgsOut: G.msgsOut, bytesIn: G.bytesIn, bytesOut: G.bytesOut, peers: [...G.peers.values()].map((p) => ({ id: p.id, state: p.state })) }; })()`);
+function parseP2PRows(text) {
+	const rows = [];
+	for (const line of text.split('\n')) {
+		const m = /^\[p2p\] t=(\d+)s transport=(\w+) direct_in=(\d+) direct_out=(\d+) relay_in=(\d+) relay_out=(\d+)/.exec(line);
+		if (m) rows.push({ t: +m[1], transport: m[2], directIn: +m[3], directOut: +m[4], relayIn: +m[5], relayOut: +m[6] });
+	}
+	return rows;
+}
+const relayStats = (relay) => ({ ...relay.relay.core.stats });
+
+async function p2pSetup(relay, { hostSeed, friendSeed, basePort, hostScript, friendScript }) {
+	const code = codeForSeed(hostSeed);
+	const h = await startHarness({ webDir, instances: 2, seeds: [hostSeed, friendSeed], basePort });
+	const [host, friend] = h.instances;
+	if (hostScript) await host.addScript(hostScript);
+	if (friendScript) await friend.addScript(friendScript);
+	const query = `?relay=ws://127.0.0.1:${relay.ports.port}&stun=none`;
+	await Promise.all([host.openGame(h.baseURL, query), friend.openGame(h.baseURL, query)]);
+	await Promise.all([host.waitLog(/Ready to go/, 90000), friend.waitLog(/Ready to go/, 90000)]);
+	await sleep(2000);
+	await Promise.all([host.toMainMenu(), friend.toMainMenu()]);
+	return { h, host, friend, code, query };
+}
+
+function dumpConsole(name, host, friend) {
+	const pick = (inst) => inst.allLogs.filter((l) => /Netplay|direct|Lobby|EXC/i.test(l)).join('\n');
+	fs.writeFileSync(path.join(logDir, `web_net_${name}_console.txt`), `HOST\n${pick(host)}\nFRIEND\n${pick(friend)}\n`);
+}
+
+async function p2pLines(host, friend) {
+	return { host: parseP2PRows(await host.onlineLog()).pop(), friend: parseP2PRows(await friend.onlineLog()).pop() };
+}
+
+async function sessionP1(relay) {
+	console.log('--- session P1: two browsers, direct channel works');
+	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x71, friendSeed: 0x52, basePort: 9380, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
+	try {
+		const r = await hostAndJoin(host, [friend], query, code);
+		check('P1a', 'two browsers join through the relay as before (lobby code, code proof both ways)', r.hosted && r.known && r.joined[0]);
+		const fDirect = await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
+		const hDirect = await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
+		check('P1b', 'the friend and the host both report that a direct (peer to peer) connection is in use, set up through signalling messages of the relay', fDirect && hDirect, `${fDirect ?? 'friend: none'} | ${hDirect ?? 'host: none'}`);
+		check('P1c', 'the relay passed signalling messages (offer, answer, candidates) and counts them apart from game data', relay.relay.core.stats.signals >= 4, JSON.stringify(relayStats(relay)));
+		await sleep(3000);
+		await shot(friend, 'P1_lobby_friend');
+		const loaded = await startNormalGame(host, [friend]);
+		check('P1d', 'the host starts a new game and the friend loads the game state over the direct channel', loaded[0]);
+		const s0 = relayStats(relay), a0 = await p2pInfo(host), b0 = await p2pInfo(friend);
+		const play = await playAndMeasure(host, [friend], 25, 'P1');
+		const s1 = relayStats(relay), a1 = await p2pInfo(host), b1 = await p2pInfo(friend);
+		const directMsgs = (a1.msgsIn - a0.msgsIn) + (a1.msgsOut - a0.msgsOut) + (b1.msgsIn - b0.msgsIn) + (b1.msgsOut - b0.msgsOut);
+		const relayMsgs = s1.forwarded - s0.forwarded;
+		check('P1e', 'during 25 s of play the traffic goes over the data channel (thousands of datagrams in each direction) and the relay forwards almost nothing (under 2% of it)', directMsgs > 4000 && a1.msgsIn - a0.msgsIn > 1000 && b1.msgsIn - b0.msgsIn > 1000 && relayMsgs < directMsgs * 0.02, `direct datagrams ${directMsgs} (host in ${a1.msgsIn - a0.msgsIn}, friend in ${b1.msgsIn - b0.msgsIn}), relay forwarded ${relayMsgs} (${s1.forwardedBytes - s0.forwardedBytes} bytes)`);
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('P1f', 'both games stay in sync for 25 s over the direct channel (no repairs, last sync recent, both near 60 fps)', hs.ok && fs_.ok && hs.last.fps > 50 && fs_.last.fps > 50, `host: ${hs.why}; friend: ${fs_.why}`);
+		const lines = await p2pLines(host, friend);
+		check('P1g', 'the games report the transport as p2p, and the host no longer counts the friend as relayed (normal input delay rules)', lines.host?.transport === 'p2p' && lines.friend?.transport === 'p2p' && play.hostRows.at(-1)?.relayed === 0, JSON.stringify(lines) + ' relayed=' + play.hostRows.at(-1)?.relayed);
+		check('P1h', 'no desync message and no error in either console', !host.hasLog(/state differs from the host|EXC|assert/i) && !friend.hasLog(/state differs from the host|EXC|assert/i));
+		fs.writeFileSync(path.join(logDir, 'web_net_P1_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|direct/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|direct/i.test(l)).join('\n')}`);
+	} finally { await h.close(); }
+}
+
+async function sessionP2(relay) {
+	console.log('--- session P2: the direct path is blocked: the relay carries the game');
+	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x75, friendSeed: 0x53, basePort: 9384, hostScript: RTC_BLOCK, friendScript: RTC_BLOCK });
+	try {
+		const r = await hostAndJoin(host, [friend], query, code);
+		check('P2a', 'the lobby works through the relay although a direct connection is tried', r.hosted && r.known && r.joined[0]);
+		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
+		check('P2b', 'the friend gives the direct attempt up after 8 s and says it uses the relay (nobody sees an error)', failed, failed ?? friend.allLogs.filter((l) => /direct/i.test(l)).join(' | '));
+		await startNormalGame(host, [friend]);
+		const s0 = relayStats(relay);
+		const play = await playAndMeasure(host, [friend], 20, 'P2');
+		const s1 = relayStats(relay);
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('P2c', 'the game runs in sync for 20 s over the relay (no repairs)', hs.ok && fs_.ok, `host: ${hs.why}; friend: ${fs_.why}`);
+		const lines = await p2pLines(host, friend);
+		check('P2d', 'the relay carried the game (thousands of datagrams), the transport is reported as relay, the host treats the friend as relayed', s1.forwarded - s0.forwarded > 1500 && lines.host?.transport === 'relay' && lines.friend?.transport === 'relay' && play.hostRows.at(-1)?.relayed === 1, `relay forwarded ${s1.forwarded - s0.forwarded}; ${JSON.stringify(lines)}`);
+		check('P2e', 'no "direct connection is in use" line, no desync, no error', !friend.hasLog(/is in use \(p2p\)/) && !host.hasLog(/is in use \(p2p\)/) && !host.hasLog(/state differs|EXC/) && !friend.hasLog(/state differs|EXC/));
+	} finally { dumpConsole('P2', host, friend); await h.close(); }
+}
+
+async function sessionP3(relay) {
+	console.log('--- session P3: the host cannot do direct connections (like the Windows game): the friend stays on the relay');
+	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x82, friendSeed: 0x54, basePort: 9388, hostScript: RTC_NONE, friendScript: RTC_TRACK });
+	try {
+		const r = await hostAndJoin(host, [friend], query, code);
+		check('P3a', 'a friend that can do direct connections joins a host that cannot', r.hosted && r.known && r.joined[0]);
+		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
+		check('P3b', 'the friend\'s offer finds no answer: it gives up after 8 s, stays on the relay, and the host (no WebRTC at all) logs nothing wrong', failed && !host.hasLog(/EXC|error/i), failed ?? '');
+		await startNormalGame(host, [friend]);
+		const play = await playAndMeasure(host, [friend], 15, 'P3');
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('P3c', 'the game runs in sync over the relay for 15 s', hs.ok && fs_.ok, `host: ${hs.why}; friend: ${fs_.why}`);
+	} finally { dumpConsole('P3', host, friend); await h.close(); }
+}
+
+async function sessionP4(relay) {
+	console.log('--- session P4: the direct channel dies during the game (closed, silent, one-way): fall back without desync');
+	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x74, friendSeed: 0x55, basePort: 9392, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
+	try {
+		const r = await hostAndJoin(host, [friend], query, code);
+		await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
+		await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
+		await startNormalGame(host, [friend]);
+		await playAndMeasure(host, [friend], 8, 'P4a');
+		let lines = await p2pLines(host, friend);
+		check('P4a', 'the game starts over the direct channel (transport p2p on both sides)', r.joined[0] && lines.host?.transport === 'p2p' && lines.friend?.transport === 'p2p', JSON.stringify(lines));
+		const frameOf = async (inst) => parseOnlineLog(await inst.onlineLog()).pop();
+
+		// 1. the friend's side closes the peer connection (a tab that closes its network, a browser that drops WebRTC)
+		let s0 = relayStats(relay), f0 = await frameOf(friend);
+		host.forgetLogs(); friend.forgetLogs();
+		await friend.eval('window.__pcs.forEach((p) => p.close()); window.__pcs.length')
+		const hostSaw = await host.waitLog(/direct connection to friend 1 is not working \(any more\), back on the relay server/, 15000);
+		const friendSaw = await friend.waitLog(/direct connection to the host is not working \(any more\), back on the relay server/, 15000);
+		check('P4b', 'when one side closes the direct connection both sides notice within seconds and say they are back on the relay', hostSaw && friendSaw, `host: ${hostSaw ?? 'nothing'} | friend: ${friendSaw ?? 'nothing'}`);
+		await playAndMeasure(host, [friend], 12, 'P4b');
+		let f1 = await frameOf(friend), s1 = relayStats(relay);
+		check('P4c', 'the game goes on over the relay without a desync (friend frames advanced, relay forwarded the game, no repairs)', f1.frame > f0.frame + 500 && (f1.repairs ?? 0) === 0 && s1.forwarded - s0.forwarded > 1000 && !friend.hasLog(/state differs from the host/), `friend frame ${f0.frame} -> ${f1.frame}, repairs ${f1.repairs}, relay forwarded ${s1.forwarded - s0.forwarded}`);
+
+		// 2. the friend tries again by itself (after 12 s) and the direct channel comes back
+		const again = await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 60000);
+		await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 10000);
+		check('P4d', 'a direct connection that died is set up again by itself after a few seconds', again);
+		await playAndMeasure(host, [friend], 6, 'P4d');
+
+		// 3. a short silent outage (everything the host sends over the channel vanishes for 3 s): both sides use the relay while it lasts and take the channel back when it works again
+		host.forgetLogs(); friend.forgetLogs();
+		await host.eval('window.__blackhole = true');
+		const quiet = await friend.waitLog(/direct connection to the host is not working \(any more\), back on the relay server/, 10000);
+		const quietHost = await host.waitLog(/direct connection to friend 1 is not working \(any more\), back on the relay server/, 10000);
+		await sleep(1000);
+		await host.eval('window.__blackhole = false');
+		const back = await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 15000);
+		const backHost = await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 15000);
+		check('P4e', 'a short silent one-way outage: both sides (also the one that still hears the other) leave the channel within seconds and return to it when it works again, without a new connection', quiet && quietHost && back && backHost && !friend.hasLog(/did not work|lost \(/), `${quiet ? 'f out' : 'f NOT out'}, ${quietHost ? 'h out' : 'h NOT out'}, ${back ? 'f back' : 'f NOT back'}, ${backHost ? 'h back' : 'h NOT back'}`);
+
+		// 4. a long silent outage: the channel is given up for good, the game keeps going on the relay
+		s0 = relayStats(relay); f0 = await frameOf(friend);
+		host.forgetLogs(); friend.forgetLogs();
+		await host.eval('window.__blackhole = true');
+		const lost = await friend.waitLog(/direct connection to peer 0 lost \(nothing received for 5 s\)/, 20000);
+		const play = await playAndMeasure(host, [friend], 10, 'P4f');
+		f1 = await frameOf(friend); s1 = relayStats(relay);
+		check('P4f', 'a long silent outage: the channel is declared lost after 5 s and the game keeps running over the relay', lost && f1.frame > f0.frame + 500 && s1.forwarded - s0.forwarded > 800, `${lost ?? 'not lost'}; friend frame ${f0.frame} -> ${f1.frame}; relay forwarded ${s1.forwarded - s0.forwarded}`);
+		await host.eval('window.__blackhole = false');
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('P4g', 'after all of it the games are still in sync with no repair ever needed (the engine compared the memory of both every second)', hs.ok && fs_.ok && !host.hasLog(/state differs|EXC/) && !friend.hasLog(/state differs|EXC/), `host: ${hs.why}; friend: ${fs_.why}`);
+		fs.writeFileSync(path.join(logDir, 'web_net_P4_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|direct/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|direct/i.test(l)).join('\n')}`);
+	} finally { await h.close(); }
+}
+
 let exitCode = 0;
 const relay = { relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
@@ -398,6 +573,10 @@ try {
 	if (only.includes('A')) await sessionA(relay);
 	if (only.includes('B')) await sessionB(relay);
 	if (only.includes('C')) await sessionC(relay);
+	if (only.includes('P') || only.includes('P1')) await sessionP1(relay);
+	if (only.includes('P') || only.includes('P2')) await sessionP2(relay);
+	if (only.includes('P') || only.includes('P3')) await sessionP3(relay);
+	if (only.includes('P') || only.includes('P4')) await sessionP4(relay);
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

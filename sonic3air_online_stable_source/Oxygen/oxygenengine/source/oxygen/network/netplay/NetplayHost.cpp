@@ -1216,7 +1216,7 @@ void NetplayHost::lockCharacters()
 int NetplayHost::getRelayedSlot() const
 {
 	for (const PlayerConnection* connection : mPlayerConnections)
-		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex >= 1 && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()))
+		if (nullptr != connection && connection->isActive() && connection->mPlayerIndex >= 1 && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()) && !mNetplayManager.isPeerDirect(connection->getRemoteAddress()))
 			return connection->mPlayerIndex;
 	return -1;
 }
@@ -1225,7 +1225,7 @@ int NetplayHost::getRelayedFriendCount() const
 {
 	int count = 0;
 	for (const PlayerConnection* connection : mPlayerConnections)
-		if (nullptr != connection && connection->isActive() && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()))
+		if (nullptr != connection && connection->isActive() && RelayProtocol::isVirtualIP(connection->getRemoteAddress().getIP()) && !mNetplayManager.isPeerDirect(connection->getRemoteAddress()))
 			++count;
 	return count;
 }

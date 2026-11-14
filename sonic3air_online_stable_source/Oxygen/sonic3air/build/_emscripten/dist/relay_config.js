@@ -3,3 +3,7 @@
 // types an address under RELAY SERVER in the lobby, or opens the page as sonic3air_web.html?relay=wss://relay.example.org (the link wins over this file).
 // How to run a relay: checks/relay_ws/README.md in the source repository.
 window.S3AIR_RELAY_DEFAULT = '';
+// Direct (peer to peer, WebRTC) connections between browser players, with the relay as fallback. A direct connection shows each player's IP address to the other player.
+// Uncomment to switch them off for everybody who opens this page (a player can still turn them on with ?p2p=on), or to use other STUN servers ("none" = no STUN):
+// window.S3AIR_P2P = false;
+// window.S3AIR_STUN_SERVERS = 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302';

@@ -2290,8 +2290,16 @@ void LobbyMenu::render()
 		py += 14;
 		if (nullptr != client && client->isUsingRelay() && inLobby)
 		{
-			// Everything goes through another computer: that adds delay, so say it
-			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Playing through a relay server: expect more lag.", 5, orange);
+			if (manager.getDirectPeerCount() > 0)
+			{
+				// A direct (peer to peer) connection to the host is in use: the relay only keeps the lobby
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Direct connection to the host (peer to peer).", 5, white);
+			}
+			else
+			{
+				// Everything goes through another computer: that adds delay, so say it
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Playing through a relay server: expect more lag.", 5, orange);
+			}
 			py += 8;
 		}
 	}

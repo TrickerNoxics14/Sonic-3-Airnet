@@ -600,3 +600,17 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -n "frame >" checks/web_net/run_web_net_checks.mjs`
 - Siblings: the friend side of the same check already used +300; A5/B2 compare repairs and sync, not frame counts
 - Guard: threshold now +300 with the reason written next to it
+
+## 2026-11-14 · signed-int-from-bitwise-op-in-test (recurrence) · js
+- Seed: the new signalling tests in checks/relay_ws/test/relay.test.mjs repeated `token ^ 1` (negative above 2^31, writeUInt32BE threw)
+- Broken assumption: same as above, a bitwise operator on a uint32 gives a uint32
+- Search: `rg -n ' \^ ' checks/relay_ws checks/web_net`
+- Siblings: relay.test.mjs forged-signal test fixed (>>> 0); the earlier fix at 176/178 was already right
+- Guard: tests run green repeatedly (31 of 31)
+
+## 2026-11-15 · windows-min-macro-in-shared-code · cpp
+- Seed: Sockets.cpp (new direct-connection retry code) used std::min; it compiled for the web target and failed for MSVC (error C2589) because windows.h defines min as a macro (Sockets.cpp includes winsock2 with WIN32_LEAN_AND_MEAN but Windows headers still pull it in)
+- Broken assumption: code that builds with clang/emscripten builds with MSVC
+- Search: `rg -n 'std::(min|max)\(' sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen_netcore` (only unparenthesised uses inside files that include windows headers matter)
+- Siblings: Sockets.cpp:1422 fixed ((std::min)); DirectLink.h has none; other files already use the parenthesised form or do not include windows headers
+- Guard: build_online_stable.ps1 (Windows build) is part of the final verification of every change to shared netcore files

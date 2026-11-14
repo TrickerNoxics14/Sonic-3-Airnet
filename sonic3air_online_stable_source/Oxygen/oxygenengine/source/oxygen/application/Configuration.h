@@ -245,6 +245,11 @@ public:
 	bool mOnlineLobbyPublic = true;				// A new lobby is listed publicly (otherwise it is only joined with its code)
 	int mOnlineLobbyMaxPlayers = 4;				// 2 to 4
 	bool mOnlineListCompatibleOnly = false;		// The list of public lobbies hides the ones this game cannot join
+	// Online play, browser build: direct (peer to peer, WebRTC) connections between the players as a shortcut around the relay server, which stays the fallback.
+	// A direct connection shows each player's IP address to the other one (the relay only shows it to the relay's operator): switch it off here, or with ?p2p=off in the page link.
+	// "StunServers" is a comma separated list of public STUN servers that tell a browser its own public address; empty = none (then only players in the same network can connect directly).
+	bool mOnlineDirectConnection = true;
+	std::string mOnlineStunServers = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302";
 
 	// Online fork: the GitHub repository (owner/name) the in-game updater asks for releases (public REST API, releases/latest).
 	std::string mOnlineUpdateRepo = "TrickerNoxics14/Sonic-3-Airnet";

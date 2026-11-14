@@ -11,6 +11,7 @@
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen_netcore/network/DirectoryProtocol.h"
+#include "oxygen_netcore/network/DirectLink.h"
 #include <chrono>
 #include <random>
 #include <deque>
@@ -729,6 +730,7 @@ struct UDPSocket::Internal
 #ifdef __EMSCRIPTEN__
 	WebTransport mWeb;
 #endif
+	DirectLink mDirect;
 };
 
 
@@ -1173,6 +1175,13 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 	mRelayLastHello = -1000.0;
 	mRelayDatagramsIn = 0;
 	mRelayDatagramsOut = 0;
+	mDirectDatagramsIn = 0;
+	mDirectDatagramsOut = 0;
+	mDirectRejoinSeen = 0;
+	mDirectFailures = 0;
+	mDirectLastStart = -1000.0;
+	memset(mDirectLastStates, 0, sizeof(mDirectLastStates));
+	mDirectSupported = isValid() && mInternal->mDirect.setup(mDirectIceServers, mDirectEnabled);
 #ifdef __EMSCRIPTEN__
 	if (isValid())
 	{
@@ -1187,6 +1196,9 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 
 void UDPSocket::stopRelay()
 {
+	if (nullptr != mInternal)
+		mInternal->mDirect.shutdown();
+	mDirectSupported = false;
 #ifdef __EMSCRIPTEN__
 	if (nullptr != mInternal)
 	{
@@ -1208,6 +1220,8 @@ void UDPSocket::updateRelay()
 {
 	if (mRelayRole == RelayRole::NONE || !isValid())
 		return;
+
+	updateDirect();
 
 #ifdef __EMSCRIPTEN__
 	// Browser build: (re)connect the WebSocket when it is closed. A new connection is a new peer for the relay, so the registration / join starts again.
@@ -1248,15 +1262,26 @@ void UDPSocket::updateRelay()
 
 bool UDPSocket::sendViaRelay(const uint8* data, size_t length, const SocketAddress& destinationAddress)
 {
-	if (!mRelayReady || length == 0 || length > RelayProtocol::MAX_PAYLOAD_SIZE)
+	if (length == 0 || length > RelayProtocol::MAX_PAYLOAD_SIZE)
+		return false;
+
+	uint16_t friendID = 0;
+	if (mRelayRole == RelayRole::HOST && (!RelayProtocol::parseVirtualIP(destinationAddress.getIP(), friendID) || friendID == 0))
+		return false;
+
+	// A working direct channel to that peer is the shortcut; if it cannot take the datagram (or does not exist, or gave up) it goes through the relay as before
+	if (mDirectSupported && nullptr != mInternal && mInternal->mDirect.sendTo(friendID, data, length))
+	{
+		++mDirectDatagramsOut;
+		return true;
+	}
+
+	if (!mRelayReady)
 		return false;
 
 	std::vector<uint8_t> wrapped;
 	if (mRelayRole == RelayRole::HOST)
 	{
-		uint16_t friendID = 0;
-		if (!RelayProtocol::parseVirtualIP(destinationAddress.getIP(), friendID) || friendID == 0)
-			return false;
 		RelayProtocol::buildHostData(wrapped, RelayProtocol::DATA_H2R, mRelayToken, friendID, data, length);
 	}
 	else
@@ -1341,9 +1366,132 @@ bool UDPSocket::handleRelayPacket(ReceiveResult& outReceiveResult)
 			return false;
 		}
 
+		case RelayProtocol::SIGNAL_R2H:
+		{
+			// Direct connection signalling from a friend: header, host token, friend number, text
+			if (mRelayRole != RelayRole::HOST || !mRelayReady || size <= RelayProtocol::HEADER_SIZE + 6 || RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE) != mRelayToken)
+				return true;
+			const uint16_t friendID = RelayProtocol::get16(data + RelayProtocol::HEADER_SIZE + 4);
+			if (friendID != 0 && nullptr != mInternal)
+				mInternal->mDirect.onSignal(friendID, data + RelayProtocol::HEADER_SIZE + 6, size - RelayProtocol::HEADER_SIZE - 6);
+			return true;
+		}
+
+		case RelayProtocol::SIGNAL_R2C:
+		{
+			if (mRelayRole != RelayRole::CLIENT || !mRelayReady || size <= RelayProtocol::HEADER_SIZE + 4 || RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE) != mRelayToken)
+				return true;
+			if (nullptr != mInternal)
+				mInternal->mDirect.onSignal(0, data + RelayProtocol::HEADER_SIZE + 4, size - RelayProtocol::HEADER_SIZE - 4);
+			return true;
+		}
+
 		default:
 			return true;
 	}
+}
+
+namespace
+{
+	const double DIRECT_RETRY_BASE_SECONDS = 12.0;		// A friend whose direct attempt failed tries again after this long (more after each further failure, at most 8 times as long)
+}
+
+void UDPSocket::updateDirect()
+{
+	if (!mDirectSupported || nullptr == mInternal)
+		return;
+	DirectLink& direct = mInternal->mDirect;
+
+	// Signalling messages that the direct connections want to send go to the relay (they are dropped if the relay is not reachable: an attempt that lost one fails by itself and is retried)
+	uint16 peer = 0;
+	std::vector<uint8> message;
+	for (int i = 0; i < 16 && direct.pollSignal(peer, message); ++i)
+	{
+		if (!mRelayReady || message.size() > RelayProtocol::MAX_SIGNAL_PAYLOAD_SIZE)
+			continue;
+		std::vector<uint8_t> wrapped;
+		if (mRelayRole == RelayRole::HOST)
+			RelayProtocol::buildHostData(wrapped, RelayProtocol::SIGNAL_H2R, mRelayToken, peer, message.data(), message.size());
+		else
+			RelayProtocol::buildClientData(wrapped, RelayProtocol::SIGNAL_C2R, mRelayToken, message.data(), message.size());
+		sendData(wrapped.data(), wrapped.size(), mRelayAddress);
+	}
+
+	const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+
+	// The friend starts the attempt (the host only answers)
+	if (mRelayRole == RelayRole::CLIENT)
+	{
+		if (mRelayRejoinCount != mDirectRejoinSeen)
+		{
+			// The relay gave us a new place: the host knows the old one, so a direct channel built for it is useless
+			mDirectRejoinSeen = mRelayRejoinCount;
+			direct.closePeer(0);
+			mDirectFailures = 0;
+		}
+		const DirectLink::State state = direct.getState(0);
+		if (mRelayReady && now - mDirectLastStart >= 1.0)
+		{
+			bool start = (state == DirectLink::State::NONE);
+			if (state == DirectLink::State::FAILED)
+			{
+				const double wait = DIRECT_RETRY_BASE_SECONDS * (double)(std::min)(1 + mDirectFailures, 8);
+				start = (direct.getFailedAgo(0) >= wait);
+			}
+			if (start)
+			{
+				mDirectLastStart = now;
+				mDirectWorkedSinceStart = false;
+				direct.startOffer(0);
+				RMX_LOG_INFO("Netplay: trying a direct connection to the host (through the relay server for now)");
+			}
+		}
+	}
+
+	// Log every change (and count failures)
+	const int maxPeer = (mRelayRole == RelayRole::HOST) ? 16 : 0;
+	for (int id = (mRelayRole == RelayRole::HOST) ? 1 : 0; id <= maxPeer; ++id)
+	{
+		const int state = (int)direct.getState((uint16)id);
+		if (state == mDirectLastStates[id])
+			continue;
+		const int previous = mDirectLastStates[id];
+		mDirectLastStates[id] = state;
+		if (state == (int)DirectLink::State::DIRECT)
+		{
+			mDirectFailures = 0;
+			mDirectWorkedSinceStart = true;
+			RMX_LOG_INFO("Netplay: direct connection to " << ((mRelayRole == RelayRole::HOST) ? "friend " + std::to_string(id) : std::string("the host")) << " is in use (p2p)");
+		}
+		else if (previous == (int)DirectLink::State::DIRECT)
+		{
+			RMX_LOG_INFO("Netplay: direct connection to " << ((mRelayRole == RelayRole::HOST) ? "friend " + std::to_string(id) : std::string("the host")) << " is not working (any more), back on the relay server");
+		}
+		if (state == (int)DirectLink::State::FAILED && mRelayRole == RelayRole::CLIENT)
+		{
+			// An attempt that never worked slows the next one down (a host that cannot do direct connections would be asked again and again); one that worked and then died is retried soon
+			mDirectFailures = mDirectWorkedSinceStart ? 0 : mDirectFailures + 1;
+			mDirectWorkedSinceStart = false;
+		}
+	}
+}
+
+bool UDPSocket::isDirectTo(const SocketAddress& peerAddress) const
+{
+	uint16_t id = 0;
+	if (!mDirectSupported || nullptr == mInternal || !RelayProtocol::parseVirtualIP(peerAddress.getIP(), id))
+		return false;
+	return mInternal->mDirect.getState(id) == DirectLink::State::DIRECT;
+}
+
+int UDPSocket::getDirectPeerCount() const
+{
+	if (!mDirectSupported || nullptr == mInternal)
+		return 0;
+	int count = 0;
+	for (int id = 0; id <= 16; ++id)
+		count += (mInternal->mDirect.getState((uint16)id) == DirectLink::State::DIRECT) ? 1 : 0;
+	return count;
 }
 
 bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
@@ -1396,6 +1544,18 @@ bool UDPSocket::receiveInternal(ReceiveResult& outReceiveResult)
 		// Browser build: the next message of the relay server's WebSocket (an empty buffer means that nothing is there)
 		WebTransport& web = mInternal->mWeb;
 		outReceiveResult.mBuffer.clear();
+		uint16 directPeer = 0;
+		if (mDirectSupported && mRelayRole != RelayRole::NONE && mInternal->mDirect.receive(directPeer, outReceiveResult.mBuffer))
+		{
+			// A datagram over a direct channel: it looks like it came from the peer's made-up address, exactly like one that came through the relay
+			if ((mRelayRole == RelayRole::HOST) == (directPeer != 0))
+			{
+				outReceiveResult.mSenderAddress.set(RelayProtocol::virtualIP(directPeer), RelayProtocol::VIRTUAL_PORT);
+				++mDirectDatagramsIn;
+				return true;
+			}
+			outReceiveResult.mBuffer.clear();
+		}
 		if (web.mInbox.empty())
 			return true;
 		outReceiveResult.mBuffer = std::move(web.mInbox.front());

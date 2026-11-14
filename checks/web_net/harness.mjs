@@ -64,7 +64,7 @@ export class Instance {
 		this.profileDir = profileDir;
 		this.process = spawn(chrome, ['--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profileDir}`, '--window-size=1280,720', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
 			'--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-			'--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' });
+			'--disable-features=WebRtcHideLocalIpsWithMdns', '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' });
 		let list;
 		for (let i = 0; i < 100 && !list; ++i) {
 			try { const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json(); if (targets.find((t) => t.type === 'page')) list = targets; } catch { /* not up yet */ }
@@ -79,6 +79,9 @@ export class Instance {
 		await this.send('Page.enable');
 		if (extraSeedFill !== undefined) await this.send('Page.addScriptToEvaluateOnNewDocument', { source: seedScript(extraSeedFill) });
 	}
+
+	/** Runs a script in every page this browser loads from now on, before the page's own scripts (test hooks, e.g. to break WebRTC). */
+	async addScript(source) { await this.send('Page.addScriptToEvaluateOnNewDocument', { source }); }
 
 	#onMessage(m) {
 		if (m.id && this.pending.has(m.id)) { this.pending.get(m.id)(m); this.pending.delete(m.id); }
