@@ -135,7 +135,9 @@ void MainMenu::update(float timeElapsed)
 {
 	GameMenuBase::update(timeElapsed);
 
+#if defined(PLATFORM_WEB)
 	mBrowserNoticeTimer = std::max(mBrowserNoticeTimer - timeElapsed, 0.0f);
+#endif
 
 	// Test hook: open the online lobby right away (used by the automated screenshot check)
 	if (mState == State::SHOW && nullptr != TestHooks::getEnv("S3AIR_LOBBY_OPEN"))
@@ -315,6 +317,7 @@ void MainMenu::render()
 		}
 	}
 
+#if defined(PLATFORM_WEB)
 	// Notice that online play does not exist in the browser version (yet)
 	if (mBrowserNoticeTimer > 0.0f)
 	{
@@ -322,6 +325,7 @@ void MainMenu::render()
 		drawer.drawRect(Recti(0, 206, (int)mRect.width, 18), Color(0.0f, 0.0f, 0.0f, 0.7f * alpha));
 		drawer.printText(global::mOxyfontRegular, Recti(0, 210, (int)mRect.width, 10), "Online play is not available in the browser version yet.", 5, Color(1.0f, 0.8f, 0.4f, alpha));
 	}
+#endif
 
 	// Version info
 	{
