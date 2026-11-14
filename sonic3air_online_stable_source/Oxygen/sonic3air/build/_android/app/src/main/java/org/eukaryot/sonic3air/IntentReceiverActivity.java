@@ -44,8 +44,8 @@ public class IntentReceiverActivity extends Activity
 			onGameActivityReady();
 
 			AlertDialog.Builder dlgAlert  = new AlertDialog.Builder(this);
-			dlgAlert.setTitle("Sonic 3 A.I.R. file handler");
-			dlgAlert.setMessage("Passed file to Sonic 3 A.I.R.\nPress OK to switch back to the game.");
+			dlgAlert.setTitle("Sonic 3 AirNet file handler");
+			dlgAlert.setMessage("Passed file to Sonic 3 AirNet.\nPress OK to switch back to the game.");
 			dlgAlert.setPositiveButton("Ok",
 				new DialogInterface.OnClickListener()
 				{

@@ -1193,6 +1193,190 @@ void SelfUpdater::update()
 
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Android: an APK cannot install itself, so the game only asks the GitHub API (through the Java side of the app) for the newest
+// release and opens the release page in the browser. No download, no installation, nothing is executed.
+#elif defined(PLATFORM_ANDROID)
+
+#include "oxygen/platform/android/AndroidJNIHelper.h"
+
+using namespace selfupdate;
+
+namespace
+{
+	const char* DEFAULT_REPO = "TrickerNoxics14/Sonic-3-Airnet";
+}
+
+SelfUpdater& SelfUpdater::instance()
+{
+	static SelfUpdater instance;
+	return instance;
+}
+
+SelfUpdater::SelfUpdater()
+{
+	Configuration& config = Configuration::instance();
+	mRepo = config.mOnlineUpdateRepo.empty() ? std::string(DEFAULT_REPO) : config.mOnlineUpdateRepo;
+
+	if (parseVersion(AndroidJNIHelper().callStringMethod("getAppVersionName"), mCurrentVersion))
+		mCurrentVersionText = versionToString(mCurrentVersion);
+
+	if (!mCurrentVersion.mValid)
+	{
+		mState = (int)State::DISABLED;
+		mMessage = "This build has no version information, so the update check is switched off.";
+	}
+	else if (!isValidRepoName(mRepo))
+	{
+		mState = (int)State::DISABLED;
+		mMessage = "The setting Online / UpdateRepo in settings.json is not a valid repository name (owner/name).";
+	}
+}
+
+SelfUpdater::~SelfUpdater() {}
+
+void SelfUpdater::setState(State state, const std::string& message)
+{
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		mMessage = message;
+	}
+	mState = (int)state;
+}
+
+void SelfUpdater::fail(const std::string& message)
+{
+	setState(State::FAILED, message);
+}
+
+void SelfUpdater::log(const std::string& text)
+{
+	RMX_LOG_INFO("Updater: " << text);
+}
+
+void SelfUpdater::update()
+{
+	if ((State)mState.load() != State::CHECKING)
+		return;
+
+	AndroidJNIHelper jni;
+	const int status = jni.callIntMethod("getHttpGetStatus");
+	if (status == 1)
+		return;		// Still running
+	if (status != 2)
+	{
+		fail("GitHub could not be reached. Check your internet connection and try again.");
+		return;
+	}
+
+	const std::string body = jni.callStringMethod("getHttpGetBody");
+	std::string errors;
+	const Json::Value root = rmx::JsonHelper::loadFromMemory(std::vector<uint8>(body.begin(), body.end()), &errors);
+	Version latest;
+	if (!root.isObject() || !root["tag_name"].isString() || !parseVersion(root["tag_name"].asString(), latest))
+	{
+		fail("The latest release has no usable version number (expected a tag like v1.2.3).");
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		mRelease = ReleaseInfo();
+		mRelease.mVersion = latest;
+		mRelease.mTag = root["tag_name"].asString();
+		if (root["body"].isString())
+			mRelease.mNotes = sanitizeNotes(root["body"].asString());
+		mHasRelease = true;
+	}
+
+	const std::string latestText = versionToString(latest);
+	switch (decide(mCurrentVersion, latest))
+	{
+		case Decision::UP_TO_DATE:
+			log("up to date (" + latestText + ")");
+			setState(State::UP_TO_DATE, "You have the latest version.");
+			break;
+		case Decision::UPDATE_AVAILABLE:
+			log("update available: " + latestText);
+			setState(State::UPDATE_AVAILABLE, "Android cannot update the app by itself. The button opens the download page: install the new APK over this one (your saves are kept).\ngithub.com/" + mRepo + "/releases/latest");
+			break;
+		case Decision::OLDER_THAN_CURRENT:
+			setState(State::OLDER_THAN_CURRENT, "The latest release is older than your version. The game never goes back to an older version.");
+			break;
+		default:
+			fail("The versions could not be compared.");
+			break;
+	}
+}
+
+SelfUpdater::Snapshot SelfUpdater::getSnapshot()
+{
+	Snapshot snapshot;
+	std::lock_guard<std::mutex> lock(mMutex);
+	snapshot.mState = (State)mState.load();
+	snapshot.mCurrentVersion = mCurrentVersionText;
+	snapshot.mMessage = mMessage;
+	if (mHasRelease)
+	{
+		snapshot.mLatestVersion = versionToString(mRelease.mVersion);
+		snapshot.mNotes = mRelease.mNotes;
+	}
+	return snapshot;
+}
+
+const char* SelfUpdater::getButtonText()
+{
+	switch ((State)mState.load())
+	{
+		case State::UPDATE_AVAILABLE:	return "Open the download page";
+		case State::CHECKING:			return "Please wait...";
+		case State::DISABLED:			return "Updates are not available";
+		case State::UP_TO_DATE:
+		case State::OLDER_THAN_CURRENT:
+		case State::FAILED:
+		case State::CANCELLED:			return "Check again";
+		default:						return "Check for updates";
+	}
+}
+
+void SelfUpdater::onMenuButton()
+{
+	switch ((State)mState.load())
+	{
+		case State::IDLE:
+		case State::UP_TO_DATE:
+		case State::OLDER_THAN_CURRENT:
+		case State::FAILED:
+		case State::CANCELLED:			startCheck(); break;
+		case State::UPDATE_AVAILABLE:	startUpdate(); break;
+		default:						break;
+	}
+}
+
+void SelfUpdater::startCheck()
+{
+	const State state = (State)mState.load();
+	if (state == State::DISABLED || state == State::CHECKING)
+		return;
+	setState(State::CHECKING);
+	AndroidJNIHelper().callVoidMethod("startHttpGet", ("https://api.github.com/repos/" + mRepo + "/releases/latest").c_str());
+}
+
+void SelfUpdater::startUpdate()
+{
+	// "Update" on Android means: show the release page of the newest version
+	if ((State)mState.load() != State::UPDATE_AVAILABLE)
+		return;
+	if (!AndroidJNIHelper().callBoolMethod("openReleasePage", ("https://github.com/" + mRepo + "/releases/latest").c_str()))
+		fail("The browser could not be opened. Open github.com/" + mRepo + "/releases/latest yourself.");
+}
+
+void SelfUpdater::cancel() {}
+void SelfUpdater::installNow() {}
+bool SelfUpdater::isBusy() const  { return (State)mState.load() == State::CHECKING; }
+void SelfUpdater::joinWorker() {}
+
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Other platforms: no updater
 #else
 

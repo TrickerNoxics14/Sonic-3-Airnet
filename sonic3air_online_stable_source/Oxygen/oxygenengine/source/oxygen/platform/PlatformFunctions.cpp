@@ -606,7 +606,7 @@ bool PlatformFunctions::isDebuggerPresent()
 
 bool PlatformFunctions::hasClipboardSupport()
 {
-#if defined(PLATFORM_WINDOWS) || defined(PLATFORM_MAC) || defined(PLATFORM_LINUX)
+#if defined(PLATFORM_WINDOWS) || defined(PLATFORM_MAC) || defined(PLATFORM_LINUX) || defined(PLATFORM_ANDROID)
 	return true;
 #else
 	return false;

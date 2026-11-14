@@ -389,4 +389,110 @@ public class GameActivity extends SDLActivity
 		Cursor cursor = downloadManager.query(new DownloadManager.Query().setFilterById(downloadId));
 		return (cursor.moveToFirst()) ? cursor : null;
 	}
+
+
+	// ----- Online fork: update check (the APK cannot install itself, so the game only asks GitHub for the newest version and opens the release page) -----
+
+	private static volatile int mHttpStatus = 0;		// 0 = idle, 1 = running, 2 = done, 3 = failed
+	private static volatile String mHttpBody = "";
+
+	// Called from C++
+	public String getAppVersionName()
+	{
+		try
+		{
+			return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+		}
+		catch (Exception e)
+		{
+			return "";
+		}
+	}
+
+	// Called from C++: starts a HTTPS GET to api.github.com in a background thread (no other address is accepted), the result is polled
+	public void startHttpGet(final String urlString)
+	{
+		mHttpBody = "";
+		if (null == urlString || !urlString.startsWith("https://api.github.com/"))
+		{
+			mHttpStatus = 3;
+			return;
+		}
+		mHttpStatus = 1;
+		new Thread(new Runnable()
+		{
+			@Override
+			public void run()
+			{
+				java.net.HttpURLConnection connection = null;
+				try
+				{
+					connection = (java.net.HttpURLConnection)new java.net.URL(urlString).openConnection();
+					connection.setConnectTimeout(10000);
+					connection.setReadTimeout(15000);
+					connection.setRequestProperty("Accept", "application/vnd.github+json");
+					connection.setRequestProperty("User-Agent", "Sonic3AIR-Online-Android");
+					if (connection.getResponseCode() != 200)
+					{
+						mHttpStatus = 3;
+						return;
+					}
+					InputStream stream = connection.getInputStream();
+					ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+					byte[] data = new byte[4096];
+					int count;
+					while ((count = stream.read(data, 0, data.length)) != -1)
+					{
+						buffer.write(data, 0, count);
+						if (buffer.size() > 1024 * 1024)
+						{
+							mHttpStatus = 3;
+							return;
+						}
+					}
+					mHttpBody = buffer.toString("UTF-8");
+					mHttpStatus = 2;
+				}
+				catch (Exception e)
+				{
+					Log.i("oxygen", "HTTP request failed: " + e.toString());
+					mHttpStatus = 3;
+				}
+				finally
+				{
+					if (null != connection)
+						connection.disconnect();
+				}
+			}
+		}).start();
+	}
+
+	// Called from C++
+	public int getHttpGetStatus()
+	{
+		return mHttpStatus;
+	}
+
+	// Called from C++
+	public String getHttpGetBody()
+	{
+		return mHttpBody;
+	}
+
+	// Called from C++: opens a web page in the browser (only the releases page of GitHub)
+	public boolean openReleasePage(String urlString)
+	{
+		if (null == urlString || !urlString.startsWith("https://github.com/"))
+			return false;
+		try
+		{
+			startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(urlString)));
+			return true;
+		}
+		catch (Exception e)
+		{
+			Log.i("oxygen", "Could not open the release page: " + e.toString());
+			return false;
+		}
+	}
 }

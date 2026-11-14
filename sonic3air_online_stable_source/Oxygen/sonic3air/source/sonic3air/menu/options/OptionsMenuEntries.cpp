@@ -367,6 +367,11 @@ void UpdateCheckMenuEntry::renderEntry(RenderContext& renderContext_)
 				drawer.printText(global::mOxyfontSmall, Recti(baseX, py, 0, 10), "Closing the game...", 5, white);
 				py += 10;
 			}
+			if (!snapshot.mMessage.empty() && snapshot.mState == SelfUpdater::State::UPDATE_AVAILABLE)
+			{
+				// Only set on platforms that cannot install the update themselves (Android): where to get it
+				printWrapped(snapshot.mMessage, yellow, 5);
+			}
 			if (!snapshot.mNotes.empty() && snapshot.mState == SelfUpdater::State::UPDATE_AVAILABLE)
 			{
 				py += 2;

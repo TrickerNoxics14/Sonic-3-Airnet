@@ -129,6 +129,50 @@
 		mEnv->CallVoidMethod(mActivity, methodId, *stringA, *byteArrayB);
 	}
 
+	void AndroidJNIHelper::callVoidMethod(const char* methodName, const char* a)
+	{
+		JNIStringParam stringA(mEnv, a);
+		if (!stringA.isValid())
+			return;
+
+		static const std::string signature = JNITypeSignatureHelper::getMethodSignature<void>(*stringA);
+		jmethodID methodId = mEnv->GetMethodID(mActivityClass, methodName, signature.c_str());
+		mEnv->CallVoidMethod(mActivity, methodId, *stringA);
+	}
+
+	bool AndroidJNIHelper::callBoolMethod(const char* methodName, const char* a)
+	{
+		JNIStringParam stringA(mEnv, a);
+		if (!stringA.isValid())
+			return false;
+
+		static const std::string signature = JNITypeSignatureHelper::getMethodSignature<bool>(*stringA);
+		jmethodID methodId = mEnv->GetMethodID(mActivityClass, methodName, signature.c_str());
+		return (mEnv->CallBooleanMethod(mActivity, methodId, *stringA) != 0);
+	}
+
+	int AndroidJNIHelper::callIntMethod(const char* methodName)
+	{
+		static const std::string signature = JNITypeSignatureHelper::getMethodSignature<int32>();
+		jmethodID methodId = mEnv->GetMethodID(mActivityClass, methodName, signature.c_str());
+		return mEnv->CallIntMethod(mActivity, methodId);
+	}
+
+	std::string AndroidJNIHelper::callStringMethod(const char* methodName)
+	{
+		static const std::string signature = JNITypeSignatureHelper::getMethodSignature<jstring>();
+		jmethodID methodId = mEnv->GetMethodID(mActivityClass, methodName, signature.c_str());
+		jstring result = (jstring)mEnv->CallObjectMethod(mActivity, methodId);
+		if (nullptr == result)
+			return std::string();
+		const char* chars = mEnv->GetStringUTFChars(result, nullptr);
+		std::string text = (nullptr != chars) ? chars : "";
+		if (nullptr != chars)
+			mEnv->ReleaseStringUTFChars(result, chars);
+		mEnv->DeleteLocalRef(result);
+		return text;
+	}
+
 	bool AndroidJNIHelper::callBoolMethod(const char* methodName)
 	{
 		static const std::string signature = JNITypeSignatureHelper::getMethodSignature<bool>();

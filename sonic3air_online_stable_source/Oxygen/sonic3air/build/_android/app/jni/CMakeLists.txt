@@ -5,10 +5,15 @@ project(Sonic3AIR)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(WORKSPACE_DIR ../../../../../..)
+get_filename_component(WORKSPACE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../../../.." ABSOLUTE)
 
 #add_definitions(-DDEBUG)
 add_definitions(-DIMGUI_IMPL_OPENGL_ES2)
+
+# Keep the builder's folder names out of the libraries (__FILE__ strings and debug info): the workspace root is shown as "src"
+if (TRUE)
+	add_compile_options("-ffile-prefix-map=${WORKSPACE_DIR}=src")
+endif()
 
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
@@ -36,6 +41,7 @@ include_directories(${WORKSPACE_DIR}/librmx/source)
 include_directories(${WORKSPACE_DIR}/Oxygen/lemonscript/source)
 include_directories(${WORKSPACE_DIR}/Oxygen/oxygenengine/source)
 include_directories(${WORKSPACE_DIR}/Oxygen/sonic3air/source)
+include_directories(${WORKSPACE_DIR}/Oxygen/sonic3air/source/external)
 
 
 

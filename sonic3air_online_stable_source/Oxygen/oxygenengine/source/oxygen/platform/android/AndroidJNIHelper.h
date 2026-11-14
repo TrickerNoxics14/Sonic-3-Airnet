@@ -22,7 +22,11 @@
 
 		void callVoidMethod(const char* methodName);
 		void callVoidMethod(const char* methodName, const char* a, const std::vector<uint8>& b);
+		void callVoidMethod(const char* methodName, const char* a);
 		bool callBoolMethod(const char* methodName);
+		bool callBoolMethod(const char* methodName, const char* a);
+		int callIntMethod(const char* methodName);
+		std::string callStringMethod(const char* methodName);
 		bool callBoolMethod(const char* methodName, uint64 a);
 		int callIntMethod(const char* methodName, uint64 a);
 		uint64 callLongMethod(const char* methodName, uint64 a);

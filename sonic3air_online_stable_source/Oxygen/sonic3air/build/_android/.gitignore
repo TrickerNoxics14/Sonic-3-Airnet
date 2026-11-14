@@ -1,0 +1,8 @@
+app/build/
+app/.cxx/
+app/src/main/assets/
+.gradle/
+local.properties
+*.jks
+*.keystore
+build/

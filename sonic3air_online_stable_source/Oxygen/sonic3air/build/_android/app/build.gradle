@@ -14,15 +14,29 @@ android {
         if (buildAsApplication) {
             namespace "org.eukaryot.sonic3air"
         }
+        applicationId "org.eukaryot.sonic3airnet"    // Distinct from the stock app, so both can be installed side by side (the Java package / namespace stays org.eukaryot.sonic3air)
         minSdkVersion 23
         targetSdkVersion 29     // Can't go higher, as requestLegacyExternalStorage in the manifest won't work otherwise
-        versionCode 1
-        versionName "26.03.28.0"
+        // Online fork: version and code are passed by checks/build_android.ps1 (-PAIRNET_VERSION_NAME=1.2.0 -PAIRNET_VERSION_CODE=10200)
+        versionCode Integer.parseInt((project.findProperty('AIRNET_VERSION_CODE') ?: '1').toString())
+        versionName (project.findProperty('AIRNET_VERSION_NAME') ?: '0.0.0-dev').toString()
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_APP_PLATFORM=android-23", "-DANDROID_STL=c++_static"
-                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
-                //abiFilters 'armeabi-v7a'
+                // All four ABIs by default; pass -PAIRNET_ABIS=arm64-v8a to build just one (much faster)
+                abiFilters(*(project.findProperty('AIRNET_ABIS') ?: 'armeabi-v7a,arm64-v8a,x86,x86_64').toString().split(','))
+            }
+        }
+    }
+    signingConfigs {
+        // The keystore lives OUTSIDE the repository; its path and passwords come from the environment (see checks/package_files/ANDROID_BUILD.md)
+        airnet {
+            if (System.getenv('AIRNET_KEYSTORE'))
+            {
+                storeFile file(System.getenv('AIRNET_KEYSTORE'))
+                storePassword System.getenv('AIRNET_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('AIRNET_KEY_ALIAS') ?: 'airnet'
+                keyPassword System.getenv('AIRNET_KEY_PASSWORD') ?: System.getenv('AIRNET_KEYSTORE_PASSWORD')
             }
         }
     }
@@ -34,6 +48,8 @@ android {
         release {
             debuggable false     // Set to true to allow for "Attach debugger" even for signed APKs
             minifyEnabled false
+            if (System.getenv('AIRNET_KEYSTORE'))
+                signingConfig signingConfigs.airnet
         }
     }
     namespace 'org.eukaryot.sonic3air'
