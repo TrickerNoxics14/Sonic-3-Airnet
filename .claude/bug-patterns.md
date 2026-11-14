@@ -509,3 +509,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `rg -n 'std::(strftime|time|localtime|gmtime|clock)\b' sonic3air_online_stable_source --glob '*.cpp' --glob '*.h'`
 - Siblings: Tools.cpp fixed (#include <ctime>) · other files compile fine with libc++ in the web build
 - Guard: checks/build_web.ps1 (libc++ is strict about includes)
+
+## 2026-11-14 · unguarded-web-code · cpp
+- Seed: sonic3air/source/sonic3air/menu/MainMenu.cpp:138 - web-only notice timer update and render block compiled on every platform
+- Broken assumption: a state that never becomes non-zero on Windows is harmless, so no platform guard is needed
+- Search: `rg -n 'mBrowserNotice' sonic3air_online_stable_source`
+- Siblings: MainMenu.cpp lobby entry not a bug (already under platform_web) · SelfUpdater.cpp:1197 not a bug (non-windows stub branch)
+- Guard: Windows verification pass reads the diff of every web commit; Windows build and Quick 25/25 after wrapping
