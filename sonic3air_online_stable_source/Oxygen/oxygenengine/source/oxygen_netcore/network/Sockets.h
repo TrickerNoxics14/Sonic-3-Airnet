@@ -200,11 +200,17 @@ public:
 
 	// Relay server (see RelayProtocol.h): all datagrams to and from the other side go through the relay, which makes a connection possible when a direct one is not.
 	// The peers on the other side get made-up addresses (240.0.x.y); everything above this class works with them like with any other address.
-	enum class RelayRole { NONE, HOST, CLIENT };
+	// DIRECTORY: a socket of its own that only talks to the lobby directory of the relay server (see DirectoryProtocol.h): nothing is registered or joined, the directory datagrams are
+	// handed to the caller unchanged (sender = the relay's address)
+	enum class RelayRole { NONE, HOST, CLIENT, DIRECTORY };
 	void startRelay(RelayRole role, const SocketAddress& relayAddress, uint64 lobbyID, uint64 key);
 	void stopRelay();
 	void updateRelay();		// Call regularly: (re)sends the registration or join message
 	inline RelayRole getRelayRole() const  { return mRelayRole; }
+	inline uint64 getRelayLobby() const  { return mRelayLobby; }
+	inline uint64 getRelayKey() const  { return mRelayKey; }
+	inline uint64 getRelayHostSecret() const  { return mRelayHostSecret; }		// Host: lets the lobby directory know that the publishing game is the one that holds the relay lobby
+	bool isTransportOpen() const;		// Browser build: the WebSocket to the relay is open. Elsewhere: always true while the socket is valid.
 	inline bool isRelayReady() const  { return mRelayReady; }		// Host: the relay knows the lobby. Friend: the relay let us in.
 	inline int getRelayRefusal() const  { return mRelayRefusal; }	// 0 = none, 1 = no host registered at the relay, 2 = lobby full
 	inline uint32 getRelayRejoinCount() const  { return mRelayRejoinCount; }		// Friend: how often the relay gave us a new place (a different token than before: the old place was gone, e.g. after a lost WebSocket), so that the connection through it has to be started again

@@ -423,8 +423,17 @@ void NetplayHost::updateConnection(float deltaSeconds)
 	mHostStateTimer += deltaSeconds;
 	if ((mHostState == HostState::CONNECT_TO_SERVER || (mHostState == HostState::REGISTERED && !mRegistrationRequest.hasResponse())) && mHostStateTimer > 25.0f)
 	{
-		mHostState = HostState::FAILED;
-		mNetplayManager.reportFailure(NetplayFailure::Reason::SERVER_UNREACHABLE);
+		if (mNetplayManager.isRelayHostRegistered())
+		{
+			// The matchmaking server is not ours and may be down: a lobby that the relay server knows still works (friends join through it)
+			RMX_LOG_INFO("Netplay host: the game server did not answer, the lobby goes on through the relay server only");
+			mHostState = HostState::NONE;
+		}
+		else
+		{
+			mHostState = HostState::FAILED;
+			mNetplayManager.reportFailure(NetplayFailure::Reason::SERVER_UNREACHABLE);
+		}
 	}
 
 	switch (mHostState)

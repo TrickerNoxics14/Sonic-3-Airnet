@@ -738,6 +738,59 @@ namespace NetplayLobby
 	//   "127.0.0.1:28842", "localhost" -> "ws://127.0.0.1:28842"          (a relay on the same computer has no certificate)
 	//   "https://..." / "http://..."   -> "wss://..." / "ws://..."
 	// Returns false for anything that is not a plain host name or address with an optional port and path (no user names, no spaces, no odd characters).
+	// A server address as a player types it: "host", "host:port", or a web address (wss://host/...) from which only the name is used. Names and IPv4 addresses only.
+	inline bool parseServerAddress(const std::string& input, std::string& outHost, int& outPort, int defaultPort)
+	{
+		size_t begin = 0, end = input.size();
+		while (begin < end && (input[begin] == ' ' || input[begin] == '\t'))
+			++begin;
+		while (end > begin && (input[end - 1] == ' ' || input[end - 1] == '\t'))
+			--end;
+		std::string text = input.substr(begin, end - begin);
+		if (text.empty() || text.size() > 100)
+			return false;
+		const size_t scheme = text.find("://");
+		if (scheme != std::string::npos)
+			text = text.substr(scheme + 3);
+		const size_t cut = text.find_first_of("/?");
+		if (cut != std::string::npos)
+			text = text.substr(0, cut);
+		std::string host = text;
+		int port = defaultPort;
+		const size_t colon = text.rfind(':');
+		if (colon != std::string::npos)
+		{
+			host = text.substr(0, colon);
+			const std::string portText = text.substr(colon + 1);
+			if (portText.empty() || portText.size() > 5)
+				return false;
+			port = 0;
+			for (const char c : portText)
+			{
+				if (c < '0' || c > '9')
+					return false;
+				port = port * 10 + (c - '0');
+			}
+		}
+		if (host.empty() || host.size() > 80 || port <= 0 || port > 65535 || host.front() == '.' || host.front() == '-' || host.back() == '.' || host.back() == '-')
+			return false;
+		for (const char c : host)
+		{
+			if (!(std::isalnum((unsigned char)c) || c == '.' || c == '-'))
+				return false;
+		}
+		outHost = host;
+		outPort = port;
+		return true;
+	}
+
+	inline bool isPlausibleServerAddress(const std::string& input)
+	{
+		std::string host;
+		int port = 0;
+		return parseServerAddress(input, host, port, 28842);
+	}
+
 	inline bool normalizeRelayWebSocketURL(const std::string& input, std::string& outURL)
 	{
 		size_t begin = 0, end = input.size();

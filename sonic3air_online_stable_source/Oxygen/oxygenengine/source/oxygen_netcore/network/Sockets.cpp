@@ -10,6 +10,7 @@
 #include "oxygen_netcore/network/Sockets.h"
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
+#include "oxygen_netcore/network/DirectoryProtocol.h"
 #include <chrono>
 #include <random>
 #include <deque>
@@ -740,6 +741,15 @@ UDPSocket::~UDPSocket()
 	}
 }
 
+bool UDPSocket::isTransportOpen() const
+{
+#ifdef __EMSCRIPTEN__
+	return isValid() && mInternal->mWeb.mState == WebTransport::State::OPEN;
+#else
+	return isValid();
+#endif
+}
+
 bool UDPSocket::isValid() const
 {
 	return (nullptr != mInternal && mInternal->mSocket != INVALID_SOCKET);
@@ -1218,6 +1228,10 @@ void UDPSocket::updateRelay()
 	}
 #endif
 
+	// A directory socket has nothing to register: it only sends and receives directory messages
+	if (mRelayRole == RelayRole::DIRECTORY)
+		return;
+
 	// The registration / join message goes out every second until the relay answered, and then every 5 seconds (that keeps the lobby and our place in it alive)
 	const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
 	if (now - mRelayLastHello < (mRelayReady ? 5.0 : 1.0))
@@ -1260,6 +1274,8 @@ bool UDPSocket::handleRelayPacket(ReceiveResult& outReceiveResult)
 	uint8_t type = 0;
 	if (!RelayProtocol::parseHeader(buffer.data(), buffer.size(), type))
 		return true;
+	if (mRelayRole == RelayRole::DIRECTORY)
+		return !DirectoryProtocol::isDirectoryType(type);		// directory messages go to the caller
 	const uint8_t* data = buffer.data();
 	const size_t size = buffer.size();
 

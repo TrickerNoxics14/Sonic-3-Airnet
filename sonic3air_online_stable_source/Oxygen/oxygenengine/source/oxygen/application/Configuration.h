@@ -238,6 +238,14 @@ public:
 	// Only if both the host and the friend have the same relay set, players whose direct connection fails can still play, through the relay (more lag).
 	std::string mOnlineRelayServer;
 
+	// Online play: the public lobby server (empty = the default from NetplayServerDefaults.h, which is empty until somebody hosts one). Same format as the relay server;
+	// with no relay set, the lobby server is also the relay.
+	std::string mOnlineLobbyServer;
+	std::string mOnlineLobbyName = "My lobby";		// What a new lobby is called in the public list (kept clean by the lobby server and the menu)
+	bool mOnlineLobbyPublic = true;				// A new lobby is listed publicly (otherwise it is only joined with its code)
+	int mOnlineLobbyMaxPlayers = 4;				// 2 to 4
+	bool mOnlineListCompatibleOnly = false;		// The list of public lobbies hides the ones this game cannot join
+
 	// Online fork: the GitHub repository (owner/name) the in-game updater asks for releases (public REST API, releases/latest).
 	std::string mOnlineUpdateRepo = "TrickerNoxics14/Sonic-3-Airnet";
 

@@ -14,6 +14,9 @@
 
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
+#include "oxygen_netcore/network/LobbyDirectory.h"
+
+#include <future>
 
 class ControlsIn;
 class NetplayClient;
@@ -76,6 +79,30 @@ public:
 	#endif
 	}
 	bool isRelayConfigured() const;
+
+	// Lobby server (the relay server program with its public lobby directory, see NetplayServerDefaults.h and checks/relay_ws): the list of public lobbies, 6 digit lobby codes
+	// and the relay for the games that are joined through it. Empty = none is set; the menu then says so and offers private, LAN and matchmaking server play.
+	//  - the setting is, in this order: the developer test variable S3AIR_LOBBY_SERVER, settings.json Online/LobbyServer, the default in NetplayServerDefaults.h
+	//  - the relay is the one in Online/RelayServer, or the lobby server if no relay is set (the browser build: the page's relay)
+	//  - the lobby server in use is the lobby server setting, or the relay if no lobby server is set
+	std::string getLobbyServerSetting() const;
+	void setLobbyServerSetting(const std::string& text);
+	std::string getEffectiveLobbyServer() const;
+	std::string getLobbyServerDisplayName() const;
+	inline bool isLobbyServerConfigured() const  { return !getEffectiveLobbyServer().empty(); }
+	LobbyDirectory& getLobbyDirectory()  { return mLobbyDirectory; }
+	enum class LobbyServerState { NOT_SET, BAD_ADDRESS, CONNECTING, READY, UNREACHABLE };
+	LobbyServerState getLobbyServerState() const;		// What the menu says about the lobby server (NOT_SET means that nobody configured one)
+	void setLobbyDirectoryInUse(bool inUse);			// The online menu is open: keep the directory connection (it also stays while a lobby is published)
+	bool isLobbyServerAddressUsable() const;			// The setting is a name or address that can be used (it says nothing about the server answering)
+	std::string getCompatibilityKey();					// Short text that is equal for games that can play together (version and mods); cached a few seconds
+
+	// Publishing the lobby that this game hosts (call after setupAsHost): the lobby server then lists it (if "isPublic") and issues its 6 digit code
+	void startPublishingLobby(bool isPublic, const std::string& lobbyName);
+	void stopPublishingLobby();
+	inline bool isPublishingLobby() const  { return mPublishWanted; }
+	std::string getPublishedLobbyCode() const;			// 6 digits, empty until the server confirmed the listing
+	void startJoinViaLobbyServer(uint64 sessionID);		// A lobby from the list, or a lobby code that the server resolved: through the relay of the lobby server
 	inline bool canUseRelayAsClient() const  { return mRelaySessionKnown && isRelayConfigured(); }
 	bool beginRelayAsClient();										// Starts talking to the relay; false if there is none or its name does not resolve
 	inline bool isRelayJoined() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::CLIENT && mUDPSocket.isRelayReady(); }
@@ -137,6 +164,9 @@ private:
 	bool restartConnection(bool asHost, uint16 hostPort = 0);
 	bool resolveRelayAddress(SocketAddress& outAddress) const;
 	bool startRelay(UDPSocket::RelayRole role);
+	bool resolveServerSetting(const std::string& setting, SocketAddress& outAddress) const;
+	std::string getExplicitRelaySetting() const;
+	void updateLobbyDirectory(float deltaSeconds);
 
 private:
 	UDPSocket mUDPSocket;
@@ -164,4 +194,20 @@ private:
 	NetplayHost* mNetplayHost = nullptr;
 	NetplayClient* mNetplayClient = nullptr;
 	ExternalAddressQuery mExternalAddressQuery;
+
+	LobbyDirectory mLobbyDirectory;
+	enum class DirectoryAddressState { NONE, RESOLVING, OK, BAD };
+	DirectoryAddressState mDirectoryAddressState = DirectoryAddressState::NONE;
+#ifndef PLATFORM_WEB
+	std::future<std::pair<bool, SocketAddress>> mDirectoryResolve;
+#endif
+	bool mDirectoryInUse = false;
+	std::string mDirectoryServer;			// The setting the directory was started for
+	bool mPublishWanted = false;
+	bool mPublishIsPublic = true;
+	std::string mPublishName;
+	float mPublishInfoTimer = 0.0f;
+	std::string mCompatCache;
+	uint32 mCompatCacheTicks = 0;
+	bool mCompatCacheValid = false;
 };

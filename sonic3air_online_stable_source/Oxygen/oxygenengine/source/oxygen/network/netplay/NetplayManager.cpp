@@ -12,6 +12,7 @@
 #include "oxygen/network/netplay/NetplayHost.h"
 #include "oxygen/network/netplay/NetplayModFingerprint.h"
 #include "oxygen/network/netplay/NetplayAuth.h"
+#include "oxygen/network/netplay/NetplayServerDefaults.h"
 #include "oxygen/application/Configuration.h"
 #include "oxygen/network/EngineServerClient.h"
 #include "oxygen/application/Application.h"
@@ -36,6 +37,8 @@
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen_netcore/serverclient/Packets.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
+
+#include <future>
 
 
 #define USE_IPv6 false
@@ -100,6 +103,15 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 
 std::string NetplayManager::getRelayServerSetting() const
 {
+	// The relay is the one that was set, or else the lobby server (which is the same program)
+	std::string relay = getExplicitRelaySetting();
+	if (relay.empty())
+		relay = getLobbyServerSetting();
+	return relay;
+}
+
+std::string NetplayManager::getExplicitRelaySetting() const
+{
 	// Developer test: a relay without touching the settings file
 	if (const char* testRelay = TestHooks::getEnv("S3AIR_RELAY"))
 		return testRelay;
@@ -161,42 +173,26 @@ std::string NetplayManager::getRelayDisplayName() const
 
 bool NetplayManager::resolveRelayAddress(SocketAddress& outAddress) const
 {
+	return resolveServerSetting(getRelayServerSetting(), outAddress);
+}
+
+bool NetplayManager::resolveServerSetting(const std::string& setting, SocketAddress& outAddress) const
+{
 #ifdef PLATFORM_WEB
-	// Browser: the relay is reached by a WebSocket URL, there is nothing to resolve (and no address that could be used for anything else)
+	// Browser: the server is reached by a WebSocket URL, there is nothing to resolve (and no address that could be used for anything else)
 	std::string url;
-	if (!NetplayLobby::normalizeRelayWebSocketURL(getRelayServerSetting(), url))
+	if (!NetplayLobby::normalizeRelayWebSocketURL(setting, url))
 		return false;
 	UDPSocket::setRelayWebSocketURL(url);
 	outAddress.set("websocket.relay", 1);
 	return true;
 #endif
 
-	// "host" or "host:port" (a name or an IPv4 address)
-	std::string text = getRelayServerSetting();
-	while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
-		text.pop_back();
-	size_t start = 0;
-	while (start < text.size() && (text[start] == ' ' || text[start] == '\t'))
-		++start;
-	text = text.substr(start);
-	if (text.empty())
-		return false;
-
-	std::string host = text;
+	// "host" or "host:port" (a name or an IPv4 address; a web address is accepted too, only its name is used)
+	std::string host;
 	int port = RelayProtocol::DEFAULT_PORT;
-	const size_t colon = text.rfind(':');
-	if (colon != std::string::npos)
-	{
-		host = text.substr(0, colon);
-		port = atoi(text.c_str() + colon + 1);
-	}
-	if (host.empty() || port <= 0 || port > 65535)
+	if (!NetplayLobby::parseServerAddress(setting, host, port, RelayProtocol::DEFAULT_PORT))
 		return false;
-	for (const char c : host)
-	{
-		if (!(isalnum((unsigned char)c) || c == '.' || c == '-'))
-			return false;
-	}
 
 	std::string ip;
 	if (!Sockets::resolveToIP(host, ip, false))
@@ -227,6 +223,250 @@ bool NetplayManager::startRelay(UDPSocket::RelayRole role)
 bool NetplayManager::beginRelayAsClient()
 {
 	return canUseRelayAsClient() && startRelay(UDPSocket::RelayRole::CLIENT);
+}
+
+std::string NetplayManager::getLobbyServerSetting() const
+{
+	// Developer test: a lobby server without touching the settings file ("none" = no lobby server at all)
+	if (const char* testServer = TestHooks::getEnv("S3AIR_LOBBY_SERVER"))
+		return (_stricmp(testServer, "none") == 0) ? std::string() : std::string(testServer);
+	if (!Configuration::instance().mOnlineLobbyServer.empty())
+		return Configuration::instance().mOnlineLobbyServer;
+	return NetplayServerDefaults::DEFAULT_LOBBY_SERVER;
+}
+
+void NetplayManager::setLobbyServerSetting(const std::string& text)
+{
+	Configuration& configuration = Configuration::instance();
+	if (configuration.mOnlineLobbyServer == text)
+		return;
+	configuration.mOnlineLobbyServer = text;
+	configuration.saveSettings();
+	RMX_LOG_INFO("Netplay: the lobby server setting was changed" << (text.empty() ? " (cleared)" : ""));
+}
+
+std::string NetplayManager::getEffectiveLobbyServer() const
+{
+#ifdef PLATFORM_WEB
+	// Browser: the page's relay server is the lobby server
+	return getRelayServerSetting();
+#else
+	std::string server = getLobbyServerSetting();
+	if (server.empty())
+		server = getExplicitRelaySetting();
+	return server;
+#endif
+}
+
+std::string NetplayManager::getLobbyServerDisplayName() const
+{
+	std::string text = getEffectiveLobbyServer();
+#ifdef PLATFORM_WEB
+	std::string url;
+	if (NetplayLobby::normalizeRelayWebSocketURL(text, url))
+	{
+		const size_t start = url.find("://") + 3;
+		const size_t end = url.find_first_of("/?", start);
+		return url.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
+	}
+	return std::string();
+#else
+	return text;
+#endif
+}
+
+bool NetplayManager::isLobbyServerAddressUsable() const
+{
+	// Only what can be seen from the text (no name lookup): the lookup happens in the background when the directory starts
+	const std::string text = getEffectiveLobbyServer();
+	std::string url;
+#ifdef PLATFORM_WEB
+	return NetplayLobby::normalizeRelayWebSocketURL(text, url);
+#else
+	return NetplayLobby::isPlausibleServerAddress(text);
+#endif
+}
+
+void NetplayManager::setLobbyDirectoryInUse(bool inUse)
+{
+	mDirectoryInUse = inUse;
+}
+
+NetplayManager::LobbyServerState NetplayManager::getLobbyServerState() const
+{
+	if (!isLobbyServerConfigured())
+		return LobbyServerState::NOT_SET;
+	if (!isLobbyServerAddressUsable() || mDirectoryAddressState == DirectoryAddressState::BAD)
+		return LobbyServerState::BAD_ADDRESS;
+	if (mDirectoryAddressState != DirectoryAddressState::OK)
+		return LobbyServerState::CONNECTING;
+	switch (mLobbyDirectory.getStatus())
+	{
+		case LobbyDirectory::Status::READY:			return LobbyServerState::READY;
+		case LobbyDirectory::Status::UNREACHABLE:	return LobbyServerState::UNREACHABLE;
+		default:									return LobbyServerState::CONNECTING;
+	}
+}
+
+std::string NetplayManager::getCompatibilityKey()
+{
+	// A short text that is the same for games that can play together: a hash of the same text that the join check compares (game version and mods).
+	// Reading all active mod files takes a moment, so it is kept for half a minute.
+	const uint32 ticks = SDL_GetTicks();
+	if (!mCompatCacheValid || ticks - mCompatCacheTicks > 30000)
+	{
+		const std::string info = getActiveModsInfo();
+		uint64 hash = 14695981039346656037ull;
+		for (const char c : info)
+		{
+			hash ^= (uint8)c;
+			hash *= 1099511628211ull;
+		}
+		char buffer[16];
+		snprintf(buffer, sizeof(buffer), "%08x", (unsigned)((hash >> 32) ^ (hash & 0xffffffffu)));
+		mCompatCache = buffer;
+		mCompatCacheTicks = ticks;
+		mCompatCacheValid = true;
+	}
+	return mCompatCache;
+}
+
+void NetplayManager::startPublishingLobby(bool isPublic, const std::string& lobbyName)
+{
+	mPublishWanted = true;
+	mPublishIsPublic = isPublic;
+	mPublishName = lobbyName;
+	mPublishInfoTimer = 0.0f;
+	mLobbyDirectory.stopPublishing(false);
+	RMX_LOG_INFO("Netplay: this lobby is to be " << (isPublic ? "listed publicly" : "kept private (code only)") << " at the lobby server");
+}
+
+void NetplayManager::stopPublishingLobby()
+{
+	if (mPublishWanted || mLobbyDirectory.isPublishing())
+		mLobbyDirectory.stopPublishing(true);
+	mPublishWanted = false;
+}
+
+std::string NetplayManager::getPublishedLobbyCode() const
+{
+	return mLobbyDirectory.isPublished() ? mLobbyDirectory.getPublishedCode() : std::string();
+}
+
+void NetplayManager::startJoinViaLobbyServer(uint64 sessionID)
+{
+	// A lobby that the lobby server knows is also known to its relay, which is the way in: the game server of the matchmaking service is not asked
+	mSessionID = sessionID;
+	startJoinViaRelayOnly();
+}
+
+void NetplayManager::updateLobbyDirectory(float deltaSeconds)
+{
+	const bool wanted = mDirectoryInUse || mPublishWanted;
+	const std::string server = wanted ? getEffectiveLobbyServer() : std::string();
+	if (!wanted || server.empty() || !isLobbyServerAddressUsable())
+	{
+		if (!mDirectoryServer.empty() || mLobbyDirectory.isStarted())
+		{
+			mLobbyDirectory.stop();
+			mDirectoryServer.clear();
+			mDirectoryAddressState = DirectoryAddressState::NONE;
+		}
+		if (wanted && !server.empty())
+			mDirectoryAddressState = DirectoryAddressState::BAD;
+		else if (!wanted)
+			mDirectoryAddressState = DirectoryAddressState::NONE;
+		return;
+	}
+
+	if (server != mDirectoryServer)
+	{
+		// (Re)start for this address. The name is looked up in the background: a lookup can take seconds when there is no connection, and the menu must not freeze.
+		mLobbyDirectory.stop();
+		mDirectoryServer = server;
+		mDirectoryAddressState = DirectoryAddressState::RESOLVING;
+	#ifdef PLATFORM_WEB
+		SocketAddress address;
+		if (resolveServerSetting(server, address))
+		{
+			mDirectoryAddressState = DirectoryAddressState::OK;
+			mLobbyDirectory.start(address);
+		}
+		else
+		{
+			mDirectoryAddressState = DirectoryAddressState::BAD;
+		}
+	#else
+		mDirectoryResolve = std::async(std::launch::async, [this, server]() -> std::pair<bool, SocketAddress>
+		{
+			SocketAddress address;
+			const bool ok = resolveServerSetting(server, address);
+			return std::make_pair(ok, address);
+		});
+	#endif
+	}
+
+#ifndef PLATFORM_WEB
+	if (mDirectoryAddressState == DirectoryAddressState::RESOLVING && mDirectoryResolve.valid() && mDirectoryResolve.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+	{
+		const std::pair<bool, SocketAddress> result = mDirectoryResolve.get();
+		if (result.first)
+		{
+			mDirectoryAddressState = DirectoryAddressState::OK;
+			mLobbyDirectory.start(result.second);
+			RMX_LOG_INFO("Netplay: connecting to the lobby server");
+		}
+		else
+		{
+			mDirectoryAddressState = DirectoryAddressState::BAD;
+			RMX_LOG_INFO("Netplay: the lobby server's name could not be found");
+		}
+	}
+#endif
+
+	if (mDirectoryAddressState != DirectoryAddressState::OK)
+		return;
+
+	mLobbyDirectory.update(deltaSeconds);
+	{
+		static LobbyDirectory::Status lastStatus = LobbyDirectory::Status::OFF;
+		if (mLobbyDirectory.getStatus() != lastStatus)
+		{
+			lastStatus = mLobbyDirectory.getStatus();
+			RMX_LOG_INFO("Netplay: the lobby server is now " << ((lastStatus == LobbyDirectory::Status::READY) ? "ready" : ((lastStatus == LobbyDirectory::Status::UNREACHABLE) ? "not reachable" : "being contacted")));
+		}
+	}
+
+	// Publishing: the lobby that this game hosts, with the numbers that the list shows
+	if (mPublishWanted)
+	{
+		if (nullptr == mNetplayHost)
+		{
+			stopPublishingLobby();
+			return;
+		}
+		mPublishInfoTimer -= deltaSeconds;
+		if (mPublishInfoTimer <= 0.0f && mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST && mUDPSocket.getRelayLobby() != 0)
+		{
+			mPublishInfoTimer = 1.0f;
+			DirectoryProtocol::PublishInfo info;
+			info.mRelayLobby = mUDPSocket.getRelayLobby();
+			info.mRelayKey = mUDPSocket.getRelayKey();
+			info.mHostSecret = mUDPSocket.getRelayHostSecret();
+			info.mSessionID = mSessionID;
+			info.mPublic = mPublishIsPublic;
+			info.mInGame = (mNetplayHost->getHostState() == NetplayHost::HostState::GAME_RUNNING);
+			info.mPlayers = (uint8)std::min(NetplayHost::MAX_PLAYERS, 1 + mNetplayHost->getConnectedClientCount());
+			info.mMaxPlayers = (uint8)mNetplayHost->getMaxPlayers();
+			info.mCompat = getCompatibilityKey();
+			info.mName = mPublishName;
+			info.mHostName = getLocalPlayerName();
+			if (!mLobbyDirectory.isPublishing())
+				mLobbyDirectory.startPublishing(info);
+			else
+				mLobbyDirectory.updatePublishInfo(info);
+		}
+	}
 }
 
 bool NetplayManager::setupAsHostWithSecret(uint16 port, uint64 secret)
@@ -501,6 +741,7 @@ void NetplayManager::clearFailure()
 
 void NetplayManager::closeConnections()
 {
+	stopPublishingLobby();
 	mUDPSocket.clearLan();
 	clearSessionCharacters();
 	mHostCharacterPick = NetplayLobby::CHARACTER_MENU;
@@ -580,6 +821,7 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 void NetplayManager::updateConnections(float deltaSeconds)
 {
 	writeOnlineLog(deltaSeconds);
+	updateLobbyDirectory(deltaSeconds);
 	if (!mUDPSocket.isValid())
 		return;
 

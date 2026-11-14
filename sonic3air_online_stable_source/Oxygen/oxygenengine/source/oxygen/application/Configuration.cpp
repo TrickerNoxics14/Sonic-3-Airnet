@@ -609,6 +609,11 @@ void Configuration::serializeStandardSettings(JsonSerializer& serializer)
 	{
 		serializer.serialize("PlayerName", mOnlinePlayerName);
 		serializer.serialize("RelayServer", mOnlineRelayServer);
+		serializer.serialize("LobbyServer", mOnlineLobbyServer);
+		serializer.serialize("LobbyName", mOnlineLobbyName);
+		serializer.serialize("LobbyPublic", mOnlineLobbyPublic);
+		serializer.serialize("LobbyMaxPlayers", mOnlineLobbyMaxPlayers);
+		serializer.serialize("ListCompatibleOnly", mOnlineListCompatibleOnly);
 		serializer.serialize("UpdateRepo", mOnlineUpdateRepo);
 		serializer.endObject();
 	}

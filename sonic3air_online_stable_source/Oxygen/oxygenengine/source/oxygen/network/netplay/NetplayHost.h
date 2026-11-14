@@ -123,6 +123,8 @@ public:
 	// Lobby: players gather (and press Ready) before the host starts the game
 	void getLobbySlots(uint8 outStates[MAX_PLAYERS]) const;		// 0 = empty, 1 = host, 2 = joined, 3 = ready
 	int getConnectedClientCount() const;
+	inline int getMaxPlayers() const  { return mMaxClients + 1; }		// Including the host (2 to 4); a lobby that is full refuses further friends
+	inline void setMaxPlayers(int total)  { mMaxClients = std::max(1, std::min(MAX_PLAYERS, total)) - 1; }
 	bool areAllClientsReady() const;							// At least one client, and every connected client is ready
 	void setLobbyHostStarting(bool starting);
 

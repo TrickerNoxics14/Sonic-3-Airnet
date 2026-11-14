@@ -139,6 +139,7 @@ private:
 	bool mUsingRelay = false;			// The direct connection did not work: everything goes through the relay server now
 	uint32 mSeenRelayRejoins = 0;		// The relay's count of new places for us that this client has already reacted to
 	bool mRelayJoinPending = false;		// Waiting for the relay to let us in, only then the connection to the host through it starts
+	bool mRelayOnly = false;			// Joined through the relay from the start (browser build, or a lobby from the lobby server): no direct attempt was made
 	bool mServerKnewNoHost = false;		// The game server said that it does not know this code (the relay is the last chance)
 
 	// Handshake with the host

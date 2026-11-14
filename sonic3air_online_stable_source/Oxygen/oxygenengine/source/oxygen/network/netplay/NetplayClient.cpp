@@ -52,6 +52,7 @@ void NetplayClient::joinViaRelayOnly()
 {
 	// No game server and no direct attempt (the browser build cannot do either): straight to the relay server
 	mServerKnewNoHost = false;
+	mRelayOnly = true;
 	if (!startRelayFallback("this copy of the game can only connect through a relay server"))
 	{
 		fail(NetplayFailure::Reason::SERVER_UNREACHABLE, mNetplayManager.isRelayConfigured() ? "The relay server address is not usable." : "No relay server is set. Online play needs one: enter its address in the lobby.");
@@ -242,7 +243,7 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mState = State::FAILED;
 		return;
 	}
-	else if (mState == State::CONNECT_TO_HOST && mUsingRelay && mRelayJoinPending && mNetplayManager.isBrowserBuild() && mNetplayManager.getRelayRefusal() == 1 && mStateTimer > 6.0f && mReconnectRemaining == 0.0f)
+	else if (mState == State::CONNECT_TO_HOST && mUsingRelay && mRelayJoinPending && (mNetplayManager.isBrowserBuild() || mRelayOnly) && mNetplayManager.getRelayRefusal() == 1 && mStateTimer > 6.0f && mReconnectRemaining == 0.0f)
 	{
 		// The relay answers, but no host registered this code there (a typing mistake, or the host has not opened its lobby, or it uses another relay server)
 		fail(NetplayFailure::Reason::WRONG_CODE, "The relay server does not know a lobby with this code. Check the code, and that the host uses the same relay server.");
