@@ -1,0 +1,14 @@
+{
+  "name": "s3air-relay-ws",
+  "version": "1.0.0",
+  "description": "Relay server for Sonic 3 AirNet online play: UDP for native games, WebSocket for browser games, one lobby for both",
+  "private": true,
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/relay.test.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "license": "GPL-3.0-only"
+}
