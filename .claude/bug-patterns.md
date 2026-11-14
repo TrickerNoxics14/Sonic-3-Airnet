@@ -516,3 +516,38 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `rg -n 'mBrowserNotice' sonic3air_online_stable_source`
 - Siblings: MainMenu.cpp lobby entry not a bug (already under platform_web) · SelfUpdater.cpp:1197 not a bug (non-windows stub branch)
 - Guard: Windows verification pass reads the diff of every web commit; Windows build and Quick 25/25 after wrapping
+
+## 2026-11-14 · relay-place-bound-to-transport · cpp
+- Seed: oxygen_netcore/network/Sockets.cpp + netplay/NetplayClient.cpp: after the browser's relay WebSocket dropped and reconnected, the friend's game froze for good (host timed it out; friend never noticed)
+- Broken assumption: a friend's place at the relay (token, made-up address) survives the transport that carried it, and a silent host is noticed by the connection's own timeout
+- Search: `rg -n 'mRelayToken|getMillisecondsSinceLastMessage|mSeenRelayRejoins' sonic3air_online_stable_source/Oxygen/oxygenengine/source`
+- Siblings: Sockets.cpp CLIENT_JOINED new token fixed (rejoin counter; also covers a restarted native relay) · NetplayClient.cpp relayed game silent for 10 s fixed (watchdog; netconnection times out only with unconfirmed reliable packets, inputs are unreliable) · HOST_REGISTERED with a new host token not a bug (friends rejoin, handled above)
+- Guard: web_net session A6 (relay drops every WebSocket, friend must come back, frames advance, no repairs) and A7 (host only)
+
+## 2026-11-14 · log-path-assumes-desktop · cpp
+- Seed: NetplayManager.cpp writeOnlineLog: fopen($APPDATA/Sonic3AIR/online_log.txt) fails silently in the browser (no such folder)
+- Broken assumption: APPDATA exists and the Sonic3AIR folder exists
+- Search: `rg -n 'getenv\("APPDATA"\)' sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen/network`
+- Siblings: NetplayManager.cpp writeOnlineLog fixed (browser: /sonic3air/savedata) · NetplayClient.cpp:419, NetplayManager.cpp dump/debug paths not a bug (behind testhooks, never enabled in the browser)
+- Guard: web_net checks read the online log of every browser; empty log fails A5
+
+## 2026-11-14 · compile-stamp-as-compatibility-key · cpp
+- Seed: NetplayManager::getActiveModsInfo used __DATE__ __TIME__ so no two builds (browser vs Windows) could play together
+- Broken assumption: every player runs the very same compiled binary
+- Search: `rg -n '__DATE__|__TIME__' sonic3air_online_stable_source/Oxygen --glob '*.cpp' --glob '*.h'`
+- Siblings: NetplayManager.cpp fixed (fixed netplay_compatibility_id text, bump when simulation or protocol changes)
+- Guard: session N (Windows and browser in one lobby)
+
+## 2026-11-14 · signed-int-from-bitwise-op-in-test · js
+- Seed: checks/relay_ws/test/relay.test.mjs:176 token ^ 1 is negative for tokens above 2^31, writeUInt32BE threw: the forged-data test failed about one run in two
+- Broken assumption: a bitwise operator on a uint32 gives a uint32 in JavaScript
+- Search: `rg -n ' \^ ' checks/relay_ws`
+- Siblings: relay.test.mjs:176,178 fixed (>>> 0)
+- Guard: test ran 6 times in a row green after the fix
+
+## 2026-11-14 · synthetic-key-without-char-event · js
+- Seed: checks/web_net/harness.mjs type(): CDP keyDown with text gave no keypress, so the game's text field stayed empty
+- Broken assumption: a keyDown event with text produces typed characters in SDL
+- Search: `rg -n 'dispatchKeyEvent' checks/web_net`
+- Siblings: harness.mjs type() fixed (rawkeydown + char + keyup)
+- Guard: session A types the lobby code and must join

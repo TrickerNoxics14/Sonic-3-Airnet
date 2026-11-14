@@ -73,6 +73,7 @@ public:
 
 	inline State getState() const				{ return mState; }
 	inline DisconnectReason getDisconnectReason() const  { return mDisconnectReason; }
+	inline uint64 getMillisecondsSinceLastMessage() const  { return (mCurrentTimestamp >= mLastMessageReceivedTimestamp) ? (mCurrentTimestamp - mLastMessageReceivedTimestamp) : 0; }		// How long nothing at all came from the other side
 	inline uint16 getLocalConnectionID() const  { return mLocalConnectionID; }
 	inline uint16 getRemoteConnectionID() const { return mRemoteConnectionID; }
 	inline const SocketAddress& getRemoteAddress() const  { return mRemoteAddress; }

@@ -56,7 +56,8 @@ private:
 	enum class TextMode
 	{
 		NAME,
-		CHAT
+		CHAT,
+		RELAY		// Browser build: the address of the relay server
 	};
 
 private:
@@ -91,6 +92,7 @@ private:
 	Screen mScreen = Screen::START;
 	TextMode mTextMode = TextMode::NAME;
 	GameMenuEntries mMenuEntries;
+	float mRelayWaitSeconds = 0.0f;		// Browser build: how long the host has been waiting for the relay server to know its lobby
 	std::string mMessage;		// Shown to the player, e.g. why joining failed
 	bool mShowCopied = false;
 	int mQuickIndex = 1;		// Quick chat message 1 to 12, or 13 for "write a message"

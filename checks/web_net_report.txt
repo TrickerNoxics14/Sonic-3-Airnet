@@ -1,0 +1,30 @@
+PASS  A0  both browsers start the game and reach the main menu
+PASS  A1  the lobby start screen shows the relay from the page link
+PASS  A2  the host opens a lobby (relay knows it) and shows the screen
+PASS  A3  the friend joins with the lobby code through the relay (code proof both ways, player slot 2)
+PASS  A3b  the relay holds one lobby and one friend, both browsers connected by WebSocket  [{"received":17,"forwarded":14,"forwardedBytes":261,"droppedInvalid":0,"droppedRate":0,"droppedBlocked":0,"wrongKeys":0,"refused":0,"lobbiesCreated":1,"lobbies":1,"pipes":1}]
+PASS  A4  the host starts a new game and the friend loads the game state (wasm to wasm)
+PASS  A5  both games run and stay in sync for 25 s of play with inputs from both players (the engine compares the game memory every second: no repairs, last sync recent)  [host: frame 2045, fps 60, repairs 0; friend: frame 2173, fps 60.2, repairs 0, last sync ok 2160]
+PASS  A5b  no desync message and no error in either console
+PASS  A5c  the host knows the friend is relayed and plans for it in the auto input delay (at least 1 frame)  [{"role":"host","t":66,"state":3,"frame":2045,"fps":60,"repairs":0,"relayed":1,"inputDelay":1,"ping":7}]
+PASS  A5d  the relay forwarded the game and dropped nothing as invalid  [{"received":5114,"forwarded":5093,"forwardedBytes":728832,"droppedInvalid":0,"droppedRate":0,"droppedBlocked":0,"wrongKeys":0,"refused":0,"lobbiesCreated":1,"lobbies":1,"pipes":1}]
+PASS  A6a  after the relay dropped every WebSocket both browsers connect again and register / join again by themselves
+PASS  A6b  the friend notices that its place at the relay is new and starts the connection to the host again, which puts it back into its slot  [log Netplay client: the relay server gave us a new place, starting the connection to the host again | slot back]
+PASS  A6c  the game runs again on both sides after the drop (frames advanced by more than 600) and the friend is back in sync  [host frame 2045 -> 2932; friend frame 2173 -> 2760, last sync ok 2700, repairs 0]
+PASS  A7  when only the host's WebSocket drops, the host takes its lobby back and the game goes on (friend frames advance, no desync)  [friend frame 2760 -> 3660]
+PASS  B1  the lobby works through the delayed line (about 90 ms round trip, +-40 ms jitter, a 350 ms stall every 6 s)
+PASS  B2  the games stay in sync through the unsteady line for 40 s (no repairs)  [host: frame 2854, fps 60, repairs 0; friend: frame 2988, fps 60, repairs 0, last sync ok 2880]
+PASS  B3  the auto input delay reacts to the line (more than the 1 frame minimum) and the games keep a playable speed (friend above 40 fps)  [host ping 276 ms, input delay 6; friend fps 60]
+PASS  C1  without a relay address CREATE LOBBY does not open a lobby and says that a relay server is needed
+PASS  C2  a mistyped code (wrong check character) is refused at once with a plain message, nothing is sent to the relay
+PASS  C3  a valid code that no host registered at the relay ends in WRONG_CODE within 40 s ("the relay does not know a lobby with this code")  [log Netplay client: giving up, WRONG_CODE: The relay server does not know a lobby with this code. Check the code, and that the host uses the same relay server.]
+PASS  C4  a relay that cannot be reached: the host lobby says so after 10 s, and the game keeps trying to connect
+PASS  N1a  a Windows game hosts: it registers its lobby at the relay over UDP
+PASS  N1b  a browser joins the Windows host's lobby with the code through the relay (WebSocket to UDP)
+PASS  N1c  the Windows host starts the level and the browser loads its game state (x64 to wasm32; same game version, no mods)
+PASS  N1d  the Windows host and the browser stay in sync (no repairs, recent sync ok)  [host: frame 1807, fps 60.2, repairs 0; friend: frame 1919, fps 60, repairs 0, last sync ok 1860]
+PASS  N2a  a Windows friend (direct path dead, so through the relay after 8 s) joins the browser host's lobby
+PASS  N2b  the browser host starts a new game and the Windows friend loads its game state (wasm32 to x64)
+PASS  N2c  the browser host and the Windows friend stay in sync (no repairs, recent sync ok)  [host: frame 2159, fps 60, repairs 0; friend: frame 1929, fps 60.2, repairs 0, last sync ok 1920]
+
+28 of 28 checks passed

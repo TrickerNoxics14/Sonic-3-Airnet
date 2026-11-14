@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <deque>
 #include <string>
 #include <string_view>
@@ -143,6 +145,7 @@ namespace NetplayLobby
 	{
 		bool mHasValue = false;
 		float mSmoothed = 0.0f;
+		float mDeviation = 0.0f;		// Smoothed distance of the samples from their average: how unsteady the line is (a TCP / WebSocket detour through a relay is much worse at that than UDP)
 
 		inline void addSample(int milliseconds)
 		{
@@ -150,14 +153,18 @@ namespace NetplayLobby
 			if (!mHasValue)
 			{
 				mSmoothed = sample;
+				mDeviation = 0.0f;
 				mHasValue = true;
 			}
 			else
 			{
+				const float distance = (sample > mSmoothed) ? (sample - mSmoothed) : (mSmoothed - sample);
+				mDeviation += (distance - mDeviation) * 0.2f;
 				mSmoothed += (sample - mSmoothed) * 0.3f;
 			}
 		}
 		inline int get() const  { return mHasValue ? (int)(mSmoothed + 0.5f) : -1; }
+		inline int getDeviation() const  { return mHasValue ? (int)(mDeviation + 0.5f) : 0; }
 	};
 
 	inline bool isHighPing(int pingMs)
@@ -187,10 +194,24 @@ namespace NetplayLobby
 		return std::max(0, std::min(MAX_INPUT_DELAY, (int)(networkPing / 33.3f + 0.5f)));
 	}
 
-	inline int effectiveInputDelay(int setting, int worstPingMs)
+	// Through a relay server (and in particular through a browser's WebSocket, which is TCP: one lost packet holds back everything behind it until it is sent again),
+	// the line is much less steady than a direct UDP connection. Auto then plans for the unsteadiness too: the ping plus twice its usual deviation, and never less than
+	// RELAY_MIN_DELAY frames. A fixed setting is never changed.
+	static const int RELAY_MIN_DELAY = 1;
+	inline int autoInputDelayRelayed(int worstPingMs, int worstDeviationMs)
+	{
+		if (worstPingMs < 0)
+			return RELAY_MIN_DELAY;
+		const float planned = (float)std::max(0, worstPingMs - PING_FLOOR_MS) + 2.0f * (float)std::max(0, worstDeviationMs);
+		return std::max(RELAY_MIN_DELAY, std::min(MAX_INPUT_DELAY, (int)(planned / 33.3f + 0.5f)));
+	}
+
+	inline int effectiveInputDelay(int setting, int worstPingMs, bool relayed = false, int worstDeviationMs = 0)
 	{
 		const int clamped = clampDelaySetting(setting);
-		return (clamped == INPUT_DELAY_AUTO) ? autoInputDelay(worstPingMs) : clamped;
+		if (clamped != INPUT_DELAY_AUTO)
+			return clamped;
+		return relayed ? autoInputDelayRelayed(worstPingMs, worstDeviationMs) : autoInputDelay(worstPingMs);
 	}
 
 	// Text for the lobby, e.g. "AUTO (3 frames)", "2 frames" or "OFF"
@@ -709,6 +730,67 @@ namespace NetplayLobby
 			return false;
 		}
 	};
+
+
+	// Browser build: the relay server's address as a player or a web page writes it, turned into a WebSocket URL.
+	//   "relay.example.org"            -> "wss://relay.example.org"       (secure by default: a page served over https may not use ws://)
+	//   "relay.example.org:8443/play"  -> "wss://relay.example.org:8443/play"
+	//   "127.0.0.1:28842", "localhost" -> "ws://127.0.0.1:28842"          (a relay on the same computer has no certificate)
+	//   "https://..." / "http://..."   -> "wss://..." / "ws://..."
+	// Returns false for anything that is not a plain host name or address with an optional port and path (no user names, no spaces, no odd characters).
+	inline bool normalizeRelayWebSocketURL(const std::string& input, std::string& outURL)
+	{
+		size_t begin = 0, end = input.size();
+		while (begin < end && (input[begin] == ' ' || input[begin] == '	'))
+			++begin;
+		while (end > begin && (input[end - 1] == ' ' || input[end - 1] == '	'))
+			--end;
+		std::string text = input.substr(begin, end - begin);
+		if (text.empty() || text.size() > 200)
+			return false;
+
+		auto startsWithNoCase = [&text](const char* prefix) -> size_t
+		{
+			size_t i = 0;
+			for (; prefix[i] != 0; ++i)
+				if (i >= text.size() || std::tolower((unsigned char)text[i]) != prefix[i])
+					return 0;
+			return i;
+		};
+		std::string scheme;
+		if (size_t n = startsWithNoCase("wss://"))			{ scheme = "wss";  text = text.substr(n); }
+		else if (size_t n = startsWithNoCase("ws://"))		{ scheme = "ws";   text = text.substr(n); }
+		else if (size_t n = startsWithNoCase("https://"))	{ scheme = "wss";  text = text.substr(n); }
+		else if (size_t n = startsWithNoCase("http://"))	{ scheme = "ws";   text = text.substr(n); }
+		else if (text.find("://") != std::string::npos)		return false;
+
+		for (const char c : text)
+		{
+			const bool ok = std::isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_' || c == ':' || c == '/' || c == '~' || c == '%' || c == '=' || c == '&' || c == '?';
+			if (!ok)
+				return false;
+		}
+		const size_t hostEnd = text.find_first_of("/?");
+		const std::string hostPort = text.substr(0, hostEnd);
+		const std::string rest = (hostEnd == std::string::npos) ? std::string() : text.substr(hostEnd);
+		const size_t colon = hostPort.find(':');
+		const std::string host = hostPort.substr(0, colon);
+		if (host.empty() || host.front() == '.' || host.front() == '-' || host.back() == '.')
+			return false;
+		if (colon != std::string::npos)
+		{
+			const std::string port = hostPort.substr(colon + 1);
+			if (port.empty() || port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos || std::atoi(port.c_str()) < 1 || std::atoi(port.c_str()) > 65535)
+				return false;
+		}
+		if (scheme.empty())
+		{
+			const bool local = (host == "localhost") || host.compare(0, 4, "127.") == 0;
+			scheme = local ? "ws" : "wss";
+		}
+		outURL = scheme + "://" + hostPort + rest;
+		return true;
+	}
 
 
 	// Why the host sends a friend away

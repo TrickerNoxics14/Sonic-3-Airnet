@@ -53,6 +53,7 @@ public:
 	inline uint64 getHostSecret() const  { return mHostSecret; }
 	inline bool isLanRequester(const std::string& ip) const  { return mUDPSocket.hasLanRequester(ip); }
 	void startJoinViaServer();
+	void startJoinViaRelayOnly();		// No game server, no direct attempt: straight to the relay server (the browser build, which has no UDP, always joins like this)
 	void startJoinDirect(std::string_view ip, uint16 port, uint64 secret);
 	void startJoinIntroduced(uint64 sessionID, std::string_view ip, uint16 port);		// Developer test: as if the game server had introduced the host at this address (the session code is known, so a relay is possible)
 	void closeConnections();
@@ -64,11 +65,22 @@ public:
 	enum class RelayState { OFF, CONNECTING, ACTIVE };
 	static const constexpr float RELAY_FALLBACK_SECONDS = 8.0f;		// How long the direct connection gets before the relay is tried
 	std::string getRelayServerSetting() const;
+	void setRelayServerSetting(const std::string& text);			// Saved in settings.json (the browser's lobby has an entry for it)
+	std::string getRelayDisplayName() const;						// The relay's host name for the lobby screen, empty if none is set (or it is not usable)
+	static inline bool isBrowserBuild()
+	{
+	#ifdef PLATFORM_WEB
+		return true;
+	#else
+		return false;
+	#endif
+	}
 	bool isRelayConfigured() const;
 	inline bool canUseRelayAsClient() const  { return mRelaySessionKnown && isRelayConfigured(); }
 	bool beginRelayAsClient();										// Starts talking to the relay; false if there is none or its name does not resolve
 	inline bool isRelayJoined() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::CLIENT && mUDPSocket.isRelayReady(); }
 	inline int getRelayRefusal() const  { return mUDPSocket.getRelayRefusal(); }
+	inline uint32 getRelayRejoinCount() const  { return mUDPSocket.getRelayRejoinCount(); }
 	inline bool isRelayHostRegistered() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST && mUDPSocket.isRelayReady(); }
 	inline bool isRelayHostConfigured() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::HOST; }
 	inline uint64 getRelayDatagramsIn() const  { return mUDPSocket.getRelayDatagramsIn(); }

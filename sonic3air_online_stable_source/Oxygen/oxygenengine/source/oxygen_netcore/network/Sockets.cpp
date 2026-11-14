@@ -12,6 +12,11 @@
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include <chrono>
 #include <random>
+#include <deque>
+
+#ifdef __EMSCRIPTEN__
+	#include <emscripten/websocket.h>
+#endif
 
 #ifdef _WIN32
 	#define WIN32_LEAN_AND_MEAN
@@ -512,6 +517,10 @@ bool TCPSocket::receiveBlocking(ReceiveResult& outReceiveResult)
 	if (!isValid())
 		return false;
 
+#ifdef __EMSCRIPTEN__
+	return receiveInternal(outReceiveResult);		// (a browser cannot block: this returns at once, with an empty buffer if nothing is there)
+#endif
+
 #ifndef _WIN32
 	if (!mInternal->mIsBlockingSocket)
 	{
@@ -601,12 +610,123 @@ bool TCPSocket::receiveInternal(ReceiveResult& outReceiveResult)
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Browser build: the "socket" of a UDPSocket is a WebSocket to the relay server
+namespace
+{
+	struct WebTransport
+	{
+		enum class State { CLOSED, CONNECTING, OPEN };
+		EMSCRIPTEN_WEBSOCKET_T mWebSocket = 0;
+		State mState = State::CLOSED;
+		bool mJustOpened = false;
+		double mNextConnectTime = 0.0;
+		double mBackoffSeconds = 0.5;
+		std::deque<std::vector<uint8>> mInbox;
+		uint64 mMessagesIn = 0;
+		uint64 mMessagesOut = 0;
+	};
+
+	double webNowSeconds()
+	{
+		return (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+	}
+
+	void scheduleWebReconnect(WebTransport& web)
+	{
+		web.mNextConnectTime = webNowSeconds() + web.mBackoffSeconds;
+		web.mBackoffSeconds = std::min(web.mBackoffSeconds * 2.0, 8.0);
+	}
+
+	void closeWebSocket(WebTransport& web)
+	{
+		if (web.mWebSocket != 0)
+		{
+			emscripten_websocket_close(web.mWebSocket, 1000, "closing");
+			emscripten_websocket_delete(web.mWebSocket);
+			web.mWebSocket = 0;
+		}
+		web.mState = WebTransport::State::CLOSED;
+	}
+
+	EM_BOOL onWebSocketOpen(int, const EmscriptenWebSocketOpenEvent* event, void* userData)
+	{
+		WebTransport& web = *reinterpret_cast<WebTransport*>(userData);
+		if (web.mWebSocket != event->socket)
+			return EM_TRUE;		// an older socket
+		web.mState = WebTransport::State::OPEN;
+		web.mJustOpened = true;
+		web.mBackoffSeconds = 0.5;
+		RMX_LOG_INFO("Netplay (browser): connected to the relay server");
+		return EM_TRUE;
+	}
+
+	EM_BOOL onWebSocketError(int, const EmscriptenWebSocketErrorEvent* event, void* userData)
+	{
+		RMX_LOG_INFO("Netplay (browser): WebSocket error");
+		return EM_TRUE;
+	}
+
+	EM_BOOL onWebSocketClose(int, const EmscriptenWebSocketCloseEvent* event, void* userData)
+	{
+		WebTransport& web = *reinterpret_cast<WebTransport*>(userData);
+		if (web.mWebSocket != event->socket)
+			return EM_TRUE;
+		RMX_LOG_INFO("Netplay (browser): the connection to the relay server closed (code " << (int)event->code << ")");
+		web.mState = WebTransport::State::CLOSED;
+		scheduleWebReconnect(web);
+		return EM_TRUE;
+	}
+
+	EM_BOOL onWebSocketMessage(int, const EmscriptenWebSocketMessageEvent* event, void* userData)
+	{
+		WebTransport& web = *reinterpret_cast<WebTransport*>(userData);
+		if (event->isText || event->numBytes == 0 || event->numBytes > UDPSocket::MAX_DATAGRAM_SIZE || web.mWebSocket != event->socket)
+			return EM_TRUE;
+		if (web.mInbox.size() >= 4096)
+			web.mInbox.pop_front();		// a stalled game must not collect messages without end
+		web.mInbox.emplace_back(event->data, event->data + event->numBytes);
+		++web.mMessagesIn;
+		return EM_TRUE;
+	}
+
+	void openWebSocket(WebTransport& web, const std::string& url)
+	{
+		closeWebSocket(web);
+		if (url.empty() || !emscripten_websocket_is_supported())
+		{
+			scheduleWebReconnect(web);
+			return;
+		}
+		EmscriptenWebSocketCreateAttributes attributes = { url.c_str(), nullptr, EM_TRUE };
+		web.mWebSocket = emscripten_websocket_new(&attributes);
+		if (web.mWebSocket <= 0)
+		{
+			RMX_LOG_INFO("Netplay (browser): could not create a WebSocket for the relay server address");
+			web.mWebSocket = 0;
+			scheduleWebReconnect(web);
+			return;
+		}
+		web.mState = WebTransport::State::CONNECTING;
+		emscripten_websocket_set_onopen_callback(web.mWebSocket, &web, onWebSocketOpen);
+		emscripten_websocket_set_onerror_callback(web.mWebSocket, &web, onWebSocketError);
+		emscripten_websocket_set_onclose_callback(web.mWebSocket, &web, onWebSocketClose);
+		emscripten_websocket_set_onmessage_callback(web.mWebSocket, &web, onWebSocketMessage);
+		RMX_LOG_INFO("Netplay (browser): connecting to the relay server");
+	}
+}
+#endif
+
+
 struct UDPSocket::Internal
 {
 	SOCKET mSocket = INVALID_SOCKET;
 	uint16 mLocalPort = 0;
 #ifndef _WIN32
 	bool mIsBlockingSocket = true;
+#endif
+#ifdef __EMSCRIPTEN__
+	WebTransport mWeb;
 #endif
 };
 
@@ -630,6 +750,13 @@ void UDPSocket::close()
 	stopRelay();
 	if (!isValid())
 		return;
+
+#ifdef __EMSCRIPTEN__
+	closeWebSocket(mInternal->mWeb);
+	*mInternal = Internal();
+	mDelayedPackets.clear();
+	return;
+#endif
 
 #ifdef _WIN32
 	int result = shutdown(mInternal->mSocket, SD_BOTH);
@@ -662,6 +789,13 @@ bool UDPSocket::bindToPort(uint16 port, Sockets::ProtocolFamily protocolFamily)
 	{
 		close();
 	}
+
+#ifdef __EMSCRIPTEN__
+	// Browser build: no real socket, see setRelayWebSocketURL
+	mInternal->mSocket = (SOCKET)1;
+	mInternal->mLocalPort = port;
+	return true;
+#endif
 
 	addrinfo hints;
 	memset(&hints, 0, sizeof(hints));
@@ -730,6 +864,13 @@ bool UDPSocket::bindToAnyPort(Sockets::ProtocolFamily protocolFamily)
 		close();
 	}
 
+#ifdef __EMSCRIPTEN__
+	// Browser build: no real socket, see setRelayWebSocketURL
+	mInternal->mSocket = (SOCKET)1;
+	mInternal->mLocalPort = 0;
+	return true;
+#endif
+
 	// Create a socket
 	mInternal->mSocket = ::socket((protocolFamily >= Sockets::ProtocolFamily::IPv6) ? AF_INET6 : AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (mInternal->mSocket < 0)
@@ -754,6 +895,19 @@ bool UDPSocket::sendDataNow(const uint8* data, size_t length, const SocketAddres
 {
 	if (!isValid())
 		return false;
+
+#ifdef __EMSCRIPTEN__
+	// Only the relay server can be reached, and only while the WebSocket to it is open
+	{
+		WebTransport& web = mInternal->mWeb;
+		if (mRelayRole == RelayRole::NONE || web.mState != WebTransport::State::OPEN || destinationAddress.getIP() != mRelayAddress.getIP() || destinationAddress.getPort() != mRelayAddress.getPort())
+			return false;
+		if (emscripten_websocket_send_binary(web.mWebSocket, (void*)data, (uint32_t)length) != 0)
+			return false;
+		++web.mMessagesOut;
+		return true;
+	}
+#endif
 
 	const sockaddr* addr = (const sockaddr*)destinationAddress.getSockAddr();
 	const int addressLength = (addr->sa_family == AF_INET) ? (int)sizeof(sockaddr_in) : (int)sizeof(sockaddr_in6);
@@ -846,6 +1000,11 @@ bool UDPSocket::receiveNonBlocking(ReceiveResult& outReceiveResult)
 	outReceiveResult.mBuffer.clear();
 	if (!isValid())
 		return false;
+
+#ifdef __EMSCRIPTEN__
+	receiveInternal(outReceiveResult);
+	return true;
+#endif
 
 #ifdef _WIN32
 	// Check if there's pending data at all
@@ -998,16 +1157,33 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 			mRelayHostSecret = ((uint64)randomDevice() << 32) ^ (uint64)randomDevice();
 	}
 	mRelayToken = 0;
+	mRelayRejoinCount = 0;
 	mRelayReady = false;
 	mRelayRefusal = 0;
 	mRelayLastHello = -1000.0;
 	mRelayDatagramsIn = 0;
 	mRelayDatagramsOut = 0;
+#ifdef __EMSCRIPTEN__
+	if (isValid())
+	{
+		WebTransport& web = mInternal->mWeb;
+		web.mBackoffSeconds = 0.5;
+		web.mInbox.clear();
+		openWebSocket(web, mRelayWebSocketURL);
+	}
+#endif
 	updateRelay();
 }
 
 void UDPSocket::stopRelay()
 {
+#ifdef __EMSCRIPTEN__
+	if (nullptr != mInternal)
+	{
+		closeWebSocket(mInternal->mWeb);
+		mInternal->mWeb.mInbox.clear();
+	}
+#endif
 	mRelayRole = RelayRole::NONE;
 	mRelayAddress.clear();
 	mRelayLobby = 0;
@@ -1022,6 +1198,25 @@ void UDPSocket::updateRelay()
 {
 	if (mRelayRole == RelayRole::NONE || !isValid())
 		return;
+
+#ifdef __EMSCRIPTEN__
+	// Browser build: (re)connect the WebSocket when it is closed. A new connection is a new peer for the relay, so the registration / join starts again.
+	{
+		WebTransport& web = mInternal->mWeb;
+		if (web.mState == WebTransport::State::CLOSED && webNowSeconds() >= web.mNextConnectTime)
+			openWebSocket(web, mRelayWebSocketURL);
+		if (web.mJustOpened)
+		{
+			web.mJustOpened = false;
+			mRelayLastHello = -1000.0;
+		}
+		if (web.mState != WebTransport::State::OPEN)
+		{
+			mRelayReady = false;
+			return;
+		}
+	}
+#endif
 
 	// The registration / join message goes out every second until the relay answered, and then every 5 seconds (that keeps the lobby and our place in it alive)
 	const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
@@ -1084,7 +1279,14 @@ bool UDPSocket::handleRelayPacket(ReceiveResult& outReceiveResult)
 		{
 			if (mRelayRole != RelayRole::CLIENT || size != RelayProtocol::HEADER_SIZE + 4)
 				return true;
-			mRelayToken = RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE);
+			{
+				// A different token than the one we had: the relay forgot our old place (it was dropped, the WebSocket was lost, the relay restarted) and gave us a new one.
+				// The host knows us by the old place, so the game connection has to start again over the new one.
+				const uint32 newToken = RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE);
+				if (mRelayToken != 0 && newToken != mRelayToken)
+					++mRelayRejoinCount;
+				mRelayToken = newToken;
+			}
 			mRelayReady = true;
 			mRelayRefusal = 0;
 			return true;
@@ -1173,6 +1375,25 @@ bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
 
 bool UDPSocket::receiveInternal(ReceiveResult& outReceiveResult)
 {
+#ifdef __EMSCRIPTEN__
+	{
+		// Browser build: the next message of the relay server's WebSocket (an empty buffer means that nothing is there)
+		WebTransport& web = mInternal->mWeb;
+		outReceiveResult.mBuffer.clear();
+		if (web.mInbox.empty())
+			return true;
+		outReceiveResult.mBuffer = std::move(web.mInbox.front());
+		web.mInbox.pop_front();
+		outReceiveResult.mSenderAddress = mRelayAddress;
+		if (mRelayRole == RelayRole::NONE || handleRelayPacket(outReceiveResult))
+		{
+			outReceiveResult.mBuffer.clear();
+			mConsumedLanPacket = true;
+		}
+		return true;
+	}
+#endif
+
 	size_t bytesRead = 0;
 	while (true)
 	{

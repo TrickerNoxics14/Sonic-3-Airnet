@@ -1221,6 +1221,15 @@ int NetplayHost::getRelayedFriendCount() const
 	return count;
 }
 
+int NetplayHost::getWorstPingDeviation() const
+{
+	int worst = 0;
+	for (const PlayerConnection* connection : mPlayerConnections)
+		if (nullptr != connection && connection->isActive())
+			worst = std::max(worst, connection->mPing.getDeviation());
+	return worst;
+}
+
 int NetplayHost::getWorstPing() const
 {
 	int worst = -1;
@@ -1302,13 +1311,16 @@ void NetplayHost::updateAutoDelay(float deltaSeconds, bool force)
 	mAutoDelayTimer = 0.0f;
 
 	const int worstPing = getWorstPing();
-	int wanted = NetplayLobby::effectiveInputDelay(mDelaySetting, worstPing);
+	// Friends that are connected through a relay server (a browser always is) get the unsteadiness of that detour planned in (see NetplayLobby::autoInputDelayRelayed)
+	const bool relayed = (getRelayedFriendCount() > 0);
+	const int worstDeviation = relayed ? getWorstPingDeviation() : 0;
+	int wanted = NetplayLobby::effectiveInputDelay(mDelaySetting, worstPing, relayed, worstDeviation);
 	// Auto does not flip back and forth when the ping sits between two steps: it goes up at once, but only comes down by two steps or more
 	if (mDelaySetting < 0 && !force && wanted < mEffectiveDelay && wanted > mEffectiveDelay - 2)
 		wanted = mEffectiveDelay;
 	if (wanted != mEffectiveDelay)
 	{
-		RMX_LOG_INFO("Netplay host: input delay is now " << wanted << " frames (" << (mDelaySetting < 0 ? "auto, worst ping " + std::to_string(worstPing) + " ms" : std::string("fixed")) << ")");
+		RMX_LOG_INFO("Netplay host: input delay is now " << wanted << " frames (" << (mDelaySetting < 0 ? "auto, worst ping " + std::to_string(worstPing) + " ms" + (relayed ? ", +-" + std::to_string(worstDeviation) + " ms, relayed" : std::string()) : std::string("fixed")) << ")");
 		mEffectiveDelay = wanted;
 	}
 	mDelayLine.setDelay(mEffectiveDelay);

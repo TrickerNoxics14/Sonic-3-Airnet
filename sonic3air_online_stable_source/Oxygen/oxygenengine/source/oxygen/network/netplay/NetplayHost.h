@@ -139,6 +139,7 @@ public:
 	int getPlayerPing(int slot) const;					// Round trip time in milliseconds, -1 = not measured (yet); the host itself has 0
 	int getRelayedSlot() const;							// The first friend who plays through the relay server (extra lag), or -1
 	int getRelayedFriendCount() const;
+	int getWorstPingDeviation() const;
 	int getWorstPing() const;							// Of the connected friends, -1 if none is measured
 	int getHighPingSlot(int& outPingMs) const;			// The first friend above NetplayLobby::HIGH_PING_MS, or -1
 

@@ -63,6 +63,7 @@ public:
 	inline bool isRelayConnecting() const  { return mUsingRelay && (mState == State::CONNECT_TO_HOST || (mState == State::CONNECTED && !mHostVerified)); }
 
 	void joinViaServer();
+	void joinViaRelayOnly();
 	void connectDirectlyToHost(std::string_view ip, uint16 port);
 
 	void updateConnection(float deltaSeconds);
@@ -136,6 +137,7 @@ private:
 
 	// Relay server fallback
 	bool mUsingRelay = false;			// The direct connection did not work: everything goes through the relay server now
+	uint32 mSeenRelayRejoins = 0;		// The relay's count of new places for us that this client has already reacted to
 	bool mRelayJoinPending = false;		// Waiting for the relay to let us in, only then the connection to the host through it starts
 	bool mServerKnewNoHost = false;		// The game server said that it does not know this code (the relay is the last chance)
 

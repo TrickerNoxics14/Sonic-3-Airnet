@@ -48,7 +48,8 @@ namespace
 		KICK,
 		EDIT_NAME,
 		CHARACTER,
-		TEXT_OK
+		TEXT_OK,
+		EDIT_RELAY
 	};
 
 	static const int WRITE_MESSAGE_INDEX = NetplayLobby::NUM_QUICK_MESSAGES + 1;
@@ -174,6 +175,10 @@ void LobbyMenu::chooseScreen()
 
 void LobbyMenu::rebuildEntries()
 {
+	{
+		static const char* const SCREEN_NAMES[] = { "START", "JOIN", "HOSTING", "JOINED", "TEXT" };
+		RMX_LOG_INFO("Lobby: screen " << SCREEN_NAMES[(int)mScreen]);		// (what the automated browser checks wait for)
+	}
 	mMenuEntries.clear();
 	switch (mScreen)
 	{
@@ -182,6 +187,8 @@ void LobbyMenu::rebuildEntries()
 				mMenuEntries.addEntry("RETRY", RETRY);
 			mMenuEntries.addEntry("CREATE LOBBY", CREATE_LOBBY);
 			mMenuEntries.addEntry("JOIN WITH CODE", JOIN_LOBBY);
+			if (NetplayManager::isBrowserBuild())
+				mMenuEntries.addEntry("RELAY SERVER", EDIT_RELAY);
 			mMenuEntries.addEntry("BACK", BACK);
 			break;
 
@@ -213,9 +220,11 @@ void LobbyMenu::rebuildEntries()
 		case Screen::TEXT:
 			if (mTextMode == TextMode::NAME)
 				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getLocalPlayerName()), L"Type your name...");
+			else if (mTextMode == TextMode::RELAY)
+				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getRelayServerSetting()), L"e.g. wss://relay.example.org");
 			else
 				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), L"", L"Type a short message...");
-			mMenuEntries.addEntry((mTextMode == TextMode::NAME) ? "SAVE NAME" : "SEND", TEXT_OK);
+			mMenuEntries.addEntry((mTextMode == TextMode::NAME) ? "SAVE NAME" : ((mTextMode == TextMode::RELAY) ? "SAVE" : "SEND"), TEXT_OK);
 			mMenuEntries.addEntry("BACK", BACK);
 			break;
 	}
@@ -239,6 +248,21 @@ void LobbyMenu::createLobby(bool viaServer)
 	mMessage.clear();
 	mFailure = NetplayFailure::Reason::NONE;
 	mLastWasHosting = true;
+	if (NetplayManager::isBrowserBuild())
+	{
+		// A browser has no UDP: the lobby lives at the relay server, not at the game server
+		viaServer = false;
+		std::string relayURL;
+		if (!NetplayLobby::normalizeRelayWebSocketURL(manager.getRelayServerSetting(), relayURL))
+		{
+			RMX_LOG_INFO("Lobby: no relay server set, the browser version cannot open a lobby");
+			mMessage = "Online play in the browser needs a relay server.\nChoose RELAY SERVER and enter its address first.";
+			mFailure = NetplayFailure::Reason::SERVER_UNREACHABLE;
+			mLastWasHosting = false;
+			rebuildEntries();
+			return;
+		}
+	}
 	mLastHostViaServer = viaServer;
 
 	// A fresh session code, which the friends use to find this lobby through the game server
@@ -286,7 +310,32 @@ bool LobbyMenu::joinWithCode(const std::string& code)
 	std::string ip;
 	uint16 port = NetplayManager::DEFAULT_HOST_PORT;
 	uint32 secret = 0;
-	if (NetplayCodes::readSessionCode(code.c_str(), sessionID))
+	if (NetplayManager::isBrowserBuild())
+	{
+		// Only a lobby code works in the browser (a join code with an address needs UDP), and only with a relay server
+		std::string relayURL;
+		if (!NetplayCodes::readSessionCode(code.c_str(), sessionID))
+		{
+			manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, code.empty() ? "Please type the lobby code first." : "This does not look like a lobby code. Check for typing mistakes.\n(Join codes with an address only work in the Windows version.)");
+			mMessage = manager.mLastErrorMessage;
+			mFailure = manager.mLastFailure;
+			mScreen = Screen::START;
+			rebuildEntries();
+			return false;
+		}
+		if (!NetplayLobby::normalizeRelayWebSocketURL(manager.getRelayServerSetting(), relayURL))
+		{
+			RMX_LOG_INFO("Lobby: no relay server set, the browser version cannot join a lobby");
+			mMessage = "Online play in the browser needs a relay server.\nChoose RELAY SERVER and enter its address first.";
+			mFailure = NetplayFailure::Reason::SERVER_UNREACHABLE;
+			mScreen = Screen::START;
+			rebuildEntries();
+			return false;
+		}
+		manager.mSessionID = sessionID;
+		manager.startJoinViaRelayOnly();
+	}
+	else if (NetplayCodes::readSessionCode(code.c_str(), sessionID))
 	{
 		manager.mSessionID = sessionID;
 		manager.startJoinViaServer();
@@ -646,6 +695,19 @@ void LobbyMenu::update(float timeElapsed)
 
 	NetplayManager& manager = netplay();
 
+	// Browser build: how long the host has been waiting for the relay server to know its lobby (after a while the lobby screen says that it cannot be reached)
+	if (NetplayManager::isBrowserBuild() && mScreen == Screen::HOSTING && !manager.isRelayHostRegistered())
+	{
+		const float before = mRelayWaitSeconds;
+		mRelayWaitSeconds += timeElapsed;
+		if (before <= 10.0f && mRelayWaitSeconds > 10.0f)
+			RMX_LOG_INFO("Lobby: cannot reach the relay server (the lobby screen says so)");
+	}
+	else
+	{
+		mRelayWaitSeconds = 0.0f;
+	}
+
 	// The network may have changed behind our back (connection lost, joined through F9, ...)
 	if (mState == State::SHOW && mScreen != Screen::TEXT)
 	{
@@ -870,6 +932,12 @@ void LobbyMenu::update(float timeElapsed)
 					openTextScreen(TextMode::NAME);
 					break;
 
+				case EDIT_RELAY:
+					playMenuSound(0x63);
+					mMessage.clear();
+					openTextScreen(TextMode::RELAY);
+					break;
+
 				case TEXT_OK:
 				{
 					std::string text;
@@ -879,6 +947,20 @@ void LobbyMenu::update(float timeElapsed)
 					if (mTextMode == TextMode::NAME)
 					{
 						manager.setLocalPlayerName(text);
+					}
+					else if (mTextMode == TextMode::RELAY)
+					{
+						std::string url;
+						if (!text.empty() && !NetplayLobby::normalizeRelayWebSocketURL(text, url))
+						{
+							mMessage = "That is not a usable address.\nUse a name like relay.example.org or wss://relay.example.org";
+							mFailure = NetplayFailure::Reason::NONE;
+							playMenuSound(0xad);
+							break;		// (stay in the text field)
+						}
+						manager.setRelayServerSetting(text);
+						mMessage.clear();
+						mFailure = NetplayFailure::Reason::NONE;
 					}
 					else if (nullptr != manager.getNetplayHost())
 					{
@@ -1004,6 +1086,13 @@ void LobbyMenu::render()
 		{
 			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Contacting the game server...", 5, orange);
 		}
+		else if (NetplayManager::isBrowserBuild() && !manager.isRelayHostRegistered())
+		{
+			if (mRelayWaitSeconds > 10.0f)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Cannot reach the relay server. Friends cannot join yet.", 5, red);
+			else
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Connecting to the relay server...", 5, orange);
+		}
 		py += 12;
 	}
 	else if (mScreen == Screen::JOINED)
@@ -1031,7 +1120,8 @@ void LobbyMenu::render()
 	}
 	else if (mScreen == Screen::TEXT)
 	{
-		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), (mTextMode == TextMode::NAME) ? "Your name (12 letters at most):" : "Your message (40 characters at most):", 5, grey);
+		const char* title = (mTextMode == TextMode::NAME) ? "Your name (12 letters at most):" : ((mTextMode == TextMode::RELAY) ? "Address of the relay server:" : "Your message (40 characters at most):");
+		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), title, 5, grey);
 		py += 18;
 	}
 	else
@@ -1040,6 +1130,16 @@ void LobbyMenu::render()
 		py += 12;
 		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "and share the code, or join a lobby with a code.", 5, grey);
 		py += 18;
+		if (NetplayManager::isBrowserBuild())
+		{
+			// The browser connects through a relay server: show which one (or that there is none yet)
+			const std::string relayName = manager.getRelayDisplayName();
+			if (relayName.empty())
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "No relay server set: choose RELAY SERVER first.", 5, orange);
+			else
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Relay server: " + shorten(relayName, 40), 5, green);
+		}
+		py += 4;
 	}
 
 	// The four players: name, ping, status

@@ -28,6 +28,10 @@
 	#define _strnicmp strncasecmp
 #endif
 
+#ifdef PLATFORM_WEB
+	#include <emscripten.h>
+#endif
+
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen_netcore/serverclient/Packets.h"
@@ -35,6 +39,9 @@
 
 
 #define USE_IPv6 false
+
+// The same text in every platform's build of the same game version, see getActiveModsInfo
+static const char* const NETPLAY_COMPATIBILITY_ID = "airnet-1";
 
 
 NetplayManager::NetplayManager() :
@@ -96,11 +103,74 @@ std::string NetplayManager::getRelayServerSetting() const
 	// Developer test: a relay without touching the settings file
 	if (const char* testRelay = TestHooks::getEnv("S3AIR_RELAY"))
 		return testRelay;
+#ifdef PLATFORM_WEB
+	// Browser: the address in the page's link (...?relay=wss://relay.example.org) wins, then the one saved in the settings (typed in the lobby),
+	// then the default that the web page's owner put into relay_config.js (S3AIR_RELAY_DEFAULT)
+	static uint32 sCacheTicks = 0;
+	static std::string sCache;
+	static bool sCacheValid = false;
+	if (sCacheValid && SDL_GetTicks() - sCacheTicks < 500)
+		return sCache;		// (asking the page runs a bit of JavaScript: not for every frame)
+
+	auto askPage = [](const char* script) -> std::string
+	{
+		const char* result = emscripten_run_script_string(script);
+		return (nullptr != result) ? std::string(result) : std::string();
+	};
+	std::string result = askPage("(function(){try{return new URLSearchParams(location.search).get('relay')||'';}catch(e){return '';}})()");
+	if (result.empty())
+		result = Configuration::instance().mOnlineRelayServer;
+	if (result.empty())
+		result = askPage("(function(){try{return (typeof S3AIR_RELAY_DEFAULT==='string')?S3AIR_RELAY_DEFAULT:'';}catch(e){return '';}})()");
+	sCache = result;
+	sCacheTicks = SDL_GetTicks();
+	sCacheValid = true;
+	return result;
+#else
 	return Configuration::instance().mOnlineRelayServer;
+#endif
+}
+
+void NetplayManager::setRelayServerSetting(const std::string& text)
+{
+	Configuration& configuration = Configuration::instance();
+	if (configuration.mOnlineRelayServer == text)
+		return;
+	configuration.mOnlineRelayServer = text;
+	configuration.saveSettings();
+	RMX_LOG_INFO("Netplay: the relay server setting was changed" << (text.empty() ? " (cleared)" : ""));
+}
+
+std::string NetplayManager::getRelayDisplayName() const
+{
+	// Short text for the lobby: the host name only (never anything that looks like a password or a path)
+	std::string text = getRelayServerSetting();
+#ifdef PLATFORM_WEB
+	std::string url;
+	if (NetplayLobby::normalizeRelayWebSocketURL(text, url))
+	{
+		const size_t start = url.find("://") + 3;
+		const size_t end = url.find_first_of("/?", start);
+		return url.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
+	}
+	return std::string();
+#else
+	return text;
+#endif
 }
 
 bool NetplayManager::resolveRelayAddress(SocketAddress& outAddress) const
 {
+#ifdef PLATFORM_WEB
+	// Browser: the relay is reached by a WebSocket URL, there is nothing to resolve (and no address that could be used for anything else)
+	std::string url;
+	if (!NetplayLobby::normalizeRelayWebSocketURL(getRelayServerSetting(), url))
+		return false;
+	UDPSocket::setRelayWebSocketURL(url);
+	outAddress.set("websocket.relay", 1);
+	return true;
+#endif
+
 	// "host" or "host:port" (a name or an IPv4 address)
 	std::string text = getRelayServerSetting();
 	while (!text.empty() && (text.back() == ' ' || text.back() == '\t'))
@@ -180,6 +250,18 @@ void NetplayManager::startJoinViaServer()
 	mLanSearchTimer = 0.0f;
 	mRelaySessionKnown = true;
 	mNetplayClient->joinViaServer();
+}
+
+void NetplayManager::startJoinViaRelayOnly()
+{
+	if (!restartConnection(false) || nullptr == mNetplayClient)
+		return;
+	clearFailure();
+
+	mNetplayClient->setAuthSecret(NetplayAuth::secretFromSession(mSessionID));
+	NetplayAuth::prepareSecret(NetplayAuth::secretFromSession(mSessionID));		// The slow key stretching happens now, once, not in the middle of the handshake
+	mRelaySessionKnown = true;
+	mNetplayClient->joinViaRelayOnly();
 }
 
 void NetplayManager::startJoinIntroduced(uint64 sessionID, std::string_view ip, uint16 port)
@@ -456,7 +538,11 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 			if (isalnum((unsigned char)*p) || *p == '_' || *p == '-')
 				logName += *p;
 	}
+#ifdef PLATFORM_WEB
+	const std::string path = "/sonic3air/savedata/online_log" + logName + ".txt";		// (the browser's save data folder; there is no %APPDATA%)
+#else
 	const std::string path = std::string(appdata ? appdata : ".") + "/Sonic3AIR/online_log" + logName + ".txt";
+#endif
 	FILE* file = fopen(path.c_str(), mOnlineLogStarted ? "a" : "w");
 	if (nullptr == file)
 		return;
@@ -755,7 +841,12 @@ bool NetplayManager::restartConnection(bool asHost, uint16 hostPort)
 		mNetplayClient = new NetplayClient(mConnectionManager, *this);
 	}
 
-	mExternalAddressQuery.startQuery();
+#ifndef PLATFORM_WEB
+	// (the browser build never talks to the game server: it cannot send UDP, and the relay is its only way to other players)
+	// Developer test: S3AIR_NO_SERVER keeps this game away from the game server completely (checks that need no matchmaking)
+	if (nullptr == TestHooks::getEnv("S3AIR_NO_SERVER"))
+		mExternalAddressQuery.startQuery();
+#endif
 	return true;
 }
 
@@ -799,8 +890,10 @@ std::string NetplayManager::getActiveModsInfo()
 		}
 		result += ";";
 	}
-	// Two different builds of the game must not play together either
-	result += std::string("build:") + __DATE__ + " " + __TIME__;
+	// Two builds with a different netplay revision must not play together. This used to be the compile date and time of the program, which made every
+	// compile (and so the browser build and the Windows build, even of the same source) incompatible with every other. Now it is a fixed text: change
+	// NETPLAY_COMPATIBILITY_ID whenever a change makes the simulation or the netplay protocol behave differently from earlier builds.
+	result += std::string("build:") + NETPLAY_COMPATIBILITY_ID;
 	return result;
 }
 

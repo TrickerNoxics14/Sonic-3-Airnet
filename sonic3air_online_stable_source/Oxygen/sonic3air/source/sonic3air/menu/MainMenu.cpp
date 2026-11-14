@@ -95,6 +95,7 @@ void MainMenu::setBaseState(BaseState baseState)
 
 void MainMenu::onFadeIn()
 {
+	RMX_LOG_INFO("Menu: main menu");		// (what the automated browser checks wait for)
 	mState = State::APPEAR;
 
 	mMenuBackground->showPreview(false);
@@ -134,10 +135,6 @@ void MainMenu::keyboard(const rmx::KeyboardEvent& ev)
 void MainMenu::update(float timeElapsed)
 {
 	GameMenuBase::update(timeElapsed);
-
-#if defined(PLATFORM_WEB)
-	mBrowserNoticeTimer = std::max(mBrowserNoticeTimer - timeElapsed, 0.0f);
-#endif
 
 	// Test hook: open the online lobby right away (used by the automated screenshot check)
 	if (mState == State::SHOW && nullptr != TestHooks::getEnv("S3AIR_LOBBY_OPEN"))
@@ -195,13 +192,7 @@ void MainMenu::update(float timeElapsed)
 						break;
 
 					case mainmenu::LOBBY:
-					#if defined(PLATFORM_WEB)
-						// The online lobby needs UDP sockets, which browsers do not have: show a notice instead of opening it
-						mBrowserNoticeTimer = 4.0f;
-						playMenuSound(0x5b);
-					#else
 						openLobby();
-					#endif
 						break;
 
 					case mainmenu::OPTIONS:
@@ -316,16 +307,6 @@ void MainMenu::render()
 			drawer.printText(global::mOxyfontRegular, Recti(px, py, 200, 10), text, printOptions);
 		}
 	}
-
-#if defined(PLATFORM_WEB)
-	// Notice that online play does not exist in the browser version (yet)
-	if (mBrowserNoticeTimer > 0.0f)
-	{
-		const float alpha = saturate(mBrowserNoticeTimer) * mVisibility;
-		drawer.drawRect(Recti(0, 206, (int)mRect.width, 18), Color(0.0f, 0.0f, 0.0f, 0.7f * alpha));
-		drawer.printText(global::mOxyfontRegular, Recti(0, 210, (int)mRect.width, 10), "Online play is not available in the browser version yet.", 5, Color(1.0f, 0.8f, 0.4f, alpha));
-	}
-#endif
 
 	// Version info
 	{

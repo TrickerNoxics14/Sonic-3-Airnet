@@ -48,6 +48,16 @@ void NetplayClient::joinViaServer()
 	mState = State::CONNECT_TO_SERVER;
 }
 
+void NetplayClient::joinViaRelayOnly()
+{
+	// No game server and no direct attempt (the browser build cannot do either): straight to the relay server
+	mServerKnewNoHost = false;
+	if (!startRelayFallback("this copy of the game can only connect through a relay server"))
+	{
+		fail(NetplayFailure::Reason::SERVER_UNREACHABLE, mNetplayManager.isRelayConfigured() ? "The relay server address is not usable." : "No relay server is set. Online play needs one: enter its address in the lobby.");
+	}
+}
+
 void NetplayClient::connectDirectlyToHost(std::string_view ip, uint16 port)
 {
 	beginConnectTo(SocketAddress(ip, port));
@@ -81,6 +91,7 @@ bool NetplayClient::startRelayFallback(const char* why)
 	RMX_LOG_INFO("Netplay client: " << why << ", connecting through the relay server instead");
 	mUsingRelay = true;
 	mRelayJoinPending = true;
+	mSeenRelayRejoins = 0;
 	mHostConnection.clear();		// The direct attempt is over
 	mHostVerified = false;
 	mAuthSent = false;
@@ -98,6 +109,31 @@ void NetplayClient::updateConnection(float deltaSeconds)
 		mReconnectTestTriggered = true;
 		RMX_LOG_INFO("Netplay client: automated check disconnecting the transport");
 		mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+	}
+
+	// Through a relay server a game connection can also break without any message:
+	//  - the relay gave us a new place (our old one was gone, e.g. the browser's WebSocket was lost and made again): the host knows us by the old place, so the
+	//    connection starts again over the new one and the host puts us back into our player slot
+	//  - nothing at all came from the host for 10 seconds while the game runs (the host's browser tab was closed, the relay lost the host...): the connection is considered lost,
+	//    which starts the same reconnect (90 seconds, then the player is told). Without a relay this is not needed: a UDP connection to a vanished host is noticed by its own timeouts.
+	if (mUsingRelay && !mRelayJoinPending)
+	{
+		const uint32 rejoins = mNetplayManager.getRelayRejoinCount();
+		const bool newPlace = (rejoins != mSeenRelayRejoins);
+		mSeenRelayRejoins = rejoins;
+		if (newPlace && mHostConnection.getState() == NetConnection::State::CONNECTED && (mState == State::GAME_RUNNING || mState == State::CONNECTED))
+		{
+			RMX_LOG_INFO("Netplay client: the relay server gave us a new place, starting the connection to the host again");
+			if (mState == State::GAME_RUNNING)
+				mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+			else
+				mHostConnection.clear();
+		}
+		else if (mState == State::GAME_RUNNING && !mReceivingJoinState && mHostConnection.getState() == NetConnection::State::CONNECTED && mHostConnection.getMillisecondsSinceLastMessage() > 10000)
+		{
+			RMX_LOG_INFO("Netplay client: nothing from the host for 10 seconds, the connection through the relay is considered lost");
+			mHostConnection.disconnect(NetConnection::DisconnectReason::TIMEOUT);
+		}
 	}
 
 	if (mState == State::GAME_RUNNING && mHostConnection.getState() == NetConnection::State::DISCONNECTED)
@@ -204,6 +240,12 @@ void NetplayClient::updateConnection(float deltaSeconds)
 	{
 		mNetplayManager.reportFailure(NetplayFailure::Reason::LOBBY_FULL);
 		mState = State::FAILED;
+		return;
+	}
+	else if (mState == State::CONNECT_TO_HOST && mUsingRelay && mRelayJoinPending && mNetplayManager.isBrowserBuild() && mNetplayManager.getRelayRefusal() == 1 && mStateTimer > 6.0f && mReconnectRemaining == 0.0f)
+	{
+		// The relay answers, but no host registered this code there (a typing mistake, or the host has not opened its lobby, or it uses another relay server)
+		fail(NetplayFailure::Reason::WRONG_CODE, "The relay server does not know a lobby with this code. Check the code, and that the host uses the same relay server.");
 		return;
 	}
 	else if (mState == State::CONNECT_TO_HOST && mStateTimer > 20.0f && mReconnectRemaining == 0.0f)

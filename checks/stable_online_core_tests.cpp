@@ -389,6 +389,39 @@ namespace
 			}
 			report("lobby: cycling the input delay setting visits Auto and 0 to 6 once and comes back", visited == "-1,0,1,2,3,4,5,6," && setting == INPUT_DELAY_AUTO && nextDelaySetting(INPUT_DELAY_AUTO, -1) == MAX_INPUT_DELAY);
 		}
+
+		// Relay / browser: the unsteadiness of the line (a TCP WebSocket detour) is planned into Auto, a fixed delay is not touched
+		{
+			PingTracker steady;
+			PingTracker wobbly;
+			for (int k = 0; k < 60; ++k)
+			{
+				steady.addSample(80);
+				wobbly.addSample((k % 2) ? 40 : 160);
+			}
+			PingTracker unknown;
+			report("lobby: the ping tracker also measures how unsteady the line is (0 for a steady line or an unknown one)", steady.getDeviation() == 0 && wobbly.getDeviation() >= 50 && wobbly.getDeviation() <= 90 && unknown.getDeviation() == 0);
+			bool monotonic = true;
+			int last = 0;
+			for (int deviation = 0; deviation <= 200; deviation += 5)
+			{
+				const int frames = autoInputDelayRelayed(60, deviation);
+				monotonic &= (frames >= last) && (frames >= RELAY_MIN_DELAY) && (frames <= MAX_INPUT_DELAY);
+				last = frames;
+			}
+			report("lobby: through a relay Auto is at least 1 frame, grows with the ping and its deviation, and is capped at 6", monotonic && autoInputDelayRelayed(-1, 0) == 1 && autoInputDelayRelayed(20, 0) == 1 && autoInputDelayRelayed(60, 0) == 1 && autoInputDelayRelayed(100, 0) == 2 && autoInputDelayRelayed(60, 40) == 4 && autoInputDelayRelayed(20, 100) == 6 && autoInputDelayRelayed(5000, 500) == 6);
+			report("lobby: a direct connection keeps the old Auto rule (no deviation, no minimum), a fixed delay ignores relays", effectiveInputDelay(-1, 60, false, 40) == autoInputDelay(60) && effectiveInputDelay(-1, 0) == 0 && effectiveInputDelay(-1, 60, true, 40) == 4 && effectiveInputDelay(2, 400, true, 100) == 2 && effectiveInputDelay(0, 400, true, 100) == 0);
+		}
+
+		// Browser: the relay address as a player types it
+		{
+			auto url = [](const std::string& text) { std::string out; return normalizeRelayWebSocketURL(text, out) ? out : std::string("(refused)"); };
+			report("lobby: a relay address becomes a secure WebSocket URL by default", url("relay.example.org") == "wss://relay.example.org" && url("  Relay.Example.org:8443/play  ") == "wss://Relay.Example.org:8443/play" && url("WSS://x.org") == "wss://x.org" && url("https://x.org") == "wss://x.org");
+			report("lobby: a relay on the same computer gets an insecure WebSocket URL (it has no certificate)", url("127.0.0.1:28842") == "ws://127.0.0.1:28842" && url("localhost") == "ws://localhost" && url("ws://example.org:81") == "ws://example.org:81" && url("http://x.org:8080") == "ws://x.org:8080");
+			report("lobby: a relay address that is not a plain host name (spaces, user names, other schemes, bad ports, markup) is refused",
+				url("") == "(refused)" && url("   ") == "(refused)" && url("a b") == "(refused)" && url("ftp://x.org") == "(refused)" && url("user@host.org") == "(refused)" && url("host:0") == "(refused)" && url("host:99999") == "(refused)"
+				&& url("host:") == "(refused)" && url(".host") == "(refused)" && url("wss://") == "(refused)" && url("<script>") == "(refused)" && url("host:80:90") == "(refused)" && url("x.org/\"q\"") == "(refused)" && url(std::string(300, 'a')) == "(refused)");
+		}
 		{
 			// The delay line: every player's input comes out exactly N frames later, all players alike
 			bool exact = true;

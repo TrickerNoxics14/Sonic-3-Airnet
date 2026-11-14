@@ -60,5 +60,4 @@ private:
 	GameMenuEntries mMenuEntries;
 
 	State mState = State::INACTIVE;
-	float mBrowserNoticeTimer = 0.0f;	// Web build only: how long the "online play is not available" notice stays visible
 };

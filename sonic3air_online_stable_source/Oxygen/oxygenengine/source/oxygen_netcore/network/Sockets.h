@@ -207,13 +207,28 @@ public:
 	inline RelayRole getRelayRole() const  { return mRelayRole; }
 	inline bool isRelayReady() const  { return mRelayReady; }		// Host: the relay knows the lobby. Friend: the relay let us in.
 	inline int getRelayRefusal() const  { return mRelayRefusal; }	// 0 = none, 1 = no host registered at the relay, 2 = lobby full
+	inline uint32 getRelayRejoinCount() const  { return mRelayRejoinCount; }		// Friend: how often the relay gave us a new place (a different token than before: the old place was gone, e.g. after a lost WebSocket), so that the connection through it has to be started again
 	inline uint64 getRelayDatagramsIn() const  { return mRelayDatagramsIn; }
 	inline uint64 getRelayDatagramsOut() const  { return mRelayDatagramsOut; }
 
 	// Developer test: pretend to have a bad connection (environment variables S3AIR_NET_LAG in ms and S3AIR_NET_LOSS in percent)
 	void flushDelayedPackets();
 
+	// Browser build: a browser has no UDP sockets. The relay datagrams (see RelayProtocol.h) travel in binary WebSocket messages to the relay server instead
+	// (the same relay program speaks UDP to native games and WebSocket to browsers, so both can be in one lobby), and nothing else can be sent or received.
+	// The URL is "ws://host:port" or "wss://host:port"; it has to be set before startRelay(). Outside the browser build it is ignored.
+	static void setRelayWebSocketURL(const std::string& url)  { mRelayWebSocketURL = url; }
+	static inline bool isWebSocketTransport()
+	{
+	#ifdef __EMSCRIPTEN__
+		return true;
+	#else
+		return false;
+	#endif
+	}
+
 private:
+	static inline std::string mRelayWebSocketURL;
 	bool receiveInternal(ReceiveResult& outReceiveResult);
 	bool handleLanPacket(ReceiveResult& outReceiveResult);
 	bool sendDataNow(const uint8* data, size_t length, const SocketAddress& destinationAddress);
@@ -229,6 +244,7 @@ private:
 	uint64 mRelayLobby = 0;
 	uint64 mRelayKey = 0;
 	uint64 mRelayHostSecret = 0;		// Host only: random per hosting, proves to the relay that this game is the one that registered the lobby (see RelayProtocol.h)
+	uint32 mRelayRejoinCount = 0;
 	uint32 mRelayToken = 0;			// Host: the host token from the relay. Friend: our token
 	bool mRelayReady = false;
 	int mRelayRefusal = 0;
