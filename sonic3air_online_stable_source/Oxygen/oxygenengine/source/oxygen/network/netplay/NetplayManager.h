@@ -51,7 +51,7 @@ public:
 	NetplayFailure::Reason mLastFailure = NetplayFailure::Reason::NONE;		// The reason behind "mLastErrorMessage", so the menu can offer the right way to continue
 
 	// Hosting: with "directSecret" the host is joined by an IP join code that contains a fresh random secret (see "getHostSecret"), otherwise by the session code
-	bool setupAsHost(bool registerSessionAtServer, uint16 port = DEFAULT_HOST_PORT, bool directSecret = false);
+	bool setupAsHost(bool registerSessionAtServer, uint16 port = DEFAULT_HOST_PORT, bool directSecret = false, bool allowRelay = true);
 	bool setupAsHostWithSecret(uint16 port, uint64 secret);		// Developer test: a host with a given secret
 	inline uint64 getHostSecret() const  { return mHostSecret; }
 	inline bool isLanRequester(const std::string& ip) const  { return mUDPSocket.hasLanRequester(ip); }
@@ -79,6 +79,7 @@ public:
 	#endif
 	}
 	bool isRelayConfigured() const;
+	inline bool getExplicitRelayIsSet() const  { return !getExplicitRelaySetting().empty(); }		// A relay was set on its own (not just the lobby server acting as the relay)
 
 	// Lobby server (the relay server program with its public lobby directory, see NetplayServerDefaults.h and checks/relay_ws): the list of public lobbies, 6 digit lobby codes
 	// and the relay for the games that are joined through it. Empty = none is set; the menu then says so and offers private, LAN and matchmaking server play.

@@ -71,7 +71,7 @@ NetplayManager::~NetplayManager()
 	closeConnections();
 }
 
-bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool directSecret)
+bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool directSecret, bool allowRelay)
 {
 	if (!restartConnection(true, port) || nullptr == mNetplayHost)
 		return false;
@@ -91,7 +91,7 @@ bool NetplayManager::setupAsHost(bool registerSessionAtServer, uint16 port, bool
 		mUDPSocket.setLanHostSession(NetplayAuth::lanTagFromSession(mSessionID));
 
 	// A relay server is only used if the player set one up: friends who cannot reach this host directly can then still join through it
-	if (!directSecret && isRelayConfigured())
+	if (!directSecret && allowRelay && isRelayConfigured())
 		startRelay(UDPSocket::RelayRole::HOST);
 
 	if (registerSessionAtServer)

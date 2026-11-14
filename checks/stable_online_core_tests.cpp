@@ -11,6 +11,8 @@
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
+#include "oxygen_netcore/network/DirectoryProtocol.h"
+#include "oxygen_netcore/network/LobbyDirectory.h"
 #include "RelayCore.h"
 #include "rmxbase.h"
 #include "sonic3air/client/SelfUpdateCore.h"
@@ -1594,6 +1596,310 @@ namespace
 	}
 }
 
+namespace
+{
+	std::string toHex(const std::vector<uint8_t>& bytes)
+	{
+		static const char* const DIGITS = "0123456789abcdef";
+		std::string text;
+		for (const uint8_t b : bytes)
+		{
+			text += DIGITS[b >> 4];
+			text += DIGITS[b & 15];
+		}
+		return text;
+	}
+
+	std::vector<uint8_t> fromHex(const std::string& text)
+	{
+		std::vector<uint8_t> bytes;
+		for (size_t i = 0; i + 1 < text.size(); i += 2)
+			bytes.push_back((uint8_t)strtoul(text.substr(i, 2).c_str(), nullptr, 16));
+		return bytes;
+	}
+
+	// A stand-in for the lobby directory of the relay server (checks/relay_ws/directory.mjs), to test the game's side of it without a network server
+	struct FakeDirectoryServer
+	{
+		UDPSocket mSocket;
+		uint16 mPort = 0;
+		uint64 mCookie = 0xa1a2a3a4a5a6a7a8ull;
+		bool mAnswer = true;
+		bool mRejectNextCookie = false;
+		int mHellos = 0, mLists = 0, mResolves = 0, mPublishes = 0, mUnpublishes = 0;
+		std::vector<DirectoryProtocol::ListEntry> mEntries;
+
+		bool start()
+		{
+			// (every stand-in server gets its own port: a second socket could otherwise be bound to the same one)
+			static uint16 nextPort = 41000;
+			for (int tries = 0; tries < 100; ++tries)
+			{
+				const uint16 candidate = nextPort++;
+				if (mSocket.bindToPort(candidate))
+				{
+					mPort = candidate;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void reply(const SocketAddress& to, DirectoryProtocol::Type type, const std::vector<uint8_t>& payload)
+		{
+			std::vector<uint8_t> out;
+			DirectoryProtocol::putHeader(out, type);
+			out.insert(out.end(), payload.begin(), payload.end());
+			mSocket.sendData(out, to);
+		}
+
+		void poll()
+		{
+			for (int i = 0; i < 16; ++i)
+			{
+				UDPSocket::ReceiveResult received;
+				if (!mSocket.receiveNonBlocking(received) || received.mBuffer.empty())
+					break;
+				uint8_t type = 0;
+				if (!mAnswer || !RelayProtocol::parseHeader(received.mBuffer.data(), received.mBuffer.size(), type))
+					continue;
+				DirectoryProtocol::Reader r(received.mBuffer.data(), received.mBuffer.size());
+				r.u8();
+				std::vector<uint8_t> p;
+				if (type == DirectoryProtocol::HELLO)
+				{
+					++mHellos;
+					p = { 1, 1, 6, 16, 0, (uint8_t)mEntries.size() };
+					RelayProtocol::put64(p, mCookie);
+					reply(received.mSenderAddress, DirectoryProtocol::HELLO_REPLY, p);
+				}
+				else if (type == DirectoryProtocol::LIST)
+				{
+					++mLists;
+					const uint64_t cookie = r.u64();
+					r.u8();
+					const int offset = r.u8();
+					if (cookie != mCookie || mRejectNextCookie)
+					{
+						mRejectNextCookie = false;
+						mCookie += 1;		// (the next hello gets the new one)
+						reply(received.mSenderAddress, DirectoryProtocol::LIST_REPLY, { 1, DirectoryProtocol::LIST_BAD_COOKIE });
+						continue;
+					}
+					const int count = std::max(0, std::min(2, (int)mEntries.size() - offset));		// two entries per page: the client has to ask for more
+					p = { 1, 0 };
+					RelayProtocol::put16(p, (uint16_t)mEntries.size());
+					p.push_back((uint8_t)offset);
+					p.push_back((uint8_t)count);
+					for (int k = 0; k < count; ++k)
+					{
+						const DirectoryProtocol::ListEntry& e = mEntries[(size_t)(offset + k)];
+						DirectoryProtocol::putString(p, e.mCode);  DirectoryProtocol::putString(p, e.mName);  DirectoryProtocol::putString(p, e.mHostName);  DirectoryProtocol::putString(p, e.mCompat);
+						p.push_back(e.mPlayers);  p.push_back(e.mMaxPlayers);  p.push_back(e.mFlags);  RelayProtocol::put16(p, e.mAgeSeconds);
+					}
+					reply(received.mSenderAddress, DirectoryProtocol::LIST_REPLY, p);
+				}
+				else if (type == DirectoryProtocol::RESOLVE)
+				{
+					++mResolves;
+					r.u64();
+					const std::string code = r.str();
+					if (code == "123456")
+					{
+						p = { 1, 0 };
+						RelayProtocol::put64(p, 123456789012ull);
+						p.push_back(2);  p.push_back(4);  p.push_back(0);
+					}
+					else
+					{
+						p = { 1, 1 };
+					}
+					reply(received.mSenderAddress, DirectoryProtocol::RESOLVE_REPLY, p);
+				}
+				else if (type == DirectoryProtocol::PUBLISH)
+				{
+					++mPublishes;
+					p = { 1, 0 };
+					DirectoryProtocol::putString(p, "654321");
+					reply(received.mSenderAddress, DirectoryProtocol::PUBLISH_REPLY, p);
+				}
+				else if (type == DirectoryProtocol::UNPUBLISH)
+				{
+					++mUnpublishes;
+				}
+			}
+		}
+	};
+
+	// Runs the client and the fake server for up to "seconds" (real time), until the condition holds
+	template<typename F> bool runUntil(LobbyDirectory& client, FakeDirectoryServer& server, double seconds, F condition)
+	{
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds((int)(seconds * 1000));
+		while (std::chrono::steady_clock::now() < deadline)
+		{
+			server.poll();
+			client.update(0.01f);
+			if (condition())
+				return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+		return condition();
+	}
+
+	void runDirectoryTests()
+	{
+		using namespace DirectoryProtocol;
+
+		// The messages are byte for byte the ones that the relay server's tests (checks/relay_ws/test/directory.test.mjs, "golden vectors") use
+		{
+			std::vector<uint8_t> out;
+			buildHello(out);
+			report("directory: HELLO bytes", toHex(out) == "5333524c021001000000000000000000000000000000");
+			PublishInfo info;
+			info.mRelayLobby = 0x1122334455667788ull;  info.mRelayKey = 0x0102030405060708ull;  info.mHostSecret = 0xdeadbeefcafef00dull;  info.mSessionID = 123456789012ull;
+			info.mPublic = true;  info.mInGame = false;  info.mPlayers = 2;  info.mMaxPlayers = 4;  info.mCompat = "abcd1234";  info.mName = "Test Lobby";  info.mHostName = "Host";
+			buildPublish(out, info);
+			report("directory: PUBLISH bytes", toHex(out) == "5333524c02120111223344556677880102030405060708deadbeefcafef00d0000001cbe991a140102040861626364313233340a54657374204c6f62627904486f7374");
+			buildUnpublish(out, info.mRelayLobby, info.mRelayKey, info.mHostSecret);
+			report("directory: UNPUBLISH bytes", toHex(out) == "5333524c02140111223344556677880102030405060708deadbeefcafef00d");
+			buildList(out, 0xa1a2a3a4a5a6a7a8ull, true, 0, "abcd1234");
+			report("directory: LIST bytes", toHex(out) == "5333524c021501a1a2a3a4a5a6a7a80100086162636431323334");
+			buildResolve(out, 0xa1a2a3a4a5a6a7a8ull, "123456");
+			report("directory: RESOLVE bytes", toHex(out) == "5333524c021701a1a2a3a4a5a6a7a806313233343536");
+		}
+		{
+			HelloReply hello;
+			const std::vector<uint8_t> helloBytes = fromHex("5333524c0211010106100007a1a2a3a4a5a6a7a8");
+			report("directory: HELLO_REPLY is read", parseHelloReply(helloBytes.data(), helloBytes.size(), hello) && hello.mVersion == 1 && hello.mCodeDigits == 6 && hello.mPageSize == 16 && hello.mLobbies == 7 && hello.mCookie == 0xa1a2a3a4a5a6a7a8ull);
+			ListReply list;
+			const std::vector<uint8_t> listBytes = fromHex("5333524c0216010000030002063132333435360846756e20526f6f6d05416c696365086162636431323334020402001e06363534333231054f7468657203426f62047a7a7a7a040405012c");
+			const bool listOk = parseListReply(listBytes.data(), listBytes.size(), list) && list.mStatus == LIST_OK && list.mTotal == 3 && list.mEntries.size() == 2;
+			report("directory: LIST_REPLY is read (names, counts, flags, age)", listOk && list.mEntries[0].mCode == "123456" && list.mEntries[0].mName == "Fun Room" && list.mEntries[0].mHostName == "Alice" && list.mEntries[0].mPlayers == 2 && list.mEntries[0].mMaxPlayers == 4
+				&& list.mEntries[0].isCompatible() && !list.mEntries[0].isInGame() && list.mEntries[0].mAgeSeconds == 30 && list.mEntries[1].isInGame() && list.mEntries[1].isFull() && !list.mEntries[1].isCompatible() && list.mEntries[1].mAgeSeconds == 300);
+			ResolveReply resolved, throttled;
+			const std::vector<uint8_t> okBytes = fromHex("5333524c021801000000001cbe991a14020400");
+			const std::vector<uint8_t> throttledBytes = fromHex("5333524c0218010300f0");
+			report("directory: RESOLVE_REPLY is read (session ID, retry time)", parseResolveReply(okBytes.data(), okBytes.size(), resolved) && resolved.mStatus == RESOLVE_OK && resolved.mSessionID == 123456789012ull && resolved.mPlayers == 2 && resolved.mMaxPlayers == 4
+				&& parseResolveReply(throttledBytes.data(), throttledBytes.size(), throttled) && throttled.mStatus == RESOLVE_THROTTLED && throttled.mRetryAfterSeconds == 240);
+			PublishReply published;
+			const std::vector<uint8_t> publishedBytes = fromHex("5333524c0213010006313233343536");
+			report("directory: PUBLISH_REPLY is read (the code)", parsePublishReply(publishedBytes.data(), publishedBytes.size(), published) && published.mStatus == PUBLISH_OK && published.mCode == "123456");
+			// Truncated and damaged replies are refused, never read past the end
+			bool allRefused = true;
+			for (size_t cut = 0; cut < listBytes.size(); ++cut)
+			{
+				ListReply partial;
+				if (cut < listBytes.size() && parseListReply(listBytes.data(), cut, partial) && partial.mEntries.size() == 2 && cut < listBytes.size())
+					allRefused = false;
+			}
+			report("directory: a truncated list reply is never accepted as a full one", allRefused);
+		}
+
+		// Server addresses as players type them
+		{
+			std::string host;
+			int port = 0;
+			report("server address: name, name with port, web address", NetplayLobby::parseServerAddress("lobbies.example.org", host, port, 28842) && host == "lobbies.example.org" && port == 28842
+				&& NetplayLobby::parseServerAddress("  127.0.0.1:9000 ", host, port, 28842) && host == "127.0.0.1" && port == 9000
+				&& NetplayLobby::parseServerAddress("wss://relay.example.org/path?x=1", host, port, 28842) && host == "relay.example.org" && port == 28842);
+			report("server address: nonsense is refused", !NetplayLobby::isPlausibleServerAddress("") && !NetplayLobby::isPlausibleServerAddress("a b") && !NetplayLobby::isPlausibleServerAddress("host:0") && !NetplayLobby::isPlausibleServerAddress("host:99999")
+				&& !NetplayLobby::isPlausibleServerAddress("host:ab") && !NetplayLobby::isPlausibleServerAddress("-bad.example.org") && !NetplayLobby::isPlausibleServerAddress("exa$mple.org") && !NetplayLobby::isPlausibleServerAddress(std::string(200, 'a')));
+		}
+
+		// The client against a stand-in server
+		FakeDirectoryServer server;
+		if (!server.start())
+		{
+			report("directory client: a port for the stand-in server", false);
+			return;
+		}
+		server.mEntries.resize(3);
+		for (int i = 0; i < 3; ++i)
+		{
+			server.mEntries[(size_t)i].mCode = std::to_string(111111 * (i + 1));
+			server.mEntries[(size_t)i].mName = "Lobby " + std::to_string(i + 1);
+			server.mEntries[(size_t)i].mHostName = "Host";
+			server.mEntries[(size_t)i].mCompat = "abcd1234";
+			server.mEntries[(size_t)i].mPlayers = (uint8)(i + 1);
+			server.mEntries[(size_t)i].mMaxPlayers = 4;
+			server.mEntries[(size_t)i].mFlags = ENTRY_COMPATIBLE;
+		}
+		{
+			LobbyDirectory client;
+			client.start(SocketAddress("127.0.0.1", server.mPort));
+			report("directory client: starts out connecting, then the server is ready with a measured ping", client.getStatus() == LobbyDirectory::Status::CONNECTING
+				&& runUntil(client, server, 3.0, [&]() { return client.getStatus() == LobbyDirectory::Status::READY; }) && client.getPingMs() >= 0 && client.getServerCodeDigits() == 6);
+
+			client.requestList(true, "abcd1234");
+			const bool listed = runUntil(client, server, 3.0, [&]() { return client.getListState() == LobbyDirectory::RequestState::DONE; });
+			report("directory client: the list comes in pages and is put together", listed && client.getList().size() == 3 && client.getListTotal() == 3 && client.getList()[2].mName == "Lobby 3" && server.mLists >= 2);
+
+			client.requestResolve("123456");
+			const bool resolved = runUntil(client, server, 3.0, [&]() { return client.getResolveState() == LobbyDirectory::RequestState::DONE; });
+			report("directory client: a lobby code is resolved to the session ID", resolved && client.getResolveReply().mStatus == RESOLVE_OK && client.getResolveReply().mSessionID == 123456789012ull);
+			client.requestResolve("999999");
+			const bool unknown = runUntil(client, server, 3.0, [&]() { return client.getResolveState() == LobbyDirectory::RequestState::DONE; });
+			report("directory client: an unknown code ends in NOT_FOUND, not in a hang", unknown && client.getResolveReply().mStatus == RESOLVE_NOT_FOUND);
+
+			// The server forgot the cookie: the client gets a new one and asks again by itself
+			server.mRejectNextCookie = true;
+			const int hellosBefore = server.mHellos;
+			client.requestList(false, "abcd1234");
+			const bool recovered = runUntil(client, server, 4.0, [&]() { return client.getListState() == LobbyDirectory::RequestState::DONE; });
+			report("directory client: an expired cookie is renewed and the request goes on", recovered && server.mHellos > hellosBefore && client.getList().size() == 3);
+
+			// Publishing
+			PublishInfo info;
+			info.mRelayLobby = 1;  info.mRelayKey = 2;  info.mHostSecret = 3;  info.mSessionID = 123456789012ull;  info.mCompat = "abcd1234";  info.mName = "Mine";  info.mHostName = "Me";
+			client.startPublishing(info);
+			const bool published = runUntil(client, server, 3.0, [&]() { return client.isPublished(); });
+			report("directory client: publishing gives the lobby code", published && client.getPublishedCode() == "654321" && server.mPublishes >= 1);
+			info.mPlayers = 3;
+			const int publishesBefore = server.mPublishes;
+			client.updatePublishInfo(info);
+			runUntil(client, server, 3.0, [&]() { return server.mPublishes > publishesBefore; });
+			report("directory client: a change (players) is sent at once, not only every 5 seconds", server.mPublishes > publishesBefore);
+			client.stopPublishing(true);
+			runUntil(client, server, 1.0, [&]() { return server.mUnpublishes > 0; });
+			report("directory client: closing the lobby tells the server", server.mUnpublishes > 0 && !client.isPublishing());
+			client.stop();
+			report("directory client: stopped means off, and the lists are gone", client.getStatus() == LobbyDirectory::Status::OFF && client.getList().empty());
+		}
+		{
+			// Nothing answers: it ends as "unreachable" after a few seconds, and requests fail at once instead of hanging. (Time is passed in big steps.)
+			FakeDirectoryServer silent;
+			silent.start();
+			silent.mAnswer = false;
+			LobbyDirectory client;
+			client.start(SocketAddress("127.0.0.1", silent.mPort));
+			client.requestList(false, "x");
+			bool unreachable = false;
+			for (int i = 0; i < 40 && !unreachable; ++i)
+			{
+				silent.poll();
+				client.update(0.5f);
+				unreachable = (client.getStatus() == LobbyDirectory::Status::UNREACHABLE);
+			}
+			client.update(0.1f);
+			report("directory client: a server that never answers becomes UNREACHABLE and the pending list fails", unreachable && client.getListState() == LobbyDirectory::RequestState::FAILED);
+			client.requestResolve("123456");
+			client.update(0.1f);
+			report("directory client: a lookup on an unreachable server fails at once", client.getResolveState() == LobbyDirectory::RequestState::FAILED);
+			// ... and works as soon as the server is back
+			silent.mAnswer = true;
+			bool back = false;
+			for (int i = 0; i < 60 && !back; ++i)
+			{
+				silent.poll();
+				client.update(0.5f);
+				std::this_thread::sleep_for(std::chrono::milliseconds(3));
+				back = (client.getStatus() == LobbyDirectory::Status::READY);
+			}
+			report("directory client: a server that comes back is found again by itself", back);
+		}
+	}
+}
+
 int main()
 {
 	for (const std::string& line : NetplayCodes::runSelfTest())
@@ -1686,6 +1992,7 @@ int main()
 	runCharacterTests();
 	Sockets::startupSockets();
 	runRelayTests();
+	runDirectoryTests();
 	Sockets::shutdownSockets();
 	runSelfUpdateTests();
 	report("test hooks are off by default (no marker file next to this test program)", !TestHooks::isEnabled() && TestHooks::getEnv("PATH") == nullptr);

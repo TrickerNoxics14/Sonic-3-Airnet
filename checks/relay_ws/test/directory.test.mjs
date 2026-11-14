@@ -538,3 +538,13 @@ test('health page counts directory listings (counters only)', async (t) => {
 	assert.equal(health.listed, 1);
 	assert.equal(text.includes('Test Lobby'), false, 'no lobby names or codes on the health page');
 });
+
+test('golden vectors: the messages are byte for byte the ones the game\'s C++ tests (stable_online_core_tests.cpp) use', () => {
+	const hex = (b) => b.toString('hex');
+	assert.equal(hex(hello()), '5333524c021001000000000000000000000000000000');
+	assert.equal(hex(publishMsg({ lobby: 0x1122334455667788n, key: 0x0102030405060708n, secret: 0xdeadbeefcafef00dn, session: 123456789012n, flags: 1, players: 2, max: 4, compat: 'abcd1234', name: 'Test Lobby', host: 'Host' })),
+		'5333524c02120111223344556677880102030405060708deadbeefcafef00d0000001cbe991a140102040861626364313233340a54657374204c6f62627904486f7374');
+	assert.equal(hex(unpublishMsg(0x1122334455667788n, 0x0102030405060708n, 0xdeadbeefcafef00dn)), '5333524c02140111223344556677880102030405060708deadbeefcafef00d');
+	assert.equal(hex(listMsg(0xa1a2a3a4a5a6a7a8n, { flags: 1, offset: 0, compat: 'abcd1234' })), '5333524c021501a1a2a3a4a5a6a7a80100086162636431323334');
+	assert.equal(hex(resolveMsg(0xa1a2a3a4a5a6a7a8n, '123456')), '5333524c021701a1a2a3a4a5a6a7a806313233343536');
+});

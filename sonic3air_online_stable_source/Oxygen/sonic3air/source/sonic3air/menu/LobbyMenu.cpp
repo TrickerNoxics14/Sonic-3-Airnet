@@ -17,6 +17,7 @@
 #include "sonic3air/audio/AudioOut.h"
 
 #include "oxygen/application/EngineMain.h"
+#include "oxygen/application/Configuration.h"
 #include "oxygen/application/input/InputManager.h"
 #include "oxygen/network/netplay/NetplayManager.h"
 #include "oxygen/network/netplay/NetplayHost.h"
@@ -31,6 +32,9 @@
 namespace
 {
 	const float HOSTING_MESSAGE_SECONDS = 4.0f;
+	const float LIST_REFRESH_SECONDS = 8.0f;
+	const int MAX_CODE_DIGITS = 13;
+	const int LIST_ROWS_VISIBLE = 6;
 
 	enum Action
 	{
@@ -49,10 +53,32 @@ namespace
 		EDIT_NAME,
 		CHARACTER,
 		TEXT_OK,
-		EDIT_RELAY
+		EDIT_RELAY,
+		PUBLIC_LOBBIES,
+		QUICK_JOIN,
+		LAN_GAME,
+		SETTINGS,
+		EDIT_LOBBY_SERVER,
+		EDIT_LOBBY_NAME,
+		TOGGLE_PUBLIC,
+		MAX_PLAYERS,
+		OPEN_LOBBY,
+		LAN_HOST,
+		LAN_JOIN,
+		REFRESH,
+		FILTER,
+		CANCEL,
+		PASTE_CODE,
+		LIST_ROW = 1000,		// + index of the row in the list
+		PAD_KEY = 2000			// + 0 to 9 for the digits, 10 = delete, 11 = join
 	};
 
 	static const int WRITE_MESSAGE_INDEX = NetplayLobby::NUM_QUICK_MESSAGES + 1;
+	static const int PAD_DELETE = 10;
+	static const int PAD_JOIN = 11;
+	static const int PAD_KEY_COUNT = 12;
+	// The number pad: 1 2 3 / 4 5 6 / 7 8 9 / delete 0 join
+	static const int PAD_LAYOUT[PAD_KEY_COUNT] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, PAD_DELETE, 0, PAD_JOIN };
 
 	NetplayManager& netplay()
 	{
@@ -67,6 +93,36 @@ namespace
 	std::string shorten(const std::string& text, size_t maxLength)
 	{
 		return (text.size() > maxLength) ? (text.substr(0, maxLength - 3) + "...") : text;
+	}
+
+	// "123 456" for a lobby code, "1234-5678-90123" for the long code, while typing: whatever is there so far
+	std::string groupDigits(const std::string& digits)
+	{
+		if (digits.size() <= (size_t)NetplayCodes::LOBBY_CODE_DIGITS)
+			return (digits.size() > 3) ? (digits.substr(0, 3) + " " + digits.substr(3)) : digits;
+		std::string text = digits.substr(0, 4);
+		if (digits.size() > 4)
+			text += "-" + digits.substr(4, 4);
+		if (digits.size() > 8)
+			text += "-" + digits.substr(8);
+		return text;
+	}
+
+	std::string cleanLobbyName(const std::string& raw)
+	{
+		// Plain letters, digits and a few marks, at most 20 characters (the lobby server cleans it once more)
+		std::string name;
+		for (const char c : raw)
+		{
+			const bool ok = std::isalnum((unsigned char)c) || c == ' ' || c == '-' || c == '_' || c == '.' || c == '!' || c == '?' || c == '\'' || c == '#' || c == '+' || c == '&' || c == '(' || c == ')';
+			if (ok && !(c == ' ' && (name.empty() || name.back() == ' ')))
+				name += c;
+		}
+		while (!name.empty() && name.back() == ' ')
+			name.pop_back();
+		if (name.size() > 20)
+			name.resize(20);
+		return name.empty() ? std::string("My lobby") : name;
 	}
 }
 
@@ -111,9 +167,28 @@ void LobbyMenu::onFadeIn()
 	mMenuBackground->showPreview(false, false);
 	mMenuBackground->startTransition(MenuBackground::Target::BLUE);
 
+	NetplayManager& manager = netplay();
+
 	// Back in the lobby: a host who comes back from the main menu is not picking a game any more
-	if (nullptr != netplay().getNetplayHost())
-		netplay().getNetplayHost()->setLobbyHostStarting(false);
+	if (nullptr != manager.getNetplayHost())
+		manager.getNetplayHost()->setLobbyHostStarting(false);
+
+	// The menu keeps a connection to the lobby server while it is open (it is closed again when the menu is left, unless a lobby is published)
+	manager.setLobbyDirectoryInUse(true);
+	mHookScreenTimer = 0.0f;
+
+	// What was chosen last time
+	{
+		const Configuration& configuration = Configuration::instance();
+		mLobbyName = cleanLobbyName(configuration.mOnlineLobbyName);
+		mLobbyPublic = configuration.mOnlineLobbyPublic;
+		mLobbyMaxPlayers = clamp(configuration.mOnlineLobbyMaxPlayers, 2, 4);
+		mListCompatibleOnly = configuration.mOnlineListCompatibleOnly;
+		if (const char* testName = TestHooks::getEnv("S3AIR_LOBBY_NAME"))
+			mLobbyName = cleanLobbyName(testName);
+		if (const char* testMax = TestHooks::getEnv("S3AIR_LOBBY_MAX"))
+			mLobbyMaxPlayers = clamp(atoi(testMax), 2, 4);
+	}
 
 	chooseScreen();
 	AudioOut::instance().setMenuMusic(0x2f);
@@ -127,11 +202,19 @@ void LobbyMenu::onFadeIn()
 		{
 			testHookDone = true;
 			if (strcmp(mode, "host") == 0)
-				createLobby();
+				createLobby(true, false, mLobbyMaxPlayers, mLobbyName);
 			else if (strcmp(mode, "hostlan") == 0)
-				createLobby(false);
+				createLobby(false, false, mLobbyMaxPlayers, mLobbyName);
+			else if (strcmp(mode, "hostpublic") == 0)
+				createLobby(false, true, mLobbyMaxPlayers, mLobbyName);
+			else if (strcmp(mode, "hostprivate") == 0)
+				createLobby(false, false, mLobbyMaxPlayers, mLobbyName);
 			else if (strcmp(mode, "join") == 0 && nullptr != TestHooks::getEnv("S3AIR_LOBBY_CODE"))
 				joinWithCode(TestHooks::getEnv("S3AIR_LOBBY_CODE"));
+			else if (strcmp(mode, "list") == 0)
+				showScreen(Screen::LIST);
+			else if (strcmp(mode, "quick") == 0)
+				beginQuickJoin();
 		}
 	}
 }
@@ -151,14 +234,54 @@ void LobbyMenu::deinitialize()
 
 void LobbyMenu::keyboard(const rmx::KeyboardEvent& ev)
 {
-	if ((mScreen == Screen::JOIN || mScreen == Screen::TEXT) && mMenuEntries.hasSelected())
+	if (mScreen == Screen::TEXT && mMenuEntries.hasSelected())
+	{
 		mMenuEntries.selected().keyboard(ev);
+	}
+	else if (mScreen == Screen::JOIN && ev.state)
+	{
+		// Paste (Ctrl+V): only the digits of what is on the clipboard are used, so "Code: 123 456" works
+		if (ev.key == 'v' && (SDL_GetModState() & KMOD_CTRL) != 0 && PlatformFunctions::hasClipboardSupport())
+		{
+			std::wstring text;
+			if (PlatformFunctions::pasteFromClipboard(text))
+			{
+				std::string narrow;
+				for (const wchar_t c : text)
+					narrow += (c >= '0' && c <= '9') ? (char)c : ' ';
+				mCodeDigits = NetplayCodes::keepDigitsOnly(mCodeDigits + narrow, (size_t)MAX_CODE_DIGITS);
+				mMessage.clear();
+			}
+			mTextInputThisFrame = true;		// (the V key is not a button press)
+		}
+		else if (ev.key == SDLK_KP_ENTER)
+		{
+			if (mState == State::SHOW)
+				joinWithCode(mCodeDigits);
+		}
+	}
 }
 
 void LobbyMenu::textinput(const rmx::TextInputEvent& ev)
 {
-	if ((mScreen == Screen::JOIN || mScreen == Screen::TEXT) && mMenuEntries.hasSelected())
+	if (mScreen == Screen::TEXT && mMenuEntries.hasSelected())
+	{
 		mMenuEntries.selected().textinput(ev);
+	}
+	else if (mScreen == Screen::JOIN)
+	{
+		// Typed text: only digits are taken (the number keys and the number pad both end up here); letters do nothing, and must not press the pad's buttons either
+		mTextInputThisFrame = true;
+		std::string narrow;
+		for (const wchar_t c : std::wstring(ev.text))
+			narrow += (c >= '0' && c <= '9') ? (char)c : ' ';
+		const std::string digits = NetplayCodes::keepDigitsOnly(narrow, (size_t)MAX_CODE_DIGITS - mCodeDigits.size());
+		if (!digits.empty())
+		{
+			mCodeDigits += digits;
+			mMessage.clear();
+		}
+	}
 }
 
 void LobbyMenu::chooseScreen()
@@ -168,34 +291,86 @@ void LobbyMenu::chooseScreen()
 		mScreen = Screen::HOSTING;
 	else if (nullptr != netplay().getNetplayClient())
 		mScreen = Screen::JOINED;
-	else
-		mScreen = Screen::START;
+	else if (mScreen == Screen::HOSTING || mScreen == Screen::JOINED || mScreen == Screen::TEXT || (mScreen == Screen::SEARCHING && mFlow == Flow::NONE))
+		mScreen = Screen::HOME;
+	rebuildEntries();
+}
+
+void LobbyMenu::showScreen(Screen screen)
+{
+	mScreen = screen;
+	mMessage.clear();
+	if (screen == Screen::LIST)
+	{
+		mShownList = netplay().getLobbyDirectory().getList();
+		mLastListAge = netplay().getLobbyDirectory().getListAgeSeconds();
+		mListSelectedCode.clear();
+		mListScroll = 0;
+		refreshList();
+	}
 	rebuildEntries();
 }
 
 void LobbyMenu::rebuildEntries()
 {
 	{
-		static const char* const SCREEN_NAMES[] = { "START", "JOIN", "HOSTING", "JOINED", "TEXT" };
-		RMX_LOG_INFO("Lobby: screen " << SCREEN_NAMES[(int)mScreen]);		// (what the automated browser checks wait for)
+		static const char* const SCREEN_NAMES[] = { "START", "LIST", "JOIN", "CREATE", "LAN", "SETTINGS", "SEARCHING", "HOSTING", "JOINED", "TEXT" };
+		RMX_LOG_INFO("Lobby: screen " << SCREEN_NAMES[(int)mScreen]);		// (what the automated checks wait for; START is the first screen)
 	}
+
 	mMenuEntries.clear();
 	switch (mScreen)
 	{
-		case Screen::START:
+		case Screen::HOME:
 			if (mFailure != NetplayFailure::Reason::NONE && NetplayFailure::isRetryable(mFailure) && (mLastWasHosting || !mLastJoinCode.empty()))
 				mMenuEntries.addEntry("RETRY", RETRY);
+			mMenuEntries.addEntry("PUBLIC LOBBIES", PUBLIC_LOBBIES);
+			mMenuEntries.addEntry("QUICK JOIN", QUICK_JOIN);
 			mMenuEntries.addEntry("CREATE LOBBY", CREATE_LOBBY);
 			mMenuEntries.addEntry("JOIN WITH CODE", JOIN_LOBBY);
-			if (NetplayManager::isBrowserBuild())
-				mMenuEntries.addEntry("RELAY SERVER", EDIT_RELAY);
+			mMenuEntries.addEntry("LAN GAME", LAN_GAME);
+			mMenuEntries.addEntry("SETTINGS", SETTINGS);
+			mMenuEntries.addEntry("BACK", BACK);
+			break;
+
+		case Screen::LIST:
+			for (size_t i = 0; i < mShownList.size(); ++i)
+				mMenuEntries.addEntry(mShownList[i].mName, LIST_ROW + (uint32)i);
+			mMenuEntries.addEntry("REFRESH", REFRESH);
+			mMenuEntries.addEntry("SHOW", FILTER);
 			mMenuEntries.addEntry("BACK", BACK);
 			break;
 
 		case Screen::JOIN:
-			mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), L"", L"Type or paste the code...");
-			mMenuEntries.addEntry("JOIN", JOIN_NOW);
+			for (int key = 0; key < PAD_KEY_COUNT; ++key)
+				mMenuEntries.addEntry("", PAD_KEY + (uint32)PAD_LAYOUT[key]);
 			mMenuEntries.addEntry("BACK", BACK);
+			break;
+
+		case Screen::CREATE:
+			mMenuEntries.addEntry("NAME", EDIT_LOBBY_NAME);
+			mMenuEntries.addEntry("LOBBY", TOGGLE_PUBLIC);
+			mMenuEntries.addEntry("PLAYERS", MAX_PLAYERS);
+			mMenuEntries.addEntry("OPEN LOBBY", OPEN_LOBBY);
+			mMenuEntries.addEntry("BACK", BACK);
+			break;
+
+		case Screen::LAN:
+			mMenuEntries.addEntry("HOST A LAN GAME", LAN_HOST);
+			mMenuEntries.addEntry("JOIN A LAN GAME", LAN_JOIN);
+			mMenuEntries.addEntry("BACK", BACK);
+			break;
+
+		case Screen::SETTINGS:
+			mMenuEntries.addEntry("NAME", EDIT_NAME);
+			if (!NetplayManager::isBrowserBuild())
+				mMenuEntries.addEntry("LOBBY SERVER", EDIT_LOBBY_SERVER);
+			mMenuEntries.addEntry("RELAY SERVER", EDIT_RELAY);
+			mMenuEntries.addEntry("BACK", BACK);
+			break;
+
+		case Screen::SEARCHING:
+			mMenuEntries.addEntry("CANCEL", CANCEL);
 			break;
 
 		case Screen::HOSTING:
@@ -221,27 +396,82 @@ void LobbyMenu::rebuildEntries()
 			if (mTextMode == TextMode::NAME)
 				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getLocalPlayerName()), L"Type your name...");
 			else if (mTextMode == TextMode::RELAY)
-				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getRelayServerSetting()), L"e.g. wss://relay.example.org");
+				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getRelayServerSetting()), L"e.g. relay.example.org");
+			else if (mTextMode == TextMode::LOBBY_SERVER)
+				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(netplay().getLobbyServerSetting()), L"e.g. lobbies.example.org");
+			else if (mTextMode == TextMode::LOBBY_NAME)
+				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), widen(mLobbyName), L"Name of your lobby...");
 			else
 				mMenuEntries.addEntry<InputFieldMenuEntry>().initEntry(Vec2i(200, 15), L"", L"Type a short message...");
-			mMenuEntries.addEntry((mTextMode == TextMode::NAME) ? "SAVE NAME" : ((mTextMode == TextMode::RELAY) ? "SAVE" : "SEND"), TEXT_OK);
+			mMenuEntries.addEntry((mTextMode == TextMode::CHAT) ? "SEND" : "SAVE", TEXT_OK);
 			mMenuEntries.addEntry("BACK", BACK);
 			break;
 	}
+
 	mMenuEntries.mSelectedEntryIndex = 0;
+	if (mScreen == Screen::LIST)
+	{
+		// The row that was selected stays selected when the list changes; else the first lobby that can be joined; else REFRESH
+		const int rows = (int)mShownList.size();
+		int select = rows;
+		if (mListFooterSelected >= 0)
+		{
+			select = rows + std::min(mListFooterSelected, 2);
+		}
+		else if (!mListSelectedCode.empty())
+		{
+			for (int i = 0; i < rows; ++i)
+			{
+				if (mShownList[(size_t)i].mCode == mListSelectedCode)
+				{
+					select = i;
+					break;
+				}
+			}
+		}
+		else
+		{
+			for (int i = 0; i < rows; ++i)
+			{
+				const DirectoryProtocol::ListEntry& entry = mShownList[(size_t)i];
+				if (entry.isCompatible() && !entry.isFull() && !entry.isInGame())
+				{
+					select = i;
+					break;
+				}
+			}
+		}
+		mMenuEntries.mSelectedEntryIndex = std::min(select, (int)mMenuEntries.size() - 1);
+	}
 	for (size_t i = 0; i < mMenuEntries.size(); ++i)
 		mMenuEntries[i].mAnimation.mHighlight = 0.0f;
 	updateEntryTexts();
 }
 
-void LobbyMenu::openTextScreen(TextMode mode)
+void LobbyMenu::openTextScreen(TextMode mode, Screen returnTo)
 {
 	mTextMode = mode;
+	mTextReturnScreen = returnTo;
 	mScreen = Screen::TEXT;
+	mMessage.clear();
 	rebuildEntries();
 }
 
-void LobbyMenu::createLobby(bool viaServer)
+std::string LobbyMenu::getNoServerMessage() const
+{
+	NetplayManager& manager = netplay();
+	switch (manager.getLobbyServerState())
+	{
+		case NetplayManager::LobbyServerState::NOT_SET:
+			return "No lobby server is set yet, so there are no public lobbies.\nYou can still play: LAN GAME, or JOIN WITH CODE with a long code.\nA lobby server can be added in SETTINGS.";
+		case NetplayManager::LobbyServerState::BAD_ADDRESS:
+			return "The lobby server address does not look right.\nCheck it in SETTINGS. You can still use LAN GAME.";
+		default:
+			return "The lobby server does not answer. It may be down, or you may be\noffline. Try again later, or use LAN GAME with a friend.";
+	}
+}
+
+void LobbyMenu::createLobby(bool viaServer, bool isPublic, int maxPlayers, const std::string& lobbyName, bool lanOnly)
 {
 	NetplayManager& manager = netplay();
 	manager.clearFailure();
@@ -256,20 +486,22 @@ void LobbyMenu::createLobby(bool viaServer)
 		if (!NetplayLobby::normalizeRelayWebSocketURL(manager.getRelayServerSetting(), relayURL))
 		{
 			RMX_LOG_INFO("Lobby: no relay server set, the browser version cannot open a lobby");
-			mMessage = "Online play in the browser needs a relay server.\nChoose RELAY SERVER and enter its address first.";
+			mMessage = "Online play in the browser needs a lobby server (or relay server).\nChoose SETTINGS, then RELAY SERVER, and enter its address first.";
 			mFailure = NetplayFailure::Reason::SERVER_UNREACHABLE;
 			mLastWasHosting = false;
-			rebuildEntries();
+			showScreen(Screen::HOME);
 			return;
 		}
 	}
 	mLastHostViaServer = viaServer;
+	mLastHostPublic = isPublic;
+	mLastHostLanOnly = lanOnly;
+	mLastHostMaxPlayers = maxPlayers;
+	mLastHostName = lobbyName;
 
-	// A fresh session code, which the friends use to find this lobby through the game server
+	// A fresh session code: 12 random digits, which the friends use to find this lobby (a lobby server turns it into a 6 digit lobby code)
 	std::random_device randomDevice;
-	uint64 sessionID = (((uint64)randomDevice() << 32) | randomDevice()) & 0xffffffffffull;
-	if (sessionID < 0x10000000ull)
-		sessionID += 0x10000000ull;
+	uint64 sessionID = NetplayCodes::sessionIDFromRandom(((uint64)randomDevice() << 32) | randomDevice());
 	if (const char* fixedCode = TestHooks::getEnv("S3AIR_LOBBY_CODE"))
 	{
 		uint64 fixedID = 0;
@@ -278,8 +510,15 @@ void LobbyMenu::createLobby(bool viaServer)
 	}
 	manager.mSessionID = sessionID;
 
-	if (manager.setupAsHost(viaServer, NetplayManager::DEFAULT_HOST_PORT))
+	// A lobby of a lobby server does not need the matchmaking server (which is not ours and may be down)
+	// (A LAN game uses neither: the friends find it on the network with the long code)
+	const bool onLobbyServer = !lanOnly && manager.isLobbyServerConfigured();
+	if (manager.setupAsHost(viaServer && !onLobbyServer && !lanOnly, NetplayManager::DEFAULT_HOST_PORT, false, !lanOnly))
 	{
+		if (nullptr != manager.getNetplayHost())
+			manager.getNetplayHost()->setMaxPlayers(maxPlayers);
+		if (onLobbyServer)
+			manager.startPublishingLobby(isPublic, cleanLobbyName(lobbyName));
 		mScreen = Screen::HOSTING;
 		rebuildEntries();
 	}
@@ -287,15 +526,35 @@ void LobbyMenu::createLobby(bool viaServer)
 	{
 		mMessage = manager.mLastErrorMessage.empty() ? std::string("Could not open the lobby.\nThe network port (UDP 28840) may be in use by another copy of the game.") : manager.mLastErrorMessage;
 		mFailure = NetplayFailure::Reason::BLOCKED_OR_TIMEOUT;
-		rebuildEntries();
+		showScreen(Screen::HOME);
 	}
 }
 
-void LobbyMenu::joinLobby()
+bool LobbyMenu::joinWithSessionCode(uint64 sessionID)
 {
-	mScreen = Screen::JOIN;
+	NetplayManager& manager = netplay();
+	manager.mSessionID = sessionID;
+	if (NetplayManager::isBrowserBuild())
+	{
+		// Only a code works in the browser, and only with a relay server
+		std::string relayURL;
+		if (!NetplayLobby::normalizeRelayWebSocketURL(manager.getRelayServerSetting(), relayURL))
+		{
+			RMX_LOG_INFO("Lobby: no relay server set, the browser version cannot join a lobby");
+			mMessage = "Online play in the browser needs a lobby server (or relay server).\nChoose SETTINGS, then RELAY SERVER, and enter its address first.";
+			mFailure = NetplayFailure::Reason::SERVER_UNREACHABLE;
+			showScreen(Screen::HOME);
+			return false;
+		}
+		manager.startJoinViaRelayOnly();
+	}
+	else
+	{
+		manager.startJoinViaServer();
+	}
+	mScreen = Screen::JOINED;
 	rebuildEntries();
-	mMessage.clear();
+	return true;
 }
 
 bool LobbyMenu::joinWithCode(const std::string& code)
@@ -306,62 +565,245 @@ bool LobbyMenu::joinWithCode(const std::string& code)
 	mFailure = NetplayFailure::Reason::NONE;
 	mLastWasHosting = false;
 	mLastJoinCode = code;
-	uint64 sessionID = 0;
-	std::string ip;
-	uint16 port = NetplayManager::DEFAULT_HOST_PORT;
-	uint32 secret = 0;
-	if (NetplayManager::isBrowserBuild())
+
+	// What kind of code is it? Typing mistakes are noticed here, before anything is sent
+	std::string digits;
+	switch (NetplayCodes::classifyCode(code.c_str(), digits))
 	{
-		// Only a lobby code works in the browser (a join code with an address needs UDP), and only with a relay server
-		std::string relayURL;
-		if (!NetplayCodes::readSessionCode(code.c_str(), sessionID))
-		{
-			manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, code.empty() ? "Please type the lobby code first." : "This does not look like a lobby code. Check for typing mistakes.\n(Join codes with an address only work in the Windows version.)");
+		case NetplayCodes::CodeKind::EMPTY:
+			mMessage = "Please type the code first.";
+			mScreen = Screen::JOIN;
+			rebuildEntries();
+			return false;
+
+		case NetplayCodes::CodeKind::HAS_LETTERS:
+			mMessage = "Codes are numbers only.\nCheck what your friend sent you.";
+			mScreen = Screen::JOIN;
+			rebuildEntries();
+			return false;
+
+		case NetplayCodes::CodeKind::WRONG_LENGTH:
+			mMessage = "A lobby code has 6 digits, a long code has 13.\nCheck for a missing or extra digit.";
+			mScreen = Screen::JOIN;
+			rebuildEntries();
+			return false;
+
+		case NetplayCodes::CodeKind::BAD_CHECK:
+			manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, "This long code has a typing mistake. Check the digits.");
 			mMessage = manager.mLastErrorMessage;
-			mFailure = manager.mLastFailure;
-			mScreen = Screen::START;
+			mFailure = NetplayFailure::Reason::NONE;
+			mScreen = Screen::JOIN;
 			rebuildEntries();
 			return false;
-		}
-		if (!NetplayLobby::normalizeRelayWebSocketURL(manager.getRelayServerSetting(), relayURL))
+
+		case NetplayCodes::CodeKind::LOBBY:
+			if (mJoinLanOnly)
+			{
+				mMessage = "That is a lobby code from a lobby server.\nUse JOIN WITH CODE in the ONLINE menu.";
+				mScreen = Screen::JOIN;
+				rebuildEntries();
+				return false;
+			}
+			if (!manager.isLobbyServerConfigured())
+			{
+				mMessage = getNoServerMessage();
+				mScreen = Screen::JOIN;
+				rebuildEntries();
+				return false;
+			}
+			mFlowJoinedFromList = false;
+			beginResolve(digits, std::string());
+			return true;
+
+		case NetplayCodes::CodeKind::SESSION:
 		{
-			RMX_LOG_INFO("Lobby: no relay server set, the browser version cannot join a lobby");
-			mMessage = "Online play in the browser needs a relay server.\nChoose RELAY SERVER and enter its address first.";
-			mFailure = NetplayFailure::Reason::SERVER_UNREACHABLE;
-			mScreen = Screen::START;
-			rebuildEntries();
-			return false;
+			uint64 sessionID = 0;
+			if (!NetplayCodes::readSessionCode(digits.c_str(), sessionID))
+				return false;
+			return joinWithSessionCode(sessionID);
 		}
-		manager.mSessionID = sessionID;
-		manager.startJoinViaRelayOnly();
 	}
-	else if (NetplayCodes::readSessionCode(code.c_str(), sessionID))
-	{
-		manager.mSessionID = sessionID;
-		manager.startJoinViaServer();
-	}
-	else if (NetplayCodes::readJoinCode(code.c_str(), ip, port, secret))
-	{
-		manager.startJoinDirect(ip, port, secret);
-	}
-	else if (!code.empty())
-	{
-		// Typing mistakes are noticed by the code's check character, before anything is sent
-		manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, "This does not look like a lobby code. Check for typing mistakes.");
-		mMessage = manager.mLastErrorMessage;
-		mFailure = manager.mLastFailure;
-		mScreen = Screen::START;
-		rebuildEntries();
-		return false;
-	}
-	else
-	{
-		mMessage = "Please type the lobby code first.";
-		return false;
-	}
-	mScreen = Screen::JOINED;
+	return false;
+}
+
+void LobbyMenu::beginResolve(const std::string& lobbyCode, const std::string& lobbyName)
+{
+	NetplayManager& manager = netplay();
+	manager.setLobbyDirectoryInUse(true);
+	manager.getLobbyDirectory().requestResolve(lobbyCode);
+	mFlow = Flow::RESOLVE;
+	mFlowSeconds = 0.0f;
+	mFlowCode = lobbyCode;
+	mFlowLobbyName = lobbyName;
+	mLastJoinCode = lobbyCode;
+	mSearchReturnScreen = mFlowJoinedFromList ? Screen::LIST : Screen::JOIN;
+	mMessage.clear();
+	mScreen = Screen::SEARCHING;
 	rebuildEntries();
-	return true;
+}
+
+void LobbyMenu::beginQuickJoin()
+{
+	NetplayManager& manager = netplay();
+	mMessage.clear();
+	if (!manager.isLobbyServerConfigured() || !manager.isLobbyServerAddressUsable())
+	{
+		mMessage = getNoServerMessage();
+		mScreen = Screen::HOME;
+		rebuildEntries();
+		return;
+	}
+	manager.setLobbyDirectoryInUse(true);
+	manager.getLobbyDirectory().requestList(true, manager.getCompatibilityKey());
+	mFlow = Flow::QUICK;
+	mFlowSeconds = 0.0f;
+	mFlowLobbyName.clear();
+	mSearchReturnScreen = Screen::HOME;
+	mScreen = Screen::SEARCHING;
+	rebuildEntries();
+}
+
+void LobbyMenu::finishFlow(const std::string& message, NetplayFailure::Reason failure)
+{
+	mFlow = Flow::NONE;
+	mMessage = message;
+	mFailure = failure;
+	RMX_LOG_INFO("Lobby: the lookup ended: " << (message.empty() ? std::string("(no message)") : message.substr(0, message.find('\n'))));
+	mScreen = mSearchReturnScreen;
+	if (mScreen == Screen::LIST)
+	{
+		mShownList = netplay().getLobbyDirectory().getList();
+		mListSelectedCode.clear();
+	}
+	rebuildEntries();
+}
+
+void LobbyMenu::updateFlow()
+{
+	NetplayManager& manager = netplay();
+	LobbyDirectory& directory = manager.getLobbyDirectory();
+	const NetplayManager::LobbyServerState serverState = manager.getLobbyServerState();
+	if (serverState == NetplayManager::LobbyServerState::NOT_SET || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
+	{
+		finishFlow(getNoServerMessage(), NetplayFailure::Reason::NONE);
+		return;
+	}
+
+	if (mFlow == Flow::QUICK)
+	{
+		if (directory.getListState() == LobbyDirectory::RequestState::DONE)
+		{
+			// The server sorts the best lobby first (same version, still waiting for players, room for us, the fullest one first)
+			const DirectoryProtocol::ListEntry* best = nullptr;
+			for (const DirectoryProtocol::ListEntry& entry : directory.getList())
+			{
+				if (entry.isCompatible() && !entry.isInGame() && !entry.isFull())
+				{
+					best = &entry;
+					break;
+				}
+			}
+			if (nullptr == best)
+			{
+				finishFlow("There is no open lobby for your version right now.\nCreate one, or try again in a moment.", NetplayFailure::Reason::NONE);
+				return;
+			}
+			mFlowLobbyName = best->mName;
+			mFlowCode = best->mCode;
+			mFlowJoinedFromList = false;
+			RMX_LOG_INFO("Lobby: quick join picks the lobby \"" << best->mName << "\" (" << (int)best->mPlayers << "/" << (int)best->mMaxPlayers << ")");
+			beginResolve(best->mCode, best->mName);
+			mSearchReturnScreen = Screen::HOME;
+			return;
+		}
+		if (directory.getListState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > 15.0f)
+		{
+			finishFlow(getNoServerMessage(), NetplayFailure::Reason::SERVER_UNREACHABLE);
+			return;
+		}
+	}
+	else if (mFlow == Flow::RESOLVE)
+	{
+		if (directory.getResolveState() == LobbyDirectory::RequestState::DONE)
+		{
+			const DirectoryProtocol::ResolveReply reply = directory.getResolveReply();
+			directory.clearResolve();
+			switch (reply.mStatus)
+			{
+				case DirectoryProtocol::RESOLVE_OK:
+				{
+					if (reply.isInGame())
+					{
+						finishFlow("This lobby has already started its game.\nTry another one, or ask the host to wait for you.", NetplayFailure::Reason::NONE);
+						return;
+					}
+					if (reply.isFull())
+					{
+						finishFlow("This lobby is full.", NetplayFailure::Reason::LOBBY_FULL);
+						mFailure = NetplayFailure::Reason::NONE;
+						return;
+					}
+					RMX_LOG_INFO("Lobby: the lobby server found the lobby, joining it");
+					mFlow = Flow::NONE;
+					manager.clearFailure();
+					manager.startJoinViaLobbyServer(reply.mSessionID);
+					mScreen = Screen::JOINED;
+					rebuildEntries();
+					return;
+				}
+				case DirectoryProtocol::RESOLVE_THROTTLED:
+					finishFlow("Too many wrong codes. Please wait " + std::to_string(std::max(1, (int)((reply.mRetryAfterSeconds + 59) / 60))) + " minute(s) and try again.", NetplayFailure::Reason::NONE);
+					return;
+				default:
+					finishFlow("There is no lobby with this code (any more).\nCheck the digits, or ask your friend for the current code.", NetplayFailure::Reason::NONE);
+					return;
+			}
+		}
+		if (directory.getResolveState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > 15.0f)
+		{
+			finishFlow(getNoServerMessage(), NetplayFailure::Reason::SERVER_UNREACHABLE);
+			return;
+		}
+	}
+}
+
+void LobbyMenu::joinListEntry(int index)
+{
+	if (index < 0 || index >= (int)mShownList.size())
+		return;
+	const DirectoryProtocol::ListEntry& entry = mShownList[(size_t)index];
+	mMessage.clear();
+	if (!entry.isCompatible())
+	{
+		playMenuSound(0xad);
+		mMessage = "This lobby plays another version of the game, or has other mods.\nYou cannot join it.";
+		return;
+	}
+	if (entry.isInGame())
+	{
+		playMenuSound(0xad);
+		mMessage = "This lobby has already started its game.";
+		return;
+	}
+	if (entry.isFull())
+	{
+		playMenuSound(0xad);
+		mMessage = "This lobby is full.";
+		return;
+	}
+	playMenuSound(0x63);
+	mFlowJoinedFromList = true;
+	beginResolve(entry.mCode, entry.mName);
+}
+
+void LobbyMenu::refreshList()
+{
+	NetplayManager& manager = netplay();
+	manager.setLobbyDirectoryInUse(true);
+	if (!manager.isLobbyServerConfigured())
+		return;
+	manager.getLobbyDirectory().requestList(mListCompatibleOnly, manager.getCompatibilityKey());
+	mListRefreshTimer = LIST_REFRESH_SECONDS;
 }
 
 void LobbyMenu::showFailureAndReturnToStart()
@@ -370,7 +812,7 @@ void LobbyMenu::showFailureAndReturnToStart()
 	mMessage = manager.mLastErrorMessage.empty() ? "Could not connect to the lobby." : manager.mLastErrorMessage;
 	mFailure = (manager.mLastFailure != NetplayFailure::Reason::NONE) ? manager.mLastFailure : NetplayFailure::Reason::BLOCKED_OR_TIMEOUT;
 	manager.closeConnections();
-	mScreen = Screen::START;
+	mScreen = Screen::HOME;
 	rebuildEntries();
 	RMX_LOG_INFO("Lobby: showing the problem to the player (" << NetplayFailure::getName(mFailure) << ")" << (NetplayFailure::isRetryable(mFailure) ? " with a Retry button" : " without a Retry button"));
 }
@@ -384,12 +826,12 @@ void LobbyMenu::retry()
 	netplay().closeConnections();
 	if (wasHosting)
 	{
-		createLobby(viaServer);
+		createLobby(viaServer, mLastHostPublic, mLastHostMaxPlayers, mLastHostName, mLastHostLanOnly);
 	}
-	else if (joinWithCode(code))
+	else
 	{
-		mScreen = Screen::JOINED;
-		rebuildEntries();
+		mJoinLanOnly = false;
+		joinWithCode(code);
 	}
 }
 
@@ -399,7 +841,7 @@ void LobbyMenu::leaveLobby()
 	netplay().clearFailure();
 	mFailure = NetplayFailure::Reason::NONE;
 	mMessage.clear();
-	mScreen = Screen::START;
+	mScreen = Screen::HOME;
 	rebuildEntries();
 }
 
@@ -461,8 +903,45 @@ void LobbyMenu::pressStart()
 void LobbyMenu::goBack()
 {
 	playMenuSound(0xad);
+	// Leaving the menu: the lobby server connection is only kept while a lobby is published (the manager decides)
+	mFlow = Flow::NONE;
+	netplay().setLobbyDirectoryInUse(false);
 	mMenuBackground->openMainMenu();
 	mState = State::FADE_TO_MENU;
+}
+
+// Back (Escape, the B button): one step towards the main menu, never a dead end
+void LobbyMenu::goBackOneLevel()
+{
+	switch (mScreen)
+	{
+		case Screen::HOME:
+		case Screen::HOSTING:
+		case Screen::JOINED:
+			goBack();		// (in a lobby, Back goes to the main menu and keeps the lobby: "Leave Lobby" leaves it)
+			break;
+
+		case Screen::JOIN:
+			showScreen(mJoinLanOnly ? Screen::LAN : Screen::HOME);
+			break;
+
+		case Screen::SEARCHING:
+			netplay().getLobbyDirectory().clearResolve();
+			mFlow = Flow::NONE;
+			showScreen(mSearchReturnScreen);
+			break;
+
+		case Screen::TEXT:
+			if (mTextReturnScreen == Screen::HOSTING || mTextReturnScreen == Screen::JOINED)
+				chooseScreen();
+			else
+				showScreen(mTextReturnScreen);
+			break;
+
+		default:
+			showScreen(Screen::HOME);
+			break;
+	}
 }
 
 std::string LobbyMenu::getPlayerNameOfSlot(int slot) const
@@ -608,8 +1087,112 @@ void LobbyMenu::updateEntryTexts()
 	}
 	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_NAME))
 		entry->mText = "NAME: " + manager.getLocalPlayerName();
+	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_LOBBY_NAME))
+		entry->mText = "NAME: " + shorten(mLobbyName, 20);
+	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(TOGGLE_PUBLIC))
+		entry->mText = std::string("LOBBY: ") + (mLobbyPublic ? "PUBLIC" : "PRIVATE (CODE ONLY)");
+	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(MAX_PLAYERS))
+		entry->mText = "PLAYERS: " + std::to_string(mLobbyMaxPlayers);
+	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(FILTER))
+		entry->mText = std::string("SHOW: ") + (mListCompatibleOnly ? "MY VERSION ONLY" : "ALL LOBBIES");
+	if (mScreen == Screen::SETTINGS)
+	{
+		const std::string lobbyServer = manager.getLobbyServerSetting();
+		const std::string relay = manager.getRelayDisplayName();
+		if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_LOBBY_SERVER))
+			entry->mText = "LOBBY SERVER: " + (lobbyServer.empty() ? std::string("NOT SET") : shorten(lobbyServer, 28));
+		if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_RELAY))
+			entry->mText = "RELAY SERVER: " + (manager.getRelayServerSetting().empty() ? std::string("NOT SET") : (manager.getExplicitRelayIsSet() ? shorten(relay, 26) : std::string("SAME AS LOBBY SERVER")));
+		if (GameMenuEntry* entry = mMenuEntries.getEntryByData(EDIT_NAME))
+			entry->mText = "NAME: " + manager.getLocalPlayerName();
+	}
 	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(READY))
 		entry->mText = (nullptr != client && client->isLobbyReady()) ? "NOT READY" : "READY";
+}
+
+void LobbyMenu::updateJoinScreenInput(const InputManager::ControllerScheme& keys)
+{
+	// The number pad: 3 columns and 4 rows (1 2 3 / 4 5 6 / 7 8 9 / delete 0 join), then BACK. The D-pad moves, A presses.
+	// Typed digits (number keys and the number pad of a keyboard) arrive through "textinput"; a letter key is also a controller button (A, S, D...), which must not press the pad.
+	const bool typed = (mTextInputThisFrame || mTextInputLastFrame);
+	int& selected = mMenuEntries.mSelectedEntryIndex;
+	selected = clamp(selected, 0, PAD_KEY_COUNT);
+
+	const int dx = (keys.Right.justPressedOrRepeat() ? 1 : 0) - (keys.Left.justPressedOrRepeat() ? 1 : 0);
+	const int dy = (keys.Down.justPressedOrRepeat() ? 1 : 0) - (keys.Up.justPressedOrRepeat() ? 1 : 0);
+	if (dx != 0 || dy != 0)
+	{
+		playMenuSound(0x5b);
+		if (selected == PAD_KEY_COUNT)
+		{
+			selected = (dy < 0) ? (PAD_KEY_COUNT - 2) : 1;		// from BACK up to the 0 key, or down to the 2 key
+		}
+		else
+		{
+			int row = selected / 3;
+			int column = selected % 3;
+			column = (column + dx + 3) % 3;
+			row += dy;
+			selected = (row > 3) ? PAD_KEY_COUNT : ((row < 0) ? PAD_KEY_COUNT : (row * 3 + column));
+		}
+	}
+
+	auto pressKey = [&](int key)
+	{
+		if (key == PAD_JOIN)
+		{
+			playMenuSound(0x63);
+			joinWithCode(mCodeDigits);
+		}
+		else if (key == PAD_DELETE)
+		{
+			playMenuSound(0xad);
+			if (!mCodeDigits.empty())
+				mCodeDigits.pop_back();
+			mMessage.clear();
+		}
+		else if ((int)mCodeDigits.size() < MAX_CODE_DIGITS)
+		{
+			playMenuSound(0x5b);
+			mCodeDigits += (char)('0' + key);
+			mMessage.clear();
+		}
+	};
+
+	const bool start = keys.Start.justPressed();
+	const bool accept = (keys.A.justPressed() || keys.X.justPressed()) && !typed;
+	const bool back = (keys.Back.justPressed() || keys.B.justPressed()) && !typed;
+	if (start)
+	{
+		pressKey(PAD_JOIN);
+	}
+	else if (accept)
+	{
+		if (selected == PAD_KEY_COUNT)
+		{
+			playMenuSound(0xad);
+			goBackOneLevel();
+		}
+		else
+		{
+			pressKey(PAD_LAYOUT[selected]);
+		}
+	}
+	else if (back)
+	{
+		// Backspace and B take the last digit away, and leave the screen when there is none (Escape always leaves)
+		if (FTX::keyState(SDLK_ESCAPE) || mCodeDigits.empty())
+		{
+			playMenuSound(0xad);
+			goBackOneLevel();
+		}
+		else
+		{
+			playMenuSound(0xad);
+			mCodeDigits.pop_back();
+			mMessage.clear();
+		}
+	}
 }
 
 void LobbyMenu::updateTestHooks(float timeElapsed)
@@ -726,7 +1309,7 @@ void LobbyMenu::update(float timeElapsed)
 			}
 			chooseScreen();
 		}
-		else if ((mScreen == Screen::START || mScreen == Screen::JOIN) && (hosting || joined))
+		else if (mScreen != Screen::HOSTING && mScreen != Screen::JOINED && (hosting || joined))
 		{
 			chooseScreen();
 		}
@@ -739,7 +1322,7 @@ void LobbyMenu::update(float timeElapsed)
 		showFailureAndReturnToStart();
 
 	// Developer test switch: press Retry by itself, eight seconds after a failure was shown (only with the test hooks enabled)
-	if (mState == State::SHOW && mScreen == Screen::START && mFailure != NetplayFailure::Reason::NONE && nullptr != TestHooks::getEnv("S3AIR_LOBBY_AUTORETRY"))
+	if (mState == State::SHOW && mScreen == Screen::HOME && mFailure != NetplayFailure::Reason::NONE && nullptr != TestHooks::getEnv("S3AIR_LOBBY_AUTORETRY"))
 	{
 		mAutoRetryTimer += timeElapsed;
 		if (mAutoRetryTimer > 8.0f)
@@ -751,6 +1334,67 @@ void LobbyMenu::update(float timeElapsed)
 
 	if (mState == State::SHOW)
 		updateTestHooks(timeElapsed);
+
+	// Developer test switch: open one of the screens by itself (for screenshots): home, list, join (digits from S3AIR_LOBBY_JOINDIGITS), create, lan, settings, quick
+	if (mState == State::SHOW && !mHookScreenDone && mScreen == Screen::HOME)
+	{
+		if (const char* hookScreen = TestHooks::getEnv("S3AIR_LOBBY_SCREEN"))
+		{
+			mHookScreenTimer += timeElapsed;
+			if (mHookScreenTimer > 1.0f)
+			{
+				mHookScreenDone = true;
+				if (strcmp(hookScreen, "list") == 0)
+					showScreen(Screen::LIST);
+				else if (strcmp(hookScreen, "join") == 0)
+				{
+					mCodeDigits = NetplayCodes::keepDigitsOnly((nullptr != TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS")) ? TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS") : "", (size_t)MAX_CODE_DIGITS);
+					showScreen(Screen::JOIN);
+				}
+				else if (strcmp(hookScreen, "create") == 0)
+					showScreen(Screen::CREATE);
+				else if (strcmp(hookScreen, "lan") == 0)
+					showScreen(Screen::LAN);
+				else if (strcmp(hookScreen, "settings") == 0)
+					showScreen(Screen::SETTINGS);
+				else if (strcmp(hookScreen, "quick") == 0)
+					beginQuickJoin();
+			}
+		}
+	}
+
+	// Waiting for the lobby server (quick join, looking up a code)
+	if (mState == State::SHOW && mScreen == Screen::SEARCHING && mFlow != Flow::NONE)
+	{
+		mFlowSeconds += timeElapsed;
+		updateFlow();
+	}
+
+	// The list of public lobbies: shown as it arrives, and asked for again every few seconds
+	if (mState == State::SHOW && mScreen == Screen::LIST)
+	{
+		LobbyDirectory& directory = manager.getLobbyDirectory();
+		if (directory.getListState() == LobbyDirectory::RequestState::DONE && directory.getListAgeSeconds() < mLastListAge)
+		{
+			mListSelectedCode.clear();
+			mListFooterSelected = -1;
+			const int rows = (int)mShownList.size();
+			if (mMenuEntries.hasSelected())
+			{
+				const int index = mMenuEntries.mSelectedEntryIndex;
+				if (index < rows)
+					mListSelectedCode = mShownList[(size_t)index].mCode;
+				else
+					mListFooterSelected = index - rows;
+			}
+			mShownList = directory.getList();
+			rebuildEntries();
+		}
+		mLastListAge = directory.getListAgeSeconds();
+		mListRefreshTimer -= timeElapsed;
+		if (mListRefreshTimer <= 0.0f && directory.getListState() != LobbyDirectory::RequestState::PENDING)
+			refreshList();
+	}
 
 	// A ready check that ended: the host goes on to pick the game, without the players who were left out
 	if (mState == State::SHOW && mScreen == Screen::HOSTING && nullptr != manager.getNetplayHost() && manager.getNetplayHost()->takeReadyCheckFinished())
@@ -806,218 +1450,325 @@ void LobbyMenu::update(float timeElapsed)
 	{
 		const InputManager::ControllerScheme& keys = InputManager::instance().getController(0);
 
-		const GameMenuEntries::UpdateResult result = mMenuEntries.update();
-		if (result != GameMenuEntries::UpdateResult::NONE)
-			playMenuSound(0x5b);
-
-		const bool accept = (keys.Start.justPressed() || keys.A.justPressed() || keys.X.justPressed());
-		const bool back = (keys.Back.justPressed() || keys.B.justPressed());
-		const bool typing = ((mScreen == Screen::JOIN || mScreen == Screen::TEXT) && mMenuEntries.hasSelected() && mMenuEntries.selected().is<InputFieldMenuEntry>());
-		const int leftRight = (keys.Right.justPressed() ? 1 : 0) - (keys.Left.justPressed() ? 1 : 0);
-
-		// Entries that are changed with Left and Right
-		if (leftRight != 0 && !typing && mMenuEntries.hasSelected())
+		if (mScreen == Screen::JOIN)
 		{
-			switch (mMenuEntries.selected().mData)
-			{
-				case INPUT_DELAY:
-					playMenuSound(0x5b);
-					manager.setInputDelaySetting(NetplayLobby::nextDelaySetting(manager.getInputDelaySetting(), leftRight));
-					break;
-
-				case CHAT_QUICK:
-					playMenuSound(0x5b);
-					mQuickIndex = (mQuickIndex - 1 + leftRight + WRITE_MESSAGE_INDEX) % WRITE_MESSAGE_INDEX + 1;
-					break;
-
-				case KICK:
-					playMenuSound(0x5b);
-					mKickSlot = findKickTarget(mKickSlot == 0 ? 0 : mKickSlot, leftRight);
-					break;
-
-				case CHARACTER:
-					changeCharacter(leftRight);
-					break;
-			}
+			updateJoinScreenInput(keys);
 		}
-
-		// While typing, only Start sends it (letters must not trigger menu buttons)
-		if ((accept && !typing && mMenuEntries.hasSelected()) || (typing && keys.Start.justPressed()))
+		else
 		{
-			uint32 action = mMenuEntries.selected().mData;
-			if (typing)
-				action = (mScreen == Screen::TEXT) ? (uint32)TEXT_OK : (uint32)JOIN_NOW;
+			const GameMenuEntries::UpdateResult result = mMenuEntries.update();
+			if (result != GameMenuEntries::UpdateResult::NONE)
+				playMenuSound(0x5b);
 
-			switch (action)
+			const bool accept = (keys.Start.justPressed() || keys.A.justPressed() || keys.X.justPressed());
+			const bool back = (keys.Back.justPressed() || keys.B.justPressed());
+			const bool typing = (mScreen == Screen::TEXT && mMenuEntries.hasSelected() && mMenuEntries.selected().is<InputFieldMenuEntry>());
+			const int leftRight = (keys.Right.justPressed() ? 1 : 0) - (keys.Left.justPressed() ? 1 : 0);
+
+			// Entries that are changed with Left and Right
+			if (leftRight != 0 && !typing && mMenuEntries.hasSelected())
 			{
-				case CREATE_LOBBY:
-					playMenuSound(0x63);
-					createLobby();
-					break;
-
-				case JOIN_LOBBY:
-					playMenuSound(0x63);
-					joinLobby();
-					break;
-
-				case RETRY:
-					playMenuSound(0x63);
-					retry();
-					break;
-
-				case JOIN_NOW:
+				switch (mMenuEntries.selected().mData)
 				{
-					// The code field is the first entry
-					std::string code;
-					if (mMenuEntries.size() > 0 && mMenuEntries[0].is<InputFieldMenuEntry>())
-						code = mMenuEntries[0].as<InputFieldMenuEntry>().getTextUTF8();
-
-					if (!joinWithCode(code))
+					case INPUT_DELAY:
+						playMenuSound(0x5b);
+						manager.setInputDelaySetting(NetplayLobby::nextDelaySetting(manager.getInputDelaySetting(), leftRight));
 						break;
-					playMenuSound(0x63);
-					mScreen = Screen::JOINED;
-					rebuildEntries();
-					break;
+
+					case CHAT_QUICK:
+						playMenuSound(0x5b);
+						mQuickIndex = (mQuickIndex - 1 + leftRight + WRITE_MESSAGE_INDEX) % WRITE_MESSAGE_INDEX + 1;
+						break;
+
+					case KICK:
+						playMenuSound(0x5b);
+						mKickSlot = findKickTarget(mKickSlot == 0 ? 0 : mKickSlot, leftRight);
+						break;
+
+					case CHARACTER:
+						changeCharacter(leftRight);
+						break;
+
+					case TOGGLE_PUBLIC:
+						playMenuSound(0x5b);
+						mLobbyPublic = !mLobbyPublic;
+						Configuration::instance().mOnlineLobbyPublic = mLobbyPublic;
+						Configuration::instance().saveSettings();
+						break;
+
+					case MAX_PLAYERS:
+						playMenuSound(0x5b);
+						mLobbyMaxPlayers = (mLobbyMaxPlayers - 2 + leftRight + 3) % 3 + 2;
+						Configuration::instance().mOnlineLobbyMaxPlayers = mLobbyMaxPlayers;
+						Configuration::instance().saveSettings();
+						break;
+
+					case FILTER:
+						playMenuSound(0x5b);
+						mListCompatibleOnly = !mListCompatibleOnly;
+						Configuration::instance().mOnlineListCompatibleOnly = mListCompatibleOnly;
+						Configuration::instance().saveSettings();
+						refreshList();
+						break;
 				}
+			}
 
-				case READY:
-					if (nullptr != manager.getNetplayClient())
-					{
-						playMenuSound(0x63);
-						manager.getNetplayClient()->sendLobbyReady(!manager.getNetplayClient()->isLobbyReady());
-					}
-					break;
+			// While typing, only Start sends it (letters must not trigger menu buttons)
+			if ((accept && !typing && mMenuEntries.hasSelected()) || (typing && keys.Start.justPressed()))
+			{
+				uint32 action = mMenuEntries.selected().mData;
+				if (typing)
+					action = TEXT_OK;
 
-				case START_GAME:
-					pressStart();
-					break;
+				if (action >= LIST_ROW && action < PAD_KEY)
+					action = LIST_ROW;
 
-				case INPUT_DELAY:
-					playMenuSound(0x5b);
-					manager.setInputDelaySetting(NetplayLobby::nextDelaySetting(manager.getInputDelaySetting(), 1));
-					break;
-
-				case CHAT_QUICK:
-					if (mQuickIndex == WRITE_MESSAGE_INDEX)
-					{
-						playMenuSound(0x63);
-						openTextScreen(TextMode::CHAT);
-					}
-					else
-					{
-						playMenuSound(0x63);
-						sendQuickChat();
-					}
-					break;
-
-				case KICK:
-					if (mKickSlot != 0 && nullptr != manager.getNetplayHost())
-					{
-						playMenuSound(0x63);
-						manager.getNetplayHost()->kickPlayer(mKickSlot);
-						mKickSlot = findKickTarget(mKickSlot, 1);
-					}
-					else
-					{
-						playMenuSound(0xad);
-					}
-					break;
-
-				case CHARACTER:
-					changeCharacter(1);
-					break;
-
-				case EDIT_NAME:
-					playMenuSound(0x63);
-					openTextScreen(TextMode::NAME);
-					break;
-
-				case EDIT_RELAY:
-					playMenuSound(0x63);
-					mMessage.clear();
-					openTextScreen(TextMode::RELAY);
-					break;
-
-				case TEXT_OK:
+				switch (action)
 				{
-					std::string text;
-					if (mMenuEntries.size() > 0 && mMenuEntries[0].is<InputFieldMenuEntry>())
-						text = mMenuEntries[0].as<InputFieldMenuEntry>().getTextUTF8();
-					playMenuSound(0x63);
-					if (mTextMode == TextMode::NAME)
-					{
-						manager.setLocalPlayerName(text);
-					}
-					else if (mTextMode == TextMode::RELAY)
-					{
-						std::string url;
-						if (!text.empty() && !NetplayLobby::normalizeRelayWebSocketURL(text, url))
-						{
-							mMessage = "That is not a usable address.\nUse a name like relay.example.org or wss://relay.example.org";
-							mFailure = NetplayFailure::Reason::NONE;
-							playMenuSound(0xad);
-							break;		// (stay in the text field)
-						}
-						manager.setRelayServerSetting(text);
+					case LIST_ROW:
+						joinListEntry((int)(mMenuEntries.selected().mData - LIST_ROW));
+						break;
+
+					case PUBLIC_LOBBIES:
+						playMenuSound(0x63);
+						showScreen(Screen::LIST);
+						break;
+
+					case QUICK_JOIN:
+						playMenuSound(0x63);
+						beginQuickJoin();
+						break;
+
+					case CREATE_LOBBY:
+						playMenuSound(0x63);
+						showScreen(Screen::CREATE);
+						break;
+
+					case JOIN_LOBBY:
+						playMenuSound(0x63);
+						mJoinLanOnly = false;
+						mCodeDigits.clear();
+						showScreen(Screen::JOIN);
+						break;
+
+					case LAN_GAME:
+						playMenuSound(0x63);
+						showScreen(Screen::LAN);
+						break;
+
+					case LAN_HOST:
+						playMenuSound(0x63);
+						createLobby(false, false, 4, mLobbyName, true);
+						break;
+
+					case LAN_JOIN:
+						playMenuSound(0x63);
+						mJoinLanOnly = true;
+						mCodeDigits.clear();
+						showScreen(Screen::JOIN);
+						break;
+
+					case SETTINGS:
+						playMenuSound(0x63);
+						showScreen(Screen::SETTINGS);
+						break;
+
+					case EDIT_LOBBY_SERVER:
+						playMenuSound(0x63);
+						openTextScreen(TextMode::LOBBY_SERVER, Screen::SETTINGS);
+						break;
+
+					case EDIT_LOBBY_NAME:
+						playMenuSound(0x63);
+						openTextScreen(TextMode::LOBBY_NAME, Screen::CREATE);
+						break;
+
+					case TOGGLE_PUBLIC:
+						playMenuSound(0x5b);
+						mLobbyPublic = !mLobbyPublic;
+						Configuration::instance().mOnlineLobbyPublic = mLobbyPublic;
+						Configuration::instance().saveSettings();
+						break;
+
+					case MAX_PLAYERS:
+						playMenuSound(0x5b);
+						mLobbyMaxPlayers = (mLobbyMaxPlayers - 2 + 1) % 3 + 2;
+						Configuration::instance().mOnlineLobbyMaxPlayers = mLobbyMaxPlayers;
+						Configuration::instance().saveSettings();
+						break;
+
+					case OPEN_LOBBY:
+						playMenuSound(0x63);
+						createLobby(true, mLobbyPublic, mLobbyMaxPlayers, mLobbyName);
+						break;
+
+					case REFRESH:
+						playMenuSound(0x63);
 						mMessage.clear();
-						mFailure = NetplayFailure::Reason::NONE;
-					}
-					else if (nullptr != manager.getNetplayHost())
+						refreshList();
+						break;
+
+					case FILTER:
+						playMenuSound(0x5b);
+						mListCompatibleOnly = !mListCompatibleOnly;
+						Configuration::instance().mOnlineListCompatibleOnly = mListCompatibleOnly;
+						Configuration::instance().saveSettings();
+						refreshList();
+						break;
+
+					case CANCEL:
+						playMenuSound(0xad);
+						goBackOneLevel();
+						break;
+
+					case RETRY:
+						playMenuSound(0x63);
+						retry();
+						break;
+
+					case READY:
+						if (nullptr != manager.getNetplayClient())
+						{
+							playMenuSound(0x63);
+							manager.getNetplayClient()->sendLobbyReady(!manager.getNetplayClient()->isLobbyReady());
+						}
+						break;
+
+					case START_GAME:
+						pressStart();
+						break;
+
+					case INPUT_DELAY:
+						playMenuSound(0x5b);
+						manager.setInputDelaySetting(NetplayLobby::nextDelaySetting(manager.getInputDelaySetting(), 1));
+						break;
+
+					case CHAT_QUICK:
+						if (mQuickIndex == WRITE_MESSAGE_INDEX)
+						{
+							playMenuSound(0x63);
+							openTextScreen(TextMode::CHAT, mScreen);
+						}
+						else
+						{
+							playMenuSound(0x63);
+							sendQuickChat();
+						}
+						break;
+
+					case KICK:
+						if (mKickSlot != 0 && nullptr != manager.getNetplayHost())
+						{
+							playMenuSound(0x63);
+							manager.getNetplayHost()->kickPlayer(mKickSlot);
+							mKickSlot = findKickTarget(mKickSlot, 1);
+						}
+						else
+						{
+							playMenuSound(0xad);
+						}
+						break;
+
+					case CHARACTER:
+						changeCharacter(1);
+						break;
+
+					case EDIT_NAME:
+						playMenuSound(0x63);
+						openTextScreen(TextMode::NAME, mScreen);
+						break;
+
+					case EDIT_RELAY:
+						playMenuSound(0x63);
+						openTextScreen(TextMode::RELAY, Screen::SETTINGS);
+						break;
+
+					case TEXT_OK:
 					{
-						manager.getNetplayHost()->sendHostChat(0, text);
+						std::string text;
+						if (mMenuEntries.size() > 0 && mMenuEntries[0].is<InputFieldMenuEntry>())
+							text = mMenuEntries[0].as<InputFieldMenuEntry>().getTextUTF8();
+						playMenuSound(0x63);
+						auto addressUsable = [](const std::string& address)
+						{
+							std::string url;
+							return NetplayManager::isBrowserBuild() ? NetplayLobby::normalizeRelayWebSocketURL(address, url) : NetplayLobby::isPlausibleServerAddress(address);
+						};
+						if (mTextMode == TextMode::NAME)
+						{
+							manager.setLocalPlayerName(text);
+						}
+						else if (mTextMode == TextMode::LOBBY_NAME)
+						{
+							mLobbyName = cleanLobbyName(text);
+							Configuration::instance().mOnlineLobbyName = mLobbyName;
+							Configuration::instance().saveSettings();
+						}
+						else if (mTextMode == TextMode::RELAY || mTextMode == TextMode::LOBBY_SERVER)
+						{
+							if (!text.empty() && !addressUsable(text))
+							{
+								mMessage = "That is not a usable address.\nUse a name like lobbies.example.org (or lobbies.example.org:28842).";
+								mFailure = NetplayFailure::Reason::NONE;
+								playMenuSound(0xad);
+								break;		// (stay in the text field)
+							}
+							if (mTextMode == TextMode::RELAY)
+								manager.setRelayServerSetting(text);
+							else
+								manager.setLobbyServerSetting(text);
+							mMessage.clear();
+							mFailure = NetplayFailure::Reason::NONE;
+						}
+						else if (nullptr != manager.getNetplayHost())
+						{
+							manager.getNetplayHost()->sendHostChat(0, text);
+						}
+						else if (nullptr != manager.getNetplayClient())
+						{
+							manager.getNetplayClient()->sendChat(0, text);
+						}
+						if (mTextReturnScreen == Screen::HOSTING || mTextReturnScreen == Screen::JOINED || mTextMode == TextMode::CHAT)
+							chooseScreen();
+						else
+							showScreen(mTextReturnScreen);
+						break;
 					}
-					else if (nullptr != manager.getNetplayClient())
-					{
-						manager.getNetplayClient()->sendChat(0, text);
-					}
-					chooseScreen();
-					break;
+
+					case COPY_CODE:
+						if (PlatformFunctions::hasClipboardSupport())
+						{
+							const std::string shortCode = manager.getPublishedLobbyCode();
+							PlatformFunctions::copyToClipboard(shortCode.empty() ? NetplayCodes::makeSessionCode(manager.mSessionID) : shortCode);
+							mShowCopied = true;
+						}
+						break;
+
+					case LEAVE:
+						playMenuSound(0xad);
+						leaveLobby();
+						break;
+
+					case BACK:
+						playMenuSound(0xad);
+						goBackOneLevel();
+						break;
 				}
-
-				case COPY_CODE:
-					if (PlatformFunctions::hasClipboardSupport())
-					{
-						PlatformFunctions::copyToClipboard(NetplayCodes::makeSessionCode(manager.mSessionID));
-						mShowCopied = true;
-					}
-					break;
-
-				case LEAVE:
-					playMenuSound(0xad);
-					leaveLobby();
-					break;
-
-				case BACK:
-					if (mScreen == Screen::TEXT)
-						chooseScreen();
-					else
-						goBack();
-					break;
 			}
-		}
-		else if (back && !typing)
-		{
-			if (mScreen == Screen::JOIN)
+			else if (back && !typing)
 			{
-				mScreen = Screen::START;
-				rebuildEntries();
+				goBackOneLevel();
 			}
-			else if (mScreen == Screen::TEXT)
+			else if (back && typing && mMenuEntries.size() > 1)
 			{
-				chooseScreen();
+				// Back in the text field: go to the buttons below it
+				mMenuEntries.mSelectedEntryIndex = (int)mMenuEntries.size() - 1;
 			}
-			else
-			{
-				// In a lobby, Back goes to the main menu and keeps the lobby (use "Leave Lobby" to leave it)
-				goBack();
-			}
-		}
-		else if (back && typing && mMenuEntries.size() > 1)
-		{
-			// Back in the text field: go to the buttons below it
-			mMenuEntries.mSelectedEntryIndex = (int)mMenuEntries.size() - 1;
 		}
 	}
+
+	mTextInputLastFrame = mTextInputThisFrame;
+	mTextInputThisFrame = false;
 
 	// Animation
 	const float maxStep = timeElapsed * 10.0f;
@@ -1037,6 +1788,337 @@ void LobbyMenu::update(float timeElapsed)
 	{
 		if (updateFadeOut(timeElapsed * 4.0f))
 			mState = State::INACTIVE;
+	}
+}
+
+std::string LobbyMenu::getServerStatusLine(uint32& outColorKind) const
+{
+	// outColorKind: 0 = grey, 1 = green, 2 = orange, 3 = red
+	NetplayManager& manager = netplay();
+	const std::string name = shorten(manager.getLobbyServerDisplayName(), 30);
+	switch (manager.getLobbyServerState())
+	{
+		case NetplayManager::LobbyServerState::NOT_SET:
+			outColorKind = 2;
+			return "No lobby server is set. LAN and long codes still work.";
+		case NetplayManager::LobbyServerState::BAD_ADDRESS:
+			outColorKind = 3;
+			return "The lobby server address is not usable. Check SETTINGS.";
+		case NetplayManager::LobbyServerState::CONNECTING:
+			outColorKind = 2;
+			return "Connecting to the lobby server " + name + "...";
+		case NetplayManager::LobbyServerState::READY:
+		{
+			outColorKind = 1;
+			const LobbyDirectory& directory = manager.getLobbyDirectory();
+			std::string line = "Lobby server: " + name;
+			if (directory.getPingMs() >= 0)
+				line += "  -  " + std::to_string(directory.getPingMs()) + " ms";
+			line += "  -  " + std::to_string(directory.getListedLobbyCount()) + (directory.getListedLobbyCount() == 1 ? " public lobby" : " public lobbies");
+			return line;
+		}
+		case NetplayManager::LobbyServerState::UNREACHABLE:
+			outColorKind = 3;
+			return "The lobby server " + name + " does not answer.";
+	}
+	outColorKind = 0;
+	return std::string();
+}
+
+void LobbyMenu::renderCodeKeypad(Drawer& drawer, int anchorX, float alpha, int top)
+{
+	const Color white(1.0f, 1.0f, 1.0f, alpha);
+	const Color yellow(1.0f, 1.0f, 0.0f, alpha);
+	const Color grey(0.7f, 0.7f, 0.7f, alpha);
+	for (int key = 0; key < PAD_KEY_COUNT; ++key)
+	{
+		const int row = key / 3;
+		const int column = key % 3;
+		const bool isSelected = (mMenuEntries.mSelectedEntryIndex == key);
+		const int value = PAD_LAYOUT[key];
+		std::string label = (value == PAD_DELETE) ? "DEL" : ((value == PAD_JOIN) ? "JOIN" : std::string(1, (char)('0' + value)));
+		const Vec2i position(anchorX + (column - 1) * 44, top + row * 15);
+		if (isSelected)
+			drawer.drawRect(Recti(position.x - 18, position.y - 1, 36, 13), Color(1.0f, 1.0f, 0.0f, 0.18f * alpha));
+		const bool dim = (value == PAD_JOIN && mCodeDigits.empty());
+		drawer.printText(global::mOxyfontRegular, Recti(position.x, position.y, 0, 10), label, 5, isSelected ? yellow : (dim ? grey : white));
+	}
+}
+
+void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
+{
+	NetplayManager& manager = netplay();
+	const Color white(1.0f, 1.0f, 1.0f, alpha);
+	const Color yellow(1.0f, 1.0f, 0.0f, alpha);
+	const Color green(0.4f, 1.0f, 0.4f, alpha);
+	const Color grey(0.7f, 0.7f, 0.7f, alpha);
+	const Color dark(0.5f, 0.5f, 0.5f, alpha);
+	const Color orange(1.0f, 0.75f, 0.5f, alpha);
+	const Color red(1.0f, 0.45f, 0.4f, alpha);
+	const Color kindColors[4] = { grey, green, orange, red };
+
+	const char* title = "ONLINE";
+	switch (mScreen)
+	{
+		case Screen::LIST:		title = "PUBLIC LOBBIES";  break;
+		case Screen::JOIN:		title = mJoinLanOnly ? "JOIN A LAN GAME" : "JOIN WITH CODE";  break;
+		case Screen::CREATE:	title = "CREATE LOBBY";  break;
+		case Screen::LAN:		title = "LAN GAME";  break;
+		case Screen::SETTINGS:	title = "ONLINE SETTINGS";  break;
+		case Screen::SEARCHING:	title = (mFlow == Flow::QUICK) ? "QUICK JOIN" : "JOINING";  break;
+		default: break;
+	}
+	const bool compactTitle = (mScreen == Screen::LIST || mScreen == Screen::JOIN);
+	int py = compactTitle ? 6 : 14;
+	drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), title, 5, white);
+	py += compactTitle ? 20 : 26;
+
+	auto statusLine = [&](int y)
+	{
+		uint32 kind = 0;
+		const std::string line = getServerStatusLine(kind);
+		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, y), shorten(line, 70), 5, kindColors[kind]);
+	};
+	auto drawEntries = [&](int top, int step, bool smallLayout)
+	{
+		for (size_t i = 0; i < mMenuEntries.size(); ++i)
+		{
+			GameMenuEntry& entry = mMenuEntries[i];
+			const bool isSelected = ((int)i == mMenuEntries.mSelectedEntryIndex);
+			Color color = isSelected ? yellow : white;
+			// Things that need a lobby server are dimmed while there is none (they still answer, with what to do)
+			if ((entry.mData == PUBLIC_LOBBIES || entry.mData == QUICK_JOIN) && manager.getLobbyServerState() == NetplayManager::LobbyServerState::NOT_SET)
+				color = isSelected ? Color(0.8f, 0.8f, 0.4f, alpha) : dark;
+			if (entry.mData == OPEN_LOBBY && !mLobbyPublic)
+				color = isSelected ? yellow : white;
+			drawer.printText(smallLayout ? global::mOxyfontSmall : global::mOxyfontRegular, Recti(anchorX, top + (int)i * step, 0, 10), entry.mText, 5, color);
+		}
+	};
+
+	switch (mScreen)
+	{
+		case Screen::HOME:
+		{
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "Play with up to three friends. Find a public lobby,", 5, grey);
+			py += 11;
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "open one yourself, or join with a code.", 5, grey);
+			py += 15;
+			statusLine(py);
+			py += 15;
+			drawEntries(py, 14, false);
+			break;
+		}
+
+		case Screen::CREATE:
+		{
+			statusLine(py);
+			py += 13;
+			if (manager.isLobbyServerConfigured())
+			{
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), mLobbyPublic ? "A public lobby is shown to everybody in PUBLIC LOBBIES." : "A private lobby is not listed. Friends need its code.", 5, grey);
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "The code of the lobby is shown when it is open.", 5, grey);
+			}
+			else
+			{
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Without a lobby server the lobby is not listed: it is private.", 5, orange);
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "Friends join with the long code (the matchmaking server, or LAN).", 5, grey);
+			}
+			py += 32;
+			drawEntries(py, 16, false);
+			break;
+		}
+
+		case Screen::LAN:
+		{
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "Play with friends on the same network.", 5, grey);
+			py += 11;
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "No server is needed.", 5, grey);
+			py += 18;
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Host a game and tell your friends the long code,", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "or type the long code that they give you.", 5, grey);
+			py += 30;
+			drawEntries(py, 16, false);
+			break;
+		}
+
+		case Screen::SETTINGS:
+		{
+			statusLine(py);
+			py += 14;
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "The lobby server lists public lobbies and gives out the 6 digit codes.", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "The relay connects players whose direct connection fails (and browsers).", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 20), "Both can be the same server. Nothing is set by default.", 5, grey);
+			py += 38;
+			drawEntries(py, 16, false);
+			break;
+		}
+
+		case Screen::SEARCHING:
+		{
+			statusLine(py);
+			py += 24;
+			const int dots = (int)(std::fmod(FTX::getTime(), 1.2f) / 0.3f);
+			const std::string dotText(dots, '.');
+			std::string what;
+			if (mFlow == Flow::QUICK)
+				what = "Looking for the best open lobby";
+			else if (!mFlowLobbyName.empty())
+				what = "Joining \"" + shorten(mFlowLobbyName, 20) + "\"";
+			else
+				what = "Looking up the lobby code";
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX - 80, py), what + dotText, 4, white);
+			py += 30;
+			drawEntries(py, 16, false);
+			break;
+		}
+
+		case Screen::JOIN:
+		{
+			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), mJoinLanOnly ? "Type the long code of the LAN game:" : "Type or paste the number your friend gave you:", 5, grey);
+			py += 15;
+			// The digits typed so far, with a cursor; before that, the shape of the code
+			std::string shown = groupDigits(mCodeDigits);
+			const bool blink = (std::fmod(FTX::getTime(), 1.0f) < 0.6f);
+			if ((int)mCodeDigits.size() < MAX_CODE_DIGITS && blink)
+				shown += "_";
+			if (mCodeDigits.empty())
+				drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), blink ? "_" : " ", 5, yellow);
+			else
+				drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), shown, 5, yellow);
+			py += 20;
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), mJoinLanOnly ? "13 digits. Your friend can copy it from their lobby screen." : "6 digits: a lobby code.  13 digits: a long code (LAN, no server).", 5, grey);
+			py += 14;
+			renderCodeKeypad(drawer, anchorX, alpha, py);
+			// BACK under the pad
+			{
+				const bool isSelected = (mMenuEntries.mSelectedEntryIndex == PAD_KEY_COUNT);
+				drawer.printText(global::mOxyfontRegular, Recti(anchorX, py + 4 * 15 + 1, 0, 10), "BACK", 5, isSelected ? yellow : white);
+			}
+			break;
+		}
+
+		case Screen::LIST:
+		{
+			statusLine(py);
+			py += 12;
+			const int tableLeft = anchorX - 176;
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft, py), "LOBBY", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, py), "HOST", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, py), "PLAYERS", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 226, py), "STATUS", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 282, py), "VERSION", 4, dark);
+			py += 11;
+			const int rows = (int)mShownList.size();
+			const LobbyDirectory& directory = manager.getLobbyDirectory();
+			if (rows == 0)
+			{
+				const NetplayManager::LobbyServerState serverState = manager.getLobbyServerState();
+				std::string line1, line2;
+				Color color = grey;
+				if (serverState == NetplayManager::LobbyServerState::NOT_SET)
+				{
+					line1 = "No lobby server is set, so there are no public lobbies.";
+					line2 = "Add one in SETTINGS, or use LAN GAME and long codes.";
+					color = orange;
+				}
+				else if (serverState == NetplayManager::LobbyServerState::BAD_ADDRESS || serverState == NetplayManager::LobbyServerState::UNREACHABLE || directory.getListState() == LobbyDirectory::RequestState::FAILED)
+				{
+					line1 = "Could not get the list from the lobby server.";
+					line2 = "It may be down, or you may be offline. Try REFRESH later.";
+					color = red;
+				}
+				else if (directory.getListState() == LobbyDirectory::RequestState::DONE)
+				{
+					line1 = mListCompatibleOnly ? "No public lobby for your version right now." : "No public lobbies right now.";
+					line2 = "Be the first: go back and choose CREATE LOBBY.";
+				}
+				else
+				{
+					line1 = "Looking for lobbies...";
+				}
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 8), line1, 5, color);
+				if (!line2.empty())
+					drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 20), line2, 5, color);
+			}
+			const int selectedRow = (mMenuEntries.mSelectedEntryIndex < rows) ? mMenuEntries.mSelectedEntryIndex : -1;
+			int first = mListScroll;
+			if (selectedRow >= 0)
+			{
+				if (selectedRow < first)
+					first = selectedRow;
+				if (selectedRow >= first + LIST_ROWS_VISIBLE)
+					first = selectedRow - LIST_ROWS_VISIBLE + 1;
+			}
+			first = clamp(first, 0, std::max(0, rows - LIST_ROWS_VISIBLE));
+			mListScroll = first;
+			for (int i = first; i < rows && i < first + LIST_ROWS_VISIBLE; ++i)
+			{
+				const DirectoryProtocol::ListEntry& entry = mShownList[(size_t)i];
+				const bool isSelected = (i == selectedRow);
+				const bool joinable = entry.isCompatible() && !entry.isInGame() && !entry.isFull();
+				const Color base = isSelected ? yellow : (joinable ? white : dark);
+				const int y = py + (i - first) * 11;
+				if (isSelected)
+					drawer.drawRect(Recti(tableLeft - 4, y - 1, 360, 11), Color(1.0f, 1.0f, 0.0f, 0.15f * alpha));
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft, y), shorten(entry.mName, 19), 4, base);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, y), shorten(entry.mHostName, 11), 4, base);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, y), std::to_string((int)entry.mPlayers) + "/" + std::to_string((int)entry.mMaxPlayers), 4, base);
+				const char* status = entry.isInGame() ? "PLAYING" : (entry.isFull() ? "FULL" : "OPEN");
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 226, y), status, 4, (entry.isInGame() || entry.isFull()) ? (isSelected ? yellow : orange) : (isSelected ? yellow : (joinable ? green : dark)));
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 282, y), entry.isCompatible() ? "OK" : "OTHER", 4, entry.isCompatible() ? (isSelected ? yellow : green) : (isSelected ? yellow : red));
+			}
+			if (first > 0)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 180, py), "^", 5, grey);
+			if (first + LIST_ROWS_VISIBLE < rows)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 180, py + (LIST_ROWS_VISIBLE - 1) * 11), "v", 5, grey);
+
+			// REFRESH, SHOW and BACK below the rows
+			const int footerTop = py + LIST_ROWS_VISIBLE * 11 + 6;
+			for (int k = 0; k < 3; ++k)
+			{
+				const int index = rows + k;
+				if (index >= (int)mMenuEntries.size())
+					break;
+				const bool isSelected = (mMenuEntries.mSelectedEntryIndex == index);
+				drawer.printText(global::mOxyfontRegular, Recti(anchorX, footerTop + k * 13, 0, 10), mMenuEntries[(size_t)index].mText, 5, isSelected ? yellow : white);
+			}
+			break;
+		}
+
+		default:
+			break;
+	}
+
+	// At the bottom: what the player needs to know right now (a message can have several lines)
+	const int bottomY = 202;
+	if (!mMessage.empty())
+	{
+		int lineY = bottomY;
+		size_t begin = 0;
+		for (int line = 0; line < 3 && begin <= mMessage.size(); ++line)
+		{
+			size_t end = mMessage.find('\n', begin);
+			if (end == std::string::npos)
+				end = mMessage.size();
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, lineY), shorten(mMessage.substr(begin, end - begin), 72), 5, orange);
+			lineY += 10;
+			begin = end + 1;
+		}
+		if (mLastDrawnStatus != "message: " + mMessage)
+		{
+			mLastDrawnStatus = "message: " + mMessage;
+			RMX_LOG_INFO("Lobby: on screen: message " << mMessage.substr(0, mMessage.find('\n')));
+		}
+	}
+	else if (mScreen == Screen::LIST || mScreen == Screen::HOME)
+	{
+		const char* hint = (mScreen == Screen::LIST) ? "Choose a lobby and press A to join it." : "";
+		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, bottomY + 6), hint, 5, dark);
+		mLastDrawnStatus.clear();
+	}
+	else
+	{
+		mLastDrawnStatus.clear();
 	}
 }
 
@@ -1066,18 +2148,36 @@ void LobbyMenu::render()
 	NetplayHost* host = manager.getNetplayHost();
 	NetplayClient* client = manager.getNetplayClient();
 	const bool inLobbyScreen = (mScreen == Screen::HOSTING || mScreen == Screen::JOINED);
+	if (!inLobbyScreen && mScreen != Screen::TEXT)
+	{
+		renderBrowserScreen(drawer, anchorX, alpha);
+		return;
+	}
 
 	int py = inLobbyScreen ? 4 : 18;
-	drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), "ONLINE LOBBY", 5, white);
+	drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), "ONLINE", 5, white);
 	py += inLobbyScreen ? 18 : 22;
 
 	// Code of the lobby
 	if (mScreen == Screen::HOSTING)
 	{
-		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Your friends join with this code:", 5, grey);
-		py += 10;
-		drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), NetplayCodes::makeSessionCode(manager.mSessionID), 5, yellow);
-		py += 16;
+		const std::string lobbyCode = manager.getPublishedLobbyCode();
+		const std::string longCode = NetplayCodes::makeSessionCode(manager.mSessionID);
+		const bool onLobbyServer = manager.isPublishingLobby();
+		if (!lobbyCode.empty())
+		{
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), mLobbyPublic ? "Public lobby. Friends can find it, or join with this code:" : "Private lobby. Friends join with this code:", 5, grey);
+			py += 10;
+			drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), NetplayCodes::formatLobbyCode(lobbyCode), 5, yellow);
+			py += 16;
+		}
+		else
+		{
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), onLobbyServer ? "Your friends join with this long code (the short code comes soon):" : "Your friends join with this code:", 5, grey);
+			py += 10;
+			drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), longCode, 5, yellow);
+			py += 16;
+		}
 		if (mShowCopied)
 		{
 			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Copied!", 5, green);
@@ -1085,6 +2185,22 @@ void LobbyMenu::render()
 		else if (nullptr != host && host->getHostState() == NetplayHost::HostState::CONNECT_TO_SERVER)
 		{
 			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Contacting the game server...", 5, orange);
+		}
+		else if (onLobbyServer && lobbyCode.empty())
+		{
+			const NetplayManager::LobbyServerState serverState = manager.getLobbyServerState();
+			if (serverState == NetplayManager::LobbyServerState::UNREACHABLE || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "The lobby server does not answer. Use the long code, or LAN.", 5, red);
+			else
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Asking the lobby server for a lobby code...", 5, orange);
+		}
+		else if (!lobbyCode.empty() && mLobbyPublic)
+		{
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Listed as \"" + shorten(mLobbyName, 20) + "\"   Long code: " + longCode, 5, green);
+		}
+		else if (!lobbyCode.empty())
+		{
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Long code (same network): " + longCode, 5, grey);
 		}
 		else if (NetplayManager::isBrowserBuild() && !manager.isRelayHostRegistered())
 		{
@@ -1113,33 +2229,19 @@ void LobbyMenu::render()
 			py += 8;
 		}
 	}
-	else if (mScreen == Screen::JOIN)
-	{
-		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "Enter the code your friend gave you:", 5, grey);
-		py += 18;
-	}
 	else if (mScreen == Screen::TEXT)
 	{
-		const char* title = (mTextMode == TextMode::NAME) ? "Your name (12 letters at most):" : ((mTextMode == TextMode::RELAY) ? "Address of the relay server:" : "Your message (40 characters at most):");
+		const char* title = "Your message (40 characters at most):";
+		switch (mTextMode)
+		{
+			case TextMode::NAME:			title = "Your name (12 letters at most):";  break;
+			case TextMode::RELAY:			title = "Address of the relay server:";  break;
+			case TextMode::LOBBY_SERVER:	title = "Address of the lobby server (empty = none):";  break;
+			case TextMode::LOBBY_NAME:		title = "Name of your lobby (20 characters at most):";  break;
+			default: break;
+		}
 		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), title, 5, grey);
 		py += 18;
-	}
-	else
-	{
-		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "Play with up to three friends. Create a lobby", 5, grey);
-		py += 12;
-		drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), "and share the code, or join a lobby with a code.", 5, grey);
-		py += 18;
-		if (NetplayManager::isBrowserBuild())
-		{
-			// The browser connects through a relay server: show which one (or that there is none yet)
-			const std::string relayName = manager.getRelayDisplayName();
-			if (relayName.empty())
-				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "No relay server set: choose RELAY SERVER first.", 5, orange);
-			else
-				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py - 4), "Relay server: " + shorten(relayName, 40), 5, green);
-		}
-		py += 4;
 	}
 
 	// The four players: name, ping, status

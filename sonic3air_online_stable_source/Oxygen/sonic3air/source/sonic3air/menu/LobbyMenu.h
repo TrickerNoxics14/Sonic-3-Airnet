@@ -10,13 +10,20 @@
 
 #include "sonic3air/menu/GameMenuBase.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
+#include "oxygen_netcore/network/DirectoryProtocol.h"
+#include "oxygen/application/input/InputManager.h"
 
 class MenuBackground;
 
 
-// Online lobby: one player creates a lobby and shares its code, friends join with the code and press Ready.
+// The online menu. Players can
+//  - browse the public lobbies of the lobby server and join one (or press QUICK JOIN for the best one),
+//  - create a lobby (public, or private and joined only with its code),
+//  - join with a code: 6 digits (a lobby of the lobby server) or 13 digits (a long code, which also works without any server of ours, on the same network),
+//  - play on the same network without any server (LAN GAME),
+//  - set the player name, the lobby server and the relay server.
+// In a lobby: player names with their ping and character, ready state, quick chat, the host's input delay setting, kicking a player, and a ready check with a time limit.
 // When everybody is ready, the host starts the game as usual (Normal Game, Act Select, ...) and the friends follow.
-// In the lobby: player names with their ping, quick chat messages, the host's input delay setting, kicking a player, and a ready check with a time limit.
 class LobbyMenu : public GameMenuBase
 {
 public:
@@ -46,37 +53,61 @@ private:
 
 	enum class Screen
 	{
-		START,		// Create a lobby or join one
-		JOIN,		// Typing the code
+		HOME,		// The first screen: public lobbies, quick join, create, join with a code, LAN, settings
+		LIST,		// The public lobbies
+		JOIN,		// Typing a code (number pad)
+		CREATE,		// Name, public or private, number of players
+		LAN,		// Play on the same network, without any server
+		SETTINGS,	// Player name, lobby server, relay server
+		SEARCHING,	// Waiting for the lobby server (quick join, looking up a code)
 		HOSTING,	// In a lobby as the host
 		JOINED,		// In a lobby as a friend
-		TEXT		// Typing a player name or a chat line
+		TEXT		// Typing a player name, a lobby name, an address or a chat line
 	};
 
 	enum class TextMode
 	{
 		NAME,
 		CHAT,
-		RELAY		// Browser build: the address of the relay server
+		RELAY,			// The address of the relay server
+		LOBBY_SERVER,	// The address of the lobby server
+		LOBBY_NAME		// The name of a new lobby
+	};
+
+	enum class Flow
+	{
+		NONE,
+		QUICK,			// Quick join: get the list, take the best lobby, look it up, join
+		RESOLVE			// A lobby code (typed or from the list) is being looked up
 	};
 
 private:
 	void chooseScreen();
+	void showScreen(Screen screen);
 	void rebuildEntries();
-	void createLobby(bool viaServer = true);
-	void joinLobby();
+	void createLobby(bool viaServer, bool isPublic, int maxPlayers, const std::string& lobbyName, bool lanOnly = false);
 	bool joinWithCode(const std::string& code);
+	bool joinWithSessionCode(uint64 sessionID);
+	void beginResolve(const std::string& lobbyCode, const std::string& lobbyName);
+	void beginQuickJoin();
+	void updateFlow();
+	void finishFlow(const std::string& message, NetplayFailure::Reason failure);
+	void joinListEntry(int index);
 	void leaveLobby();
 	void startGame(bool force = false);
 	void pressStart();
 	void goBack();
+	void goBackOneLevel();
 	void getSlotStates(uint8 outStates[4], bool& outConnected) const;
 	void showFailureAndReturnToStart();
 	void retry();
-	void openTextScreen(TextMode mode);
+	void openTextScreen(TextMode mode, Screen returnTo);
 	void sendQuickChat();
 	void updateEntryTexts();
 	void updateTestHooks(float timeElapsed);
+	void updateBrowserInput();
+	void updateJoinScreenInput(const InputManager::ControllerScheme& keys);
+	void refreshList();
 	std::string getPlayerNameOfSlot(int slot) const;
 	int getPingOfSlot(int slot) const;
 	int findKickTarget(int startSlot, int step) const;
@@ -85,11 +116,17 @@ private:
 	uint16 getMyCharacter();
 	bool areCharactersLocked();
 	void changeCharacter(int step);
+	std::string getServerStatusLine(uint32& outColorKind) const;
+	std::string getNoServerMessage() const;
+	void renderBrowserScreen(Drawer& drawer, int anchorX, float alpha);
+	void renderCodeKeypad(Drawer& drawer, int anchorX, float alpha, int top);
 
 private:
 	MenuBackground* mMenuBackground = nullptr;
 	State mState = State::INACTIVE;
-	Screen mScreen = Screen::START;
+	Screen mScreen = Screen::HOME;
+	Screen mTextReturnScreen = Screen::HOME;
+	Screen mSearchReturnScreen = Screen::HOME;
 	TextMode mTextMode = TextMode::NAME;
 	GameMenuEntries mMenuEntries;
 	float mRelayWaitSeconds = 0.0f;		// Browser build: how long the host has been waiting for the relay server to know its lobby
@@ -103,7 +140,38 @@ private:
 	bool mLastWasHosting = false;
 	float mAutoRetryTimer = 0.0f;		// Developer test switch S3AIR_LOBBY_AUTORETRY
 	bool mLastHostViaServer = true;
+	bool mLastHostPublic = true;
+	bool mLastHostLanOnly = false;
+	int mLastHostMaxPlayers = 4;
+	std::string mLastHostName;
 	NetplayFailure::Reason mFailure = NetplayFailure::Reason::NONE;
+
+	// Code typing (number pad)
+	std::string mCodeDigits;
+	bool mTextInputThisFrame = false;		// Text arrived from the keyboard in this frame or the one before: keys that are letters must not press the pad
+	bool mTextInputLastFrame = false;
+	bool mJoinLanOnly = false;				// The code screen was opened from LAN GAME
+
+	// Public lobbies
+	bool mListCompatibleOnly = false;
+	std::vector<DirectoryProtocol::ListEntry> mShownList;
+	float mLastListAge = 1.0e9f;
+	float mListRefreshTimer = 0.0f;
+	int mListScroll = 0;
+	std::string mListSelectedCode;			// The row that was selected when the list was rebuilt
+	int mListFooterSelected = -1;			// Or the button below the rows that was selected (0 = refresh), -1 if it was a row
+
+	// Creating a lobby
+	std::string mLobbyName;
+	bool mLobbyPublic = true;
+	int mLobbyMaxPlayers = 4;
+
+	// Waiting for the lobby server
+	Flow mFlow = Flow::NONE;
+	float mFlowSeconds = 0.0f;
+	std::string mFlowLobbyName;
+	std::string mFlowCode;
+	bool mFlowJoinedFromList = false;
 
 	// Developer test switches (only with the test hooks enabled): chat, kick, start and input delay without key presses
 	float mHookLobbyTimer = 0.0f;		// Seconds since somebody was in the lobby
@@ -112,6 +180,9 @@ private:
 	bool mHookKickDone = false;
 	bool mHookStartDone = false;
 	bool mHookDelayDone = false;
+	float mHookScreenTimer = 0.0f;		// S3AIR_LOBBY_SCREEN: seconds since the menu appeared
+	bool mHookScreenDone = false;
+	bool mHookQuickDone = false;
 	int mLastWarnedSlot = -1;			// The friend the host was last warned about (high ping), for the log
 	float mHostingMessageSeconds = 0.0f;	// A hint that was set while hosting (nobody joined yet, ready check asked) is shown for a few seconds only: it must not hide the warnings and the ready check status for good
 	std::string mLastDrawnStatus;		// What the bottom line of the lobby screen showed last (written to the log when it changes, so that the checks see what was really drawn)
