@@ -1197,7 +1197,7 @@ void SelfUpdater::update()
 #else
 
 SelfUpdater& SelfUpdater::instance()  { static SelfUpdater instance; return instance; }
-SelfUpdater::SelfUpdater()  { mState = (int)State::DISABLED; mMessage = "Updates are only available on Windows."; }
+SelfUpdater::SelfUpdater()  { mState = (int)State::DISABLED; mMessage = "Updates are only available on Windows. In the browser version, reload the page to get the newest version."; }
 SelfUpdater::~SelfUpdater() {}
 void SelfUpdater::update() {}
 SelfUpdater::Snapshot SelfUpdater::getSnapshot()  { Snapshot s; s.mState = State::DISABLED; s.mMessage = mMessage; return s; }

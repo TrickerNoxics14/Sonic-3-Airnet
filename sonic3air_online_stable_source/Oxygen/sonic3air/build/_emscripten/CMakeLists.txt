@@ -168,7 +168,11 @@ file(GLOB_RECURSE SONIC3AIR_SOURCES ${WORKSPACE_DIR}/Oxygen/sonic3air/source/son
 
 # TODO: CMake seems to use a different working directory for this, so "Oxygen" is intentionally missing here
 SET(CMAKE_EXECUTABLE_SUFFIX ".js")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${WORKSPACE_DIR}/sonic3air/build/_emscripten/dist")
+# The web build output folder can be chosen from outside (checks/build_web.ps1), so the tracked dist folder stays clean
+if (NOT DEFINED WEB_OUTPUT_DIR)
+	set(WEB_OUTPUT_DIR "${WORKSPACE_DIR}/sonic3air/build/_emscripten/dist")
+endif()
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${WEB_OUTPUT_DIR}")
 
 add_executable(Sonic3AIR ${SONIC3AIR_SOURCES})
 
@@ -180,5 +184,5 @@ target_link_libraries(Sonic3AIR oxygen_enduser)
 
 set_target_properties(Sonic3AIR PROPERTIES OUTPUT_NAME "sonic3air_web")
 
-set_target_properties(Sonic3AIR PROPERTIES LINK_FLAGS "-s FULL_ES2=1 -sFORCE_FILESYSTEM -sSTACK_SIZE=2MB -s ALLOW_MEMORY_GROWTH=1 -s EXIT_RUNTIME=1 -s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\"['\$ERRNO_CODES']\"")
+set_target_properties(Sonic3AIR PROPERTIES LINK_FLAGS "-O3 -s FULL_ES2=1 -sFORCE_FILESYSTEM -sSTACK_SIZE=2MB -s ALLOW_MEMORY_GROWTH=1 -s EXIT_RUNTIME=1 -s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\"['\$ERRNO_CODES']\"")
 

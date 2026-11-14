@@ -495,3 +495,17 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `rg -n '0x8fff00' sonic3air_online_stable_source/Oxygen/sonic3air/scripts --glob *.lemon`
 - Siblings: BSMulti.decide reads it only at the stage start not a bug
 - Guard: unit check bs unit role (effectiveRole)
+
+## 2026-11-14 · msvc-only-api · cpp
+- Seed: Oxygen/oxygenengine/source/oxygen/network/netplay/NetplayManager.cpp:41 - _stricmp/_strnicmp do not exist outside MSVC, the web build failed to compile
+- Broken assumption: the fork is only ever compiled on Windows, so MSVC-only names are fine
+- Search: `rg -n '_stricmp|_strnicmp|_wcsicmp|strcpy_s|sprintf_s|_snprintf|fopen_s' sonic3air_online_stable_source --glob '*.cpp' --glob '*.h' --glob '!external'`
+- Siblings: NetplayManager.cpp fixed (strcasecmp aliases under #ifndef _win32) · rest of the fork none found by the search, the full web build compiles
+- Guard: checks/build_web.ps1 compiles the whole fork with clang/Emscripten, so any new MSVC-only call fails there
+
+## 2026-11-14 · missing-include · cpp
+- Seed: librmx/source/rmxbase/tools/Tools.cpp:382 - std::strftime used without <ctime>
+- Broken assumption: <iomanip> pulls in <ctime> on every standard library
+- Search: `rg -n 'std::(strftime|time|localtime|gmtime|clock)\b' sonic3air_online_stable_source --glob '*.cpp' --glob '*.h'`
+- Siblings: Tools.cpp fixed (#include <ctime>) · other files compile fine with libc++ in the web build
+- Guard: checks/build_web.ps1 (libc++ is strict about includes)

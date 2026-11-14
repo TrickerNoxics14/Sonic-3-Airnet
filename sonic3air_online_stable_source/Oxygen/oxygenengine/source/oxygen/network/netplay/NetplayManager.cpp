@@ -21,6 +21,13 @@
 #include "oxygen/simulation/CodeExec.h"
 #include "oxygen/simulation/LemonScriptRuntime.h"
 
+#ifndef _WIN32
+	// The MSVC names of the case-insensitive string compares (used below) do not exist on other platforms, e.g. the web build
+	#include <strings.h>
+	#define _stricmp strcasecmp
+	#define _strnicmp strncasecmp
+#endif
+
 #include "oxygen_netcore/base/TestHooks.h"
 #include "oxygen_netcore/network/RelayProtocol.h"
 #include "oxygen_netcore/serverclient/Packets.h"
