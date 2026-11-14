@@ -382,7 +382,9 @@ void NetplayManager::updateLobbyDirectory(float deltaSeconds)
 	if (server != mDirectoryServer)
 	{
 		// (Re)start for this address. The name is looked up in the background: a lookup can take seconds when there is no connection, and the menu must not freeze.
-		mLobbyDirectory.stop();
+		// (Only a directory that runs is stopped: a list or lookup that the menu asked for before the first start must stay queued.)
+		if (mLobbyDirectory.isStarted())
+			mLobbyDirectory.stop();
 		mDirectoryServer = server;
 		mDirectoryAddressState = DirectoryAddressState::RESOLVING;
 	#ifdef PLATFORM_WEB
@@ -434,6 +436,17 @@ void NetplayManager::updateLobbyDirectory(float deltaSeconds)
 		{
 			lastStatus = mLobbyDirectory.getStatus();
 			RMX_LOG_INFO("Netplay: the lobby server is now " << ((lastStatus == LobbyDirectory::Status::READY) ? "ready" : ((lastStatus == LobbyDirectory::Status::UNREACHABLE) ? "not reachable" : "being contacted")));
+		}
+	}
+
+	{
+		static std::string lastCode;
+		const std::string code = getPublishedLobbyCode();
+		if (code != lastCode)
+		{
+			lastCode = code;
+			if (!code.empty())
+				RMX_LOG_INFO("Netplay: the lobby server listed this lobby, lobby code " << code);
 		}
 	}
 

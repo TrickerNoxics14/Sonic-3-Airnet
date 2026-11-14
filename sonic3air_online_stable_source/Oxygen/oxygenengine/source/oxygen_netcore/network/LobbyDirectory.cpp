@@ -59,8 +59,11 @@ void LobbyDirectory::stop()
 	mPublishedCode.clear();
 	mStarted = false;
 	mStatus = Status::OFF;
-	mListState = RequestState::IDLE;
-	mResolveState = RequestState::IDLE;
+	// A request that was waiting ends as failed (never as "idle", which nobody waits for: the menu would hang until its own timeout)
+	if (mListState == RequestState::PENDING)
+		mListState = RequestState::FAILED;
+	if (mResolveState == RequestState::PENDING)
+		mResolveState = RequestState::FAILED;
 	mList.clear();
 	mListBuilding.clear();
 	mListTotal = 0;

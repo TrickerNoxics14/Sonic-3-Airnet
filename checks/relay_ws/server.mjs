@@ -11,6 +11,8 @@
 //   TRUST_PROXY=0         1 = the server is behind a reverse proxy / platform router that sets X-Forwarded-For: use it as the player's address
 //   ALLOWED_ORIGINS=      comma separated list of web page origins that may connect (empty = every page); native games send no Origin
 //   MAX_LOBBIES=512       lobbies at the same time
+//   MAX_LOBBIES_PER_IP=4  relay lobbies per player address; MAX_LISTINGS_PER_IP=2  public list entries per address (raise both when many people share one address, or for tests)
+//   DIRECTORY=0           turn the public lobby directory off (the relay then works as before 1.3)
 //   MAX_CONNECTIONS_PER_IP=32   WebSocket connections per player address
 //   STATS_SECONDS=60      print a counter line this often (0 = never). Only counters are printed, never addresses, codes or payloads.
 import http from 'node:http';
@@ -151,7 +153,12 @@ if (isMain) {
 		maxConnectionsPerIP: Number(env.MAX_CONNECTIONS_PER_IP ?? 32),
 		statsSeconds: Number(env.STATS_SECONDS ?? 60),
 		quiet: false,
-		limits: env.MAX_LOBBIES ? { maxLobbies: Number(env.MAX_LOBBIES) } : {},
+		limits: {
+			...(env.MAX_LOBBIES ? { maxLobbies: Number(env.MAX_LOBBIES) } : {}),
+			...(env.MAX_LOBBIES_PER_IP ? { maxLobbiesPerIP: Number(env.MAX_LOBBIES_PER_IP) } : {}),
+			...(env.MAX_LISTINGS_PER_IP ? { maxListingsPerIP: Number(env.MAX_LISTINGS_PER_IP) } : {}),
+			...(env.DIRECTORY === '0' ? { directoryEnabled: false } : {}),
+		},
 	});
 	relay.start().then(({ port: p, udpPort: u }) => {
 		console.log(`s3air_relay: WebSocket/HTTP on TCP ${p}${u ? `, UDP on ${u}` : ', UDP off'} (no addresses or player data are logged)`);

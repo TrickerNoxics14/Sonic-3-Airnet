@@ -1,0 +1,6 @@
+﻿Sonic 3 AirNet lobby checks (stage P) - 2026-11-15 03:16 
+PASS  P0   The lobby server program starts and answers on 127.0.0.1  -- listed lobbies: 0
+PASS  P7a  All screens of the menu were opened and photographed  -- P-P7-*.png in checks\last_logs
+PASS  P8   The player save files (storage folder) are untouched: same content and same time stamps as before the run  --  3 files checked
+
+Result: 3 of 3 passed.

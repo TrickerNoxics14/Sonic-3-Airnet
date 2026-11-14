@@ -1866,6 +1866,21 @@ namespace
 			report("directory client: stopped means off, and the lists are gone", client.getStatus() == LobbyDirectory::Status::OFF && client.getList().empty());
 		}
 		{
+			// A list and a lookup that were asked for before the first start stay queued and are answered (the menu asks as soon as it opens, the connection starts a moment later);
+			// stopping a directory with a request waiting ends it as failed, not as idle
+			LobbyDirectory early;
+			early.requestList(false, "abcd1234");
+			early.requestResolve("123456");
+			early.start(SocketAddress("127.0.0.1", server.mPort));
+			const bool answered = runUntil(early, server, 4.0, [&]() { return early.getListState() == LobbyDirectory::RequestState::DONE && early.getResolveState() == LobbyDirectory::RequestState::DONE; });
+			report("directory client: requests made before the first start are still answered", answered && early.getList().size() == 3 && early.getResolveReply().mSessionID == 123456789012ull);
+			LobbyDirectory dropped;
+			dropped.start(SocketAddress("127.0.0.1", server.mPort));
+			dropped.requestList(false, "x");
+			dropped.stop();
+			report("directory client: stopping with a request waiting makes it fail, not idle", dropped.getListState() == LobbyDirectory::RequestState::FAILED);
+		}
+		{
 			// Nothing answers: it ends as "unreachable" after a few seconds, and requests fail at once instead of hanging. (Time is passed in big steps.)
 			FakeDirectoryServer silent;
 			silent.start();

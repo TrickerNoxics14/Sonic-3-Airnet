@@ -51,7 +51,7 @@ MainMenu::MainMenu(MenuBackground& menuBackground) :
 		mMenuEntries.addEntry("NORMAL GAME", mainmenu::NORMAL_GAME);
 		mMenuEntries.addEntry("ACT SELECT",  mainmenu::ACT_SELECT);
 		mMenuEntries.addEntry("TIME ATTACK", mainmenu::TIME_ATTACK);
-		mMenuEntries.addEntry("ONLINE LOBBY", mainmenu::LOBBY);
+		mMenuEntries.addEntry("ONLINE", mainmenu::LOBBY);
 		mMenuEntries.addEntry("OPTIONS",	 mainmenu::OPTIONS);
 		mMenuEntries.addEntry("EXTRAS",		 mainmenu::EXTRAS);
 		mMenuEntries.addEntry("MODS",		 mainmenu::MODS);

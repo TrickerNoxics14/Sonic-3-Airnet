@@ -63,9 +63,48 @@ Plans and limits of these hosts change: check their current terms. None of them 
 * It does not encrypt the game's traffic (the game does not either): whoever runs the relay can see it. Use `wss://`
   so that the path between a browser and the relay is encrypted. It cannot absorb a flood larger than the server's network link.
 
+## The public lobby directory (new in 1.3)
+
+The same program is also the **lobby server**: hosts publish their lobby (name, host name, players, playing or waiting, a short
+"version and mods" key) and the server hands out a **6 digit lobby code**. Players open *ONLINE > PUBLIC LOBBIES* (a list), press
+*QUICK JOIN* (the best open lobby), or type the 6 digits of a lobby (public or private) under *JOIN WITH CODE*. Nothing else is needed:
+no second server, no database, nothing on disk. Public lists work for Windows (UDP) and browser (WebSocket) players alike, in the
+same list. The directory is on by default (`DIRECTORY=0` turns it off; the relay then works exactly as before).
+
+**Hosting it, and telling the game where it is.** Run it as described above. Then one of:
+* put the address into `NetplayServerDefaults.h` (`DEFAULT_LOBBY_SERVER = "lobbies.example.org"`, one line, before building the game), or
+* each player types it under *ONLINE > SETTINGS > LOBBY SERVER* (or `settings.json`, `Online` > `LobbyServer`).
+The lobby server is also the relay unless a different relay is set. Windows and Android players need the **UDP** port to be reachable
+(default 28842); browsers need `wss://` in front. Without UDP (a "web only" host) only browser players can use it.
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `DIRECTORY` | 1 | `0` = no public lobby list, relay only |
+| `MAX_LISTINGS_PER_IP` | 2 | public lobbies one player address may list (raise it if many players share one address) |
+| `MAX_LOBBIES_PER_IP` | 4 | relay lobbies one address may register |
+
+Built in (see `directory.mjs`): a listing disappears 20 seconds after its host stopped publishing (the game publishes every 5 seconds and at
+every change), at most 256 listings, 16 per page, names are plain letters/digits/spaces and a few marks (20 characters; host name 12), a short
+list of the worst words is refused (the lobby is then just called "Lobby"), a released code is not given out again for 5 minutes.
+
+**Security of the codes.** The code is only a *handle* for a lobby. A lobby can be published, changed or closed only by the game that holds
+the relay lobby (it must send the relay lobby id, key and host secret, and the relay must have exactly that lobby registered). Lists and
+lookups need a *cookie* from a hello message that belongs to the asker's address, so a forged source address cannot make the server send a big
+reply (no amplification: every reply to a request without a cookie is smaller than the request). A lookup of a wrong, expired or unknown
+code gets the same short answer; 5 wrong codes within a minute block that address for 5 minutes (also for the right code), 25 wrong codes
+block the whole /24 (/64 for IPv6). The server never sends any address of a host. With 900,000 possible codes and a guess limit of
+about one per minute and address, a private lobby cannot be found by guessing in any reasonable time; but anybody who can *read* a code (it is
+shown on the host's screen) can join, so a private code is as private as the way it is shared. The operator of the lobby server can see
+what the game sends to it (lobby names, session IDs) and could join any lobby: run it, or choose it, like any server that carries your traffic.
+
+**Versions.** The relay header stays version 2: old games and old relays are not affected. Directory messages carry their own version byte
+(now 1); a server answers a hello with the version it speaks, a game that gets no answer says the lobby server is not reachable.
+`probe.mjs` is a small tool: `node probe.mjs 127.0.0.1:28842 list` prints the public lobbies, `resolve 123456` a lookup, and
+`fake "Name" 60` puts a fake lobby into the list for a minute (for trying the game's list by hand).
+
 ## Tests
 
-    node --test test/relay.test.mjs        # Node 22 or newer (built-in WebSocket client)
+    node --test test/relay.test.mjs test/directory.test.mjs   # Node 22 or newer (built-in WebSocket client)
 
 They start the real server on loopback and check the protocol (garbage, versions, sizes), joining and forwarding for all
 combinations of UDP and WebSocket hosts and friends, full lobbies, drop of friends and hosts, reconnect (a host takes its lobby back

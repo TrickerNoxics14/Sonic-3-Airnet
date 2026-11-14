@@ -17,6 +17,7 @@
 #include "sonic3air/audio/AudioOut.h"
 
 #include "oxygen/application/EngineMain.h"
+#include "oxygen/application/Application.h"
 #include "oxygen/application/Configuration.h"
 #include "oxygen/application/input/InputManager.h"
 #include "oxygen/network/netplay/NetplayManager.h"
@@ -176,6 +177,10 @@ void LobbyMenu::onFadeIn()
 	// The menu keeps a connection to the lobby server while it is open (it is closed again when the menu is left, unless a lobby is published)
 	manager.setLobbyDirectoryInUse(true);
 	mHookScreenTimer = 0.0f;
+	mHookScreenIndex = 0;
+	mHookScreenDone = false;
+	mHookTypeDone = false;
+	mHookTypeTimer = 0.0f;
 
 	// What was chosen last time
 	{
@@ -1335,30 +1340,84 @@ void LobbyMenu::update(float timeElapsed)
 	if (mState == State::SHOW)
 		updateTestHooks(timeElapsed);
 
-	// Developer test switch: open one of the screens by itself (for screenshots): home, list, join (digits from S3AIR_LOBBY_JOINDIGITS), create, lan, settings, quick
-	if (mState == State::SHOW && !mHookScreenDone && mScreen == Screen::HOME)
+	// Developer test switch: open the screens one after the other, 6 seconds each (for screenshots): S3AIR_LOBBY_SCREEN=home,settings,create,lan,join,list,quick
+	// (digits for the code screen come from S3AIR_LOBBY_JOINDIGITS)
+	if (mState == State::SHOW && !mHookScreenDone && mScreen != Screen::HOSTING && mScreen != Screen::JOINED)
 	{
-		if (const char* hookScreen = TestHooks::getEnv("S3AIR_LOBBY_SCREEN"))
+		if (const char* hookScreens = TestHooks::getEnv("S3AIR_LOBBY_SCREEN"))
 		{
 			mHookScreenTimer += timeElapsed;
-			if (mHookScreenTimer > 1.0f)
+			if (mHookScreenTimer > ((mHookScreenIndex == 0) ? 1.0f : 6.0f))
 			{
-				mHookScreenDone = true;
-				if (strcmp(hookScreen, "list") == 0)
-					showScreen(Screen::LIST);
-				else if (strcmp(hookScreen, "join") == 0)
+				mHookScreenTimer = 0.0f;
+				// the name with number "mHookScreenIndex" in the list
+				std::string name;
 				{
-					mCodeDigits = NetplayCodes::keepDigitsOnly((nullptr != TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS")) ? TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS") : "", (size_t)MAX_CODE_DIGITS);
-					showScreen(Screen::JOIN);
+					int index = 0;
+					size_t begin = 0;
+					const std::string all = hookScreens;
+					while (begin <= all.size())
+					{
+						size_t end = all.find(',', begin);
+						if (end == std::string::npos)
+							end = all.size();
+						if (index == mHookScreenIndex)
+						{
+							name = all.substr(begin, end - begin);
+							break;
+						}
+						++index;
+						begin = end + 1;
+					}
 				}
-				else if (strcmp(hookScreen, "create") == 0)
-					showScreen(Screen::CREATE);
-				else if (strcmp(hookScreen, "lan") == 0)
-					showScreen(Screen::LAN);
-				else if (strcmp(hookScreen, "settings") == 0)
-					showScreen(Screen::SETTINGS);
-				else if (strcmp(hookScreen, "quick") == 0)
-					beginQuickJoin();
+				++mHookScreenIndex;
+				if (name.empty())
+				{
+					mHookScreenDone = true;
+				}
+				else
+				{
+					RMX_LOG_INFO("Lobby: (test) showing the screen " << name);
+					mFlow = Flow::NONE;
+					if (name == "home")
+						showScreen(Screen::HOME);
+					else if (name == "list")
+						showScreen(Screen::LIST);
+					else if (name == "join")
+					{
+						mJoinLanOnly = false;
+						mCodeDigits = NetplayCodes::keepDigitsOnly((nullptr != TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS")) ? TestHooks::getEnv("S3AIR_LOBBY_JOINDIGITS") : "", (size_t)MAX_CODE_DIGITS);
+						showScreen(Screen::JOIN);
+					}
+					else if (name == "create")
+						showScreen(Screen::CREATE);
+					else if (name == "lan")
+						showScreen(Screen::LAN);
+					else if (name == "settings")
+						showScreen(Screen::SETTINGS);
+					else if (name == "quick")
+						beginQuickJoin();
+				}
+			}
+		}
+	}
+
+	// Developer test switch: S3AIR_LOBBY_TYPE types text on the code screen as if it came from the keyboard (letters in it must be ignored)
+	if (mState == State::SHOW && mScreen == Screen::JOIN && !mHookTypeDone)
+	{
+		if (const char* typed = TestHooks::getEnv("S3AIR_LOBBY_TYPE"))
+		{
+			mHookTypeTimer += timeElapsed;
+			if (mHookTypeTimer > 2.0f)
+			{
+				mHookTypeDone = true;
+				for (const char* p = typed; *p != 0; ++p)
+				{
+					rmx::TextInputEvent ev;
+					ev.text = std::wstring(1, (wchar_t)*p);
+					textinput(ev);
+				}
+				RMX_LOG_INFO("Lobby: (test) typed on the code screen, the field now holds " << mCodeDigits.size() << " digits");
 			}
 		}
 	}
@@ -1945,9 +2004,9 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 		{
 			statusLine(py);
 			py += 14;
-			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "The lobby server lists public lobbies and gives out the 6 digit codes.", 5, grey);
-			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "The relay connects players whose direct connection fails (and browsers).", 5, grey);
-			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 20), "Both can be the same server. Nothing is set by default.", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "The lobby server lists public lobbies and gives the 6 digit codes.", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "The relay helps players whose direct connection fails.", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 20), "They can be one server. Nothing is set by default.", 5, grey);
 			py += 38;
 			drawEntries(py, 16, false);
 			break;
@@ -1974,6 +2033,9 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 
 		case Screen::JOIN:
 		{
+		#ifndef PLATFORM_ANDROID
+			Application::instance().requestActiveTextInput();		// typed digits arrive as text (on a phone the number pad on the screen is used instead of the keyboard)
+		#endif
 			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX, py), mJoinLanOnly ? "Type the long code of the LAN game:" : "Type or paste the number your friend gave you:", 5, grey);
 			py += 15;
 			// The digits typed so far, with a cursor; before that, the shape of the code
@@ -2005,8 +2067,8 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft, py), "LOBBY", 4, dark);
 			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, py), "HOST", 4, dark);
 			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, py), "PLAYERS", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 226, py), "STATUS", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 282, py), "VERSION", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 234, py), "STATUS", 4, dark);
+			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 292, py), "VERSION", 4, dark);
 			py += 11;
 			const int rows = (int)mShownList.size();
 			const LobbyDirectory& directory = manager.getLobbyDirectory();
@@ -2064,8 +2126,8 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, y), shorten(entry.mHostName, 11), 4, base);
 				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, y), std::to_string((int)entry.mPlayers) + "/" + std::to_string((int)entry.mMaxPlayers), 4, base);
 				const char* status = entry.isInGame() ? "PLAYING" : (entry.isFull() ? "FULL" : "OPEN");
-				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 226, y), status, 4, (entry.isInGame() || entry.isFull()) ? (isSelected ? yellow : orange) : (isSelected ? yellow : (joinable ? green : dark)));
-				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 282, y), entry.isCompatible() ? "OK" : "OTHER", 4, entry.isCompatible() ? (isSelected ? yellow : green) : (isSelected ? yellow : red));
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 234, y), status, 4, (entry.isInGame() || entry.isFull()) ? (isSelected ? yellow : orange) : (isSelected ? yellow : (joinable ? green : dark)));
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 292, y), entry.isCompatible() ? "OK" : "OTHER", 4, entry.isCompatible() ? (isSelected ? yellow : green) : (isSelected ? yellow : red));
 			}
 			if (first > 0)
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX + 180, py), "^", 5, grey);

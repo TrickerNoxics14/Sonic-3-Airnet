@@ -286,6 +286,7 @@ public class GameWindowCapture
 	public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 	[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 	[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+	[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 }
 "@
 
@@ -308,6 +309,8 @@ function Save-GameScreenshot([System.Diagnostics.Process]$process, [string]$path
 	if ($handle -eq [IntPtr]::Zero) { return $false }
 	[void][GameWindowCapture]::SetForegroundWindow($handle)
 	Start-Sleep -Milliseconds 400
+	# The picture is a copy of that part of the screen: only when the game window really is in front (otherwise it would show another program, e.g. the player's own windows)
+	if ([GameWindowCapture]::GetForegroundWindow() -ne $handle) { return $false }
 	$rect = New-Object GameWindowCapture+RECT
 	[void][GameWindowCapture]::GetWindowRect($handle, [ref]$rect)
 	$width = $rect.Right - $rect.Left
@@ -728,6 +731,8 @@ try
 					try
 					{
 						$pair[0].Refresh()
+						[void][GameWindowCapture]::SetForegroundWindow($pair[0].MainWindowHandle); Start-Sleep -Milliseconds 400
+						if ([GameWindowCapture]::GetForegroundWindow() -ne $pair[0].MainWindowHandle) { continue }		# a copy of the screen: only while the game window is in front (never another program)
 						$rect = New-Object LobbyWin+RECT
 						[void][LobbyWin]::GetWindowRect($pair[0].MainWindowHandle, [ref]$rect)
 						$bitmap = New-Object System.Drawing.Bitmap ($rect.R - $rect.L), ($rect.B - $rect.T)

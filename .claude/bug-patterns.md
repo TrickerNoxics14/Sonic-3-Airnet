@@ -565,3 +565,24 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -rn '& *"\?\.\Sonic3AIR.exe' checks/*.ps1`
 - Siblings: build_android.ps1 fixed · build_web.ps1 same line fixed (latent race, was hidden by the 90 s wait for scripts.bin that follows)
 - Guard: both scripts use Start-Process -Wait and throw if audiodata/enginedata/gamedata.bin are missing afterwards
+
+## 2026-11-15 · request-dropped-by-first-start · cpp
+- Seed: NetplayManager::updateLobbyDirectory called LobbyDirectory::stop() before its first start(); stop() reset the list/lookup request the menu had queued (QUICK JOIN opened the menu and asked at once), so the flow waited 15 s and said "the lobby server does not answer" (stage P1c, real game against relay_ws)
+- Broken assumption: stop() on a directory that never ran is a no-op, and a stopped request ends as idle (nobody waits for idle)
+- Search: `grep -rn "mLobbyDirectory\.\(stop\|start\)\|requestList\|requestResolve\|startPublishing" sonic3air_online_stable_source/Oxygen`
+- Siblings: requestResolve (same path, fixed by the same change) · startPublishing (only called after start, not affected) · LobbyDirectory::stop() left PENDING as IDLE (fixed: FAILED)
+- Guard: core test "requests made before the first start are still answered" and "stopping with a request waiting makes it fail, not idle"; stage P1c
+
+## 2026-11-15 · desktop-capture-in-checks · powershell
+- Seed: first draft of checks/run_lobby_checks.ps1 took screenshots with CopyFromScreen of the game window rectangle while another program (the player's own window) was in front: the picture showed a private conversation (deleted at once, git-ignored folder)
+- Broken assumption: SetForegroundWindow brings the game window to the front
+- Search: `grep -rn "CopyFromScreen" checks/*.ps1`
+- Siblings: run_lobby_checks.ps1 fixed (the game saves its own screen: S3AIR_SHOT_DIR, never the desktop) · run_checks.ps1 Save-GameScreenshot and the L4 picture fixed (skip when the game window is not in front) · run_checks.ps1 Save-ScreenPicture (whole screen for error windows) NOT changed: needs the owner's OK
+- Guard: run_lobby_checks.ps1 contains no CopyFromScreen (grep above)
+
+## 2026-11-15 · udp-port-shared-in-test · cpp
+- Seed: checks/stable_online_core_tests.cpp stand-in directory servers: a second UDP socket bound the same port as the first (Windows sockets here are opened with address reuse), datagrams went to the first one
+- Broken assumption: bindToPort fails when the port is taken
+- Search: `grep -n "bindToPort" checks/stable_online_core_tests.cpp`
+- Guard: every stand-in server takes the next free port from a counter
+- Note: the game's own host socket behaves the same (two games hosting on one PC bind UDP 28840 silently); not changed

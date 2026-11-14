@@ -608,6 +608,29 @@ void Application::update(float timeElapsed)
 		}
 	}
 
+	// Developer test hook (only with the test hooks enabled): the checks ask for a picture of the game's own screen by writing a file name into "shot.request" in the
+	// folder of S3AIR_SHOT_DIR. The game saves "<name>.bmp" there and removes the request. Only the game's picture is saved, never the desktop.
+	if (const char* shotDir = TestHooks::getEnv("S3AIR_SHOT_DIR"))
+	{
+		const std::string requestPath = std::string(shotDir) + "/shot.request";
+		if (FILE* requestFile = fopen(requestPath.c_str(), "rb"))
+		{
+			char nameBuffer[96] = { 0 };
+			const size_t length = fread(nameBuffer, 1, sizeof(nameBuffer) - 1, requestFile);
+			fclose(requestFile);
+			std::string name(nameBuffer, length);
+			while (!name.empty() && (name.back() == '\n' || name.back() == '\r' || name.back() == ' '))
+				name.pop_back();
+			if (!name.empty() && name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string::npos && nullptr != mGameView)
+			{
+				remove(requestPath.c_str());
+				Bitmap bitmap;
+				mGameView->getScreenshot(bitmap);
+				bitmap.save(String(std::string(shotDir) + "/" + name + ".bmp").toStdWString());
+			}
+		}
+	}
+
 	// Update drawer
 	EngineMain::instance().getDrawer().updateDrawer(timeElapsed);
 

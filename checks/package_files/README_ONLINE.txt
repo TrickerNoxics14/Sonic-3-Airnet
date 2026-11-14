@@ -24,13 +24,32 @@ SETUP (once, on each computer)
    their own legally obtained ROM in the location above.
 
 
-ONLINE LOBBY (the easy way)
----------------------------
-Main menu -> ONLINE LOBBY.
-HOST:   CREATE LOBBY. A code appears (like  ABCD-EFGH7 ); send it to your friends. COPY CODE puts it on the clipboard.
-        Only people who have the code can join: it is also the password of your lobby. Do not post it publicly.
-FRIENDS: JOIN WITH CODE, paste or type the code (Ctrl+V), press Start/Enter. Then press READY.
-The lobby shows the four players and who is ready. When everybody is ready, the host presses START GAME,
+ONLINE MENU (the easy way)
+--------------------------
+Main menu -> ONLINE. The first screen has:
+  PUBLIC LOBBIES  a list of open lobbies (name, host, players, open / playing / full, version). Choose one and press A.
+                  Lobbies of another game version or other mods are greyed out and cannot be joined. REFRESH and the SHOW
+                  filter (all, or only lobbies that fit your version) are below the list; the list also refreshes itself.
+  QUICK JOIN      joins the best open lobby for your version (the fullest one that still waits for players).
+  CREATE LOBBY    NAME, LOBBY (PUBLIC = listed, PRIVATE = only joined with its code), PLAYERS (2 to 4), then OPEN LOBBY.
+  JOIN WITH CODE  numbers only: 6 digits = a lobby code, 13 digits = a long code (see below).
+                  Type the digits (number keys or number pad), paste with Ctrl+V, or use the on-screen number pad
+                  (D-pad and A; B takes a digit back; Start joins). Spaces and dashes in a pasted code do not matter.
+  LAN GAME        play on the same network without any server: HOST A LAN GAME shows a long code, JOIN A LAN GAME takes it.
+  SETTINGS        your NAME, the LOBBY SERVER and the RELAY SERVER (addresses, see below).
+In the lobby the host sees the code (COPY CODE puts it on the clipboard); friends press READY, the host presses START GAME.
+
+Public lobbies and 6 digit codes need a LOBBY SERVER: a small program (checks\relay_ws in the source, see DEPLOY_RELAY.txt) that
+somebody runs. Nobody runs one for you, so out of the box the menu tells you that none is set. Then you can still play with
+friends: LAN GAME, or a private lobby: CREATE LOBBY gives a 13 digit long code (like  4827-1693-50728 ) that works through the
+matchmaking server and on the same network. Put a lobby server's address into SETTINGS > LOBBY SERVER (or settings.json:
+Online > LobbyServer). It is also used as the relay, unless a RELAY SERVER is set on its own.
+
+The codes: 6 digit lobby code (from the lobby server, also for private lobbies; wrong guesses are limited, so it cannot be
+found by guessing) and the 13 digit long code (12 digits and a check digit: a typing mistake or two swapped digits is noticed
+at once). Codes of older versions (letters and digits) cannot be typed in any more; ask the host to use this version.
+
+The lobby shows the players and who is ready. When everybody is ready, the host presses START GAME,
 picks Normal Game (or Act Select) and a save as usual, and everybody joins in as soon as the game starts.
 Back keeps the lobby open; LEAVE LOBBY closes it. Windows may ask whether the game may use the network the
 first time somebody hosts: choose Allow.
@@ -126,7 +145,7 @@ INPUT DELAY (host setting: AUTO or 0 to 6 frames)
 PLAY WITH A CODE (works anywhere, free, no router setup)
 --------------------------------------------------------
 HOST:   Main menu -> press F9 -> "Host (works anywhere)".
-        A code like  K7Q2-9XMAB  appears. Send it to your friend (Copy code button).
+        A long code like  4827-1693-50728  appears. Send it to your friend (Copy code button).
         Then start your game as usual (Normal Game, pick a save).
 
 FRIENDS: Each player presses F9, pastes the same code (Ctrl+V), and chooses "Join".
@@ -143,7 +162,8 @@ PLAY WITH A VPN OR ON THE SAME NETWORK
 --------------------------------------
 HOST:   Press F9 -> "Host (VPN or same network)". Pick the address type shown
         (a VPN such as Hamachi, Radmin VPN, ZeroTier or Tailscale keeps your real address private).
-        A join code for that address appears (longer than the lobby code, like  ABCDEF-GHJKMN-PQRSTV ).
+        A join code for that address appears (longer than the lobby code, letters and digits like  ABCDEF-GHJKMN-PQRSTV ;
+        this developer code is only for the F9 window and is not typed in the ONLINE menu).
         It contains your address and a secret, so only a friend who has the code can get in. Send it to your friend.
 FRIEND: Paste the join code (Ctrl+V) and press Join. An address typed alone, without the code, does not work.
 On a network you do not trust (a hotel, a school), prefer the lobby code or a VPN.

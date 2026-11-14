@@ -182,6 +182,9 @@ private:
 	bool mHookDelayDone = false;
 	float mHookScreenTimer = 0.0f;		// S3AIR_LOBBY_SCREEN: seconds since the menu appeared
 	bool mHookScreenDone = false;
+	int mHookScreenIndex = 0;
+	bool mHookTypeDone = false;
+	float mHookTypeTimer = 0.0f;
 	bool mHookQuickDone = false;
 	int mLastWarnedSlot = -1;			// The friend the host was last warned about (high ping), for the log
 	float mHostingMessageSeconds = 0.0f;	// A hint that was set while hosting (nobody joined yet, ready check asked) is shown for a few seconds only: it must not hide the warnings and the ready check status for good
