@@ -90,3 +90,63 @@ export function buildHostData(type, hostToken, friendID, payload) {
 	payload.copy(out, HEADER_SIZE + 6);
 	return out;
 }
+
+// ---- Public lobby directory (added in 1.3, directory protocol version 1) ----
+// The directory uses the same transport and the same S3RL header (VERSION stays 2, so old games and old relays are not affected:
+// an old relay drops these types as unknown, an old game never sends them). Every directory message carries its own version byte
+// as the first payload byte. Strings are one length byte plus ASCII bytes. Numbers are big endian.
+// Identical to oxygen_netcore/network/DirectoryProtocol.h.
+export const DIR_VERSION = 1;                     // highest directory protocol version this server speaks
+
+export const DirType = Object.freeze({
+	HELLO: 16,           // client -> server: [ver] + padding (the reply must not be bigger than the request)
+	HELLO_REPLY: 17,     // server -> client: [ver][flags][codeDigits][pageSize][lobbies u16][cookie u64]
+	PUBLISH: 18,         // host -> server: [ver][lobby u64][key u64][secret u64][sessionID u64][flags][players][max][compat s][name s][host s]
+	PUBLISH_REPLY: 19,   // server -> host: [ver][status][code s]
+	UNPUBLISH: 20,       // host -> server: [ver][lobby u64][key u64][secret u64]
+	LIST: 21,            // client -> server: [ver][cookie u64][flags][offset][compat s]
+	LIST_REPLY: 22,      // server -> client: [ver][status][total u16][offset][count] + entries
+	RESOLVE: 23,         // client -> server: [ver][cookie u64][code s]
+	RESOLVE_REPLY: 24,   // server -> client: [ver][status] (+ [sessionID u64][players][max][flags] when OK, + [retryAfter u16] when THROTTLED)
+});
+
+export const PublishFlags = Object.freeze({ PUBLIC: 1, IN_GAME: 2 });
+export const ListFlags = Object.freeze({ COMPATIBLE_ONLY: 1 });
+export const EntryFlags = Object.freeze({ IN_GAME: 1, COMPATIBLE: 2, FULL: 4 });
+export const PublishStatus = Object.freeze({ OK: 0, NOT_REGISTERED: 1, LIMIT: 2, BAD_REQUEST: 3, CLOSED: 4 });
+export const ListStatus = Object.freeze({ OK: 0, BAD_COOKIE: 1 });
+export const ResolveStatus = Object.freeze({ OK: 0, NOT_FOUND: 1, BAD_COOKIE: 2, THROTTLED: 3 });
+export const HelloFlags = Object.freeze({ DIRECTORY: 1 });
+export const HELLO_MIN_PAYLOAD = 16;
+
+export function isDirectoryType(type) { return type >= DirType.HELLO && type <= DirType.RESOLVE_REPLY; }
+
+export function dirMessage(type, payload) {
+	const out = Buffer.alloc(HEADER_SIZE + payload.length);
+	MAGIC.copy(out, 0);
+	out[4] = VERSION;
+	out[5] = type;
+	payload.copy(out, HEADER_SIZE);
+	return out;
+}
+
+/** Small writer for directory payloads. */
+export class Writer {
+	constructor() { this.parts = []; }
+	u8(v) { this.parts.push(Buffer.from([v & 0xff])); return this; }
+	u16(v) { const b = Buffer.alloc(2); b.writeUInt16BE(v); this.parts.push(b); return this; }
+	u64(v) { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt.asUintN(64, BigInt(v))); this.parts.push(b); return this; }
+	str(s) { const b = Buffer.from(String(s), 'latin1').subarray(0, 255); this.parts.push(Buffer.from([b.length]), b); return this; }
+	pad(n) { this.parts.push(Buffer.alloc(n)); return this; }
+	done() { return Buffer.concat(this.parts); }
+}
+
+/** Small reader; every read past the end sets `bad` instead of throwing. */
+export class Reader {
+	constructor(buf, offset = HEADER_SIZE) { this.buf = buf; this.pos = offset; this.bad = false; }
+	#need(n) { if (this.pos + n > this.buf.length) { this.bad = true; return false; } return true; }
+	u8() { if (!this.#need(1)) return 0; return this.buf[this.pos++]; }
+	u16() { if (!this.#need(2)) return 0; const v = this.buf.readUInt16BE(this.pos); this.pos += 2; return v; }
+	u64() { if (!this.#need(8)) return 0n; const v = this.buf.readBigUInt64BE(this.pos); this.pos += 8; return v; }
+	str() { const n = this.u8(); if (!this.#need(n)) return ''; const s = this.buf.toString('latin1', this.pos, this.pos + n); this.pos += n; return s; }
+}

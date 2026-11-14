@@ -4,6 +4,7 @@
 // (used for rate limits and the wrong-key block) is passed separately. Nothing here ever touches a file or the console.
 import { randomBytes } from 'node:crypto';
 import * as P from './protocol.mjs';
+import { Directory } from './directory.mjs';
 
 export const DEFAULT_LIMITS = Object.freeze({
 	maxLobbies: 512,
@@ -53,6 +54,7 @@ export class RelayCore {
 		this.pipeByEndpoint = new Map();   // endpoint key -> { lobbyID, pipeID }
 		this.sources = new Map();          // ip -> source
 		this.lastPrune = 0;
+		this.directory = new Directory(this, send, limits);   // public lobby directory, see directory.mjs
 	}
 
 	hasLobby(lobby) { return this.lobbies.has(BigInt.asUintN(64, lobby)); }
@@ -60,6 +62,7 @@ export class RelayCore {
 
 	/** One received datagram. */
 	onDatagram(from, ip, data, now) {
+		this.lastNow = now;
 		const s = this.stats;
 		++s.received;
 		const type = (data.length > P.MAX_DATAGRAM_SIZE) ? -1 : P.parseHeader(data);
@@ -84,9 +87,22 @@ export class RelayCore {
 			}
 			case P.Type.DATA_C2R: this.#clientData(from, data, now); break;
 			case P.Type.DATA_H2R: this.#hostData(from, data, now); break;
-			default: ++s.droppedInvalid; break;
+			default:
+				if (P.isDirectoryType(type)) this.directory.onMessage(type, from, ip, data, now);
+				else ++s.droppedInvalid;
+				break;
 		}
 	}
+
+	/** The per-address state (rate limits, blocks); null when the table of addresses is full. Used by the directory. */
+	sourceFor(ip, now) {
+		const source = this.#getSource(ip, now);
+		if (source) source.ip = ip;
+		return source;
+	}
+
+	/** A wrong key or secret was sent (counts towards blocking the address). */
+	noteBadKey(source, now) { this.#badKey(source, now); }
 
 	/**
 	 * The connection of an endpoint ended (a WebSocket closed). A friend's place is freed at once; a host's lobby stays
@@ -105,6 +121,7 @@ export class RelayCore {
 
 	/** Call about once per second: forgets lobbies, friends and addresses that were silent for too long. */
 	update(now) {
+		this.lastNow = now;
 		for (const [id, lobby] of [...this.lobbies]) {
 			if (now - lobby.hostSeen > this.limits.hostTimeoutSeconds) { this.#removeLobby(id); continue; }
 			lobby.pipes = lobby.pipes.filter((p) => {
@@ -113,6 +130,7 @@ export class RelayCore {
 			});
 		}
 		this.#pruneSources(now, 120);
+		this.directory.update(now);
 		this.#refreshCounts();
 	}
 
@@ -157,6 +175,7 @@ export class RelayCore {
 		for (const pipe of lobby.pipes) this.pipeByEndpoint.delete(pipe.endpoint);
 		if (lobby.host !== null && this.hostByEndpoint.get(lobby.host) === id) this.hostByEndpoint.delete(lobby.host);
 		this.lobbies.delete(id);
+		this.directory.lobbyRemoved(id, this.lastNow ?? 0);
 	}
 
 	#hostRegister(from, ip, source, lobbyID, key, secret, now) {
