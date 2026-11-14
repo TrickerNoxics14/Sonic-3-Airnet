@@ -210,14 +210,15 @@ function Get-EntryText($entry)
 
 function New-SessionCode
 {
-	# 8 random characters (the first one is never 0) plus one check character, as the game's NetplayCodes::makeSessionCode writes them
-	$alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-	$indices = @(1..8 | ForEach-Object { Get-Random -Maximum 32 })
-	if ($indices[0] -eq 0) { $indices[0] = 1 }
-	$sum = 7
-	for ($i = 0; $i -lt 8; $i++) { $sum += (2 * $i + 1) * $indices[$i] }
-	$chars = @($indices | ForEach-Object { $alphabet[$_] })
-	return ((-join $chars[0..3]) + "-" + (-join $chars[4..7]) + $alphabet[$sum -band 31])
+	# A 12 digit session ID (never starting with 0) plus one Damm check digit, written "XXXX-XXXX-XXXXX" as the game's NetplayCodes::makeSessionCode does
+	$table = @(
+		@(0,3,1,7,5,9,8,6,4,2), @(7,0,9,2,1,5,4,8,6,3), @(4,2,0,6,8,7,1,3,5,9), @(1,7,5,0,9,8,3,4,2,6), @(6,1,2,3,0,4,5,9,7,8),
+		@(3,6,7,4,2,0,9,5,8,1), @(5,8,6,9,7,2,0,1,3,4), @(8,9,4,5,3,6,2,0,1,7), @(9,4,3,8,6,1,7,2,0,5), @(2,5,8,1,4,3,6,7,9,0))
+	$digits = (1 + (Get-Random -Maximum 9)).ToString() + ((1..11 | ForEach-Object { Get-Random -Maximum 10 }) -join '')
+	$interim = 0
+	foreach ($c in $digits.ToCharArray()) { $interim = $table[$interim][[int]$c - 48] }
+	$full = $digits + $interim.ToString()
+	return $full.Substring(0, 4) + '-' + $full.Substring(4, 4) + '-' + $full.Substring(8)
 }
 
 function New-Secret
