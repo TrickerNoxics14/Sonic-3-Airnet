@@ -52,6 +52,20 @@ try {
     if ($runtimeExitCode -ne 0) { throw "Stable online runtime checks returned exit code $runtimeExitCode" }
     $results.Add("PASS stable online runtime checks: join by code, join secret, failure reasons, network stress, four peers, reconnect, lobby, character choice, relay fallback, packaged game")
 
+    # Stage P: public lobby list, quick join and numeric lobby codes against the real lobby server program (node), screenshots of the menu screens
+    $lobbyScript = Join-Path $checksDir "run_lobby_checks.ps1"
+    $lobbyOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $lobbyScript 2>&1
+    $lobbyExitCode = $LASTEXITCODE
+    $lobbyOutput | ForEach-Object { Write-Output $_ }
+    $lobbyReport = Join-Path $checksDir "lobby_checks_report.txt"
+    if (Test-Path -LiteralPath $lobbyReport) {
+        foreach ($line in Get-Content -LiteralPath $lobbyReport) {
+            if ($line -match '^(PASS|FAIL)s+') { $results.Add($line.Trim()) }
+        }
+    }
+    if ($lobbyExitCode -ne 0) { throw "Lobby checks (stage P) returned exit code $lobbyExitCode" }
+    $results.Add("PASS lobby checks: public list, quick join, numeric codes, no/dead lobby server, greyed lobbies, expiry")
+
     # Stage T: the in-game updater (install helper alone, the real game against a loopback server that plays GitHub, release.ps1 dry run and the real release zip).
     # It runs last because its release dry run rebuilds the package with a test version and then puts the normal package back.
     $updateScript = Join-Path $checksDir "run_update_checks.ps1"
