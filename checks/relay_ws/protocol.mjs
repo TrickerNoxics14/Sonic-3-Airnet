@@ -21,7 +21,14 @@ export const Type = Object.freeze({
 	DATA_R2C: 7,        // relay -> friend: token, payload
 	DATA_H2R: 8,        // host -> relay: host token, friend id, payload
 	DATA_R2H: 9,        // relay -> host: host token, friend id, payload
+	// Direct-connection signalling (WebRTC offer / answer / ICE candidates): same layout as the data messages, but counted and rate limited
+	// separately and never mixed into the game's traffic. Relays and games that do not know these types drop them as unknown ones.
+	SIGNAL_C2R: 10,     // friend -> relay: token, payload
+	SIGNAL_R2C: 11,     // relay -> friend: token, payload
+	SIGNAL_H2R: 12,     // host -> relay: host token, friend id, payload
+	SIGNAL_R2H: 13,     // relay -> host: host token, friend id, payload
 });
+export const MAX_SIGNAL_PAYLOAD_SIZE = 3000;
 
 export const Refusal = Object.freeze({ NONE: 0, NO_HOST: 1, FULL: 2 });
 

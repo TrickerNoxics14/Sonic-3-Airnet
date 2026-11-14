@@ -413,3 +413,102 @@ test('proxy mode: the address of the player comes from X-Forwarded-For (rate lim
 	assert.ok(text.includes('S3RL'), 'the other player still got an answer');
 	bad.destroy(); good.destroy();
 });
+
+// ---- direct-connection signalling (WebRTC offer / answer / ICE candidates travel through the lobby connection) ----
+for (const [hostKind, Host] of [['UDP', UdpPeer], ['WebSocket', WsPeer]]) {
+	for (const [friendKind, Friend] of [['UDP', UdpPeer], ['WebSocket', WsPeer]]) {
+		test(`signalling: ${hostKind} host with a ${friendKind} friend, both directions, payload unchanged, not counted as game data`, async (t) => {
+			const r = await startRelay();
+			t.after(() => r.stop());
+			const host = await Host.create(Host === UdpPeer ? r.udpPort : r.port);
+			const friend = await Friend.create(Friend === UdpPeer ? r.udpPort : r.port);
+			const other = await WsPeer.create(r.port);
+			t.after(() => { host.close(); friend.close(); other.close(); });
+			const hostToken = await registerHost(host);
+			const joined = await joinFriend(friend);
+			const joinedOther = await joinFriend(other);
+			assert.ok(hostToken && joined?.token && joinedOther?.token);
+
+			for (const size of [1, 700, P.MAX_SIGNAL_PAYLOAD_SIZE]) {
+				const data = Buffer.alloc(size);
+				for (let i = 0; i < size; ++i) data[i] = (i * 7) & 0xff;
+				friend.send(P.buildClientData(P.Type.SIGNAL_C2R, joined.token, data));
+				const toHost = await host.nextOfType(P.Type.SIGNAL_R2H);
+				assert.ok(toHost, `size ${size} reached the host`);
+				assert.equal(toHost.readUInt32BE(P.HEADER_SIZE), hostToken);
+				assert.equal(toHost.readUInt16BE(P.HEADER_SIZE + 4), 1, 'stamped with the friend number');
+				assert.ok(toHost.subarray(P.HEADER_SIZE + 6).equals(data));
+				host.send(P.buildHostData(P.Type.SIGNAL_H2R, hostToken, 1, data));
+				const back = await friend.nextOfType(P.Type.SIGNAL_R2C);
+				assert.ok(back && back.readUInt32BE(P.HEADER_SIZE) === joined.token && back.subarray(P.HEADER_SIZE + 4).equals(data), `size ${size} reached the friend`);
+			}
+			assert.ok(await other.silent(300), 'the other friend heard nothing');
+			assert.equal(r.relay.core.stats.signals, 6);
+			assert.equal(r.relay.core.stats.forwarded, 0, 'signalling is not game traffic');
+			assert.equal(r.relay.core.stats.forwardedBytes, 0);
+		});
+	}
+}
+
+test('signalling: forged tokens, unknown friend, strangers and oversized messages are dropped; a friend cannot signal as another friend', async (t) => {
+	const r = await startRelay();
+	t.after(() => r.stop());
+	const host = await UdpPeer.create(r.udpPort);
+	const a = await WsPeer.create(r.port);
+	const b = await WsPeer.create(r.port);
+	const stranger = await WsPeer.create(r.port);
+	t.after(() => { host.close(); a.close(); b.close(); stranger.close(); });
+	const hostToken = await registerHost(host);
+	const ja = await joinFriend(a);
+	const jb = await joinFriend(b);
+	const sig = payload('offer');
+	a.send(P.buildClientData(P.Type.SIGNAL_C2R, (ja.token ^ 1) >>> 0, sig));                  // wrong token
+	stranger.send(P.buildClientData(P.Type.SIGNAL_C2R, ja.token, sig));               // token of a friend, but from a connection that never joined
+	b.send(P.buildClientData(P.Type.SIGNAL_C2R, ja.token, sig));                      // b using a's token
+	a.send(P.buildClientData(P.Type.SIGNAL_C2R, ja.token, Buffer.alloc(P.MAX_SIGNAL_PAYLOAD_SIZE + 1)));   // too large
+	host.send(P.buildHostData(P.Type.SIGNAL_H2R, (hostToken ^ 1) >>> 0, 1, sig));             // wrong host token
+	host.send(P.buildHostData(P.Type.SIGNAL_H2R, hostToken, 99, sig));                // nobody has that number
+	assert.ok(await host.silent(300), 'host heard nothing');
+	assert.ok(await a.silent(100) && await b.silent(100) && await stranger.silent(100), 'nobody heard anything');
+	assert.equal(r.relay.core.stats.signals, 0);
+	// and the right ones still work, and a message of a friend always carries that friend's own number
+	b.send(P.buildClientData(P.Type.SIGNAL_C2R, jb.token, sig));
+	const got = await host.nextOfType(P.Type.SIGNAL_R2H);
+	assert.equal(got.readUInt16BE(P.HEADER_SIZE + 4), 2);
+});
+
+test('signalling: needs a registered host, and is rate limited per friend without affecting game data', async (t) => {
+	const r = await startRelay();
+	t.after(() => r.stop());
+	const friend = await WsPeer.create(r.port);
+	const host = await UdpPeer.create(r.udpPort);
+	t.after(() => { friend.close(); host.close(); });
+	// no lobby: a signal from nobody goes nowhere
+	friend.send(P.buildClientData(P.Type.SIGNAL_C2R, 1234, payload('x')));
+	assert.ok(await friend.silent(150));
+	const hostToken = await registerHost(host);
+	const { token } = await joinFriend(friend);
+	for (let i = 0; i < 200; ++i) friend.send(P.buildClientData(P.Type.SIGNAL_C2R, token, payload(`c${i}`)));
+	await sleep(500);
+	const s = r.relay.core.stats;
+	assert.ok(s.signals >= 55 && s.signals <= 90, `burst limit applied (${s.signals} passed)`);
+	assert.ok(s.droppedSignals >= 100, 'the rest was dropped');
+	// the game's own data is not held back by a signalling flood
+	friend.send(P.buildClientData(P.Type.DATA_C2R, token, payload('game')));
+	let found = null;
+	for (let i = 0; i < 300 && !found; ++i) { const m = await host.next(300); if (!m) break; if (P.parseHeader(m) === P.Type.DATA_R2H) found = m; }
+	assert.ok(found, 'game data still goes through');
+	assert.equal(hostToken > 0, true);
+});
+
+test('signalling: an unknown signalling type from a client that never joined is dropped and does not crash the relay', async (t) => {
+	const r = await startRelay();
+	t.after(() => r.stop());
+	const udp = await UdpPeer.create(r.udpPort);
+	t.after(() => udp.close());
+	for (const type of [P.Type.SIGNAL_C2R, P.Type.SIGNAL_H2R, P.Type.SIGNAL_R2C, P.Type.SIGNAL_R2H]) udp.send(P.buildClientData(type, 1, payload('x')));
+	assert.ok(await udp.silent(300));
+	const host = await UdpPeer.create(r.udpPort);
+	t.after(() => host.close());
+	assert.ok(await registerHost(host));
+});

@@ -28,6 +28,17 @@ Check it: open `http://localhost:28842/health` (it answers `{"ok":true,...}` wit
 | `MAX_CONNECTIONS_PER_IP` | 32 | WebSocket connections from one player address |
 | `STATS_SECONDS` | 60 | counter line interval (0 = never) |
 
+## Direct connections (signalling)
+
+Browser players can connect to each other directly (WebRTC data channel, see `checks/package_files/WEB_BUILD.md`). The relay's part is only
+**signalling**: four message types (`SIGNAL_C2R` 10, `SIGNAL_R2C` 11, `SIGNAL_H2R` 12, `SIGNAL_R2H` 13, same layout as the data messages) carry the
+offer, answer and ICE candidates between the host and a friend of one lobby. The relay forwards them exactly like data (the friend's number is added
+by the relay, a friend cannot signal as another friend, strangers and wrong tokens are dropped), but counts them apart (`signals` in `/health`, they are
+not game traffic), caps each at 3000 bytes and limits them to 20 per second (burst 60) per friend and direction. Games and relays that do not know these
+types drop them, so old and new versions share a lobby (the protocol version stays 2). The relay never reads them, and it needs no STUN or TURN of its own.
+When a direct channel works the relay forwards nothing for that player (its byte counters stay near zero) and it is the automatic fallback when the
+channel cannot be made or dies.
+
 ## Tell the game where it is
 
 * **Browser version:** the page's owner puts the address into `relay_config.js` next to the page
@@ -106,6 +117,7 @@ what the game sends to it (lobby names, session IDs) and could join any lobby: r
 
     node --test test/relay.test.mjs test/directory.test.mjs   # Node 22 or newer (built-in WebSocket client)
 
+(31 tests: 24 for the relay itself and 7 for the signalling messages: all four UDP/WebSocket host and friend combinations in both directions, payload sizes up to the cap, not counted as game traffic, forged tokens / wrong host token / unknown friend / stranger / oversize dropped, rate limit that does not hold back game data, no crash from signals of a client that never joined.)
 They start the real server on loopback and check the protocol (garbage, versions, sizes), joining and forwarding for all
 combinations of UDP and WebSocket hosts and friends, full lobbies, drop of friends and hosts, reconnect (a host takes its lobby back
 with its secret, a friend gets a new place), timeouts, wrong keys and blocking, forged tokens, rate limits, the WebSocket

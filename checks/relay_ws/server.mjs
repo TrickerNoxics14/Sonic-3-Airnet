@@ -52,7 +52,7 @@ export function createRelayServer(options = {}) {
 		if (request.url === '/health' || request.url?.startsWith('/health?')) {
 			const s = core.stats;
 			response.writeHead(200, { 'Content-Type': 'application/json' });
-			response.end(JSON.stringify({ ok: true, protocol: 2, lobbies: s.lobbies, listed: core.directory.listedCount, friends: s.pipes, websocketClients: wsConnections.size, forwarded: s.forwarded }));
+			response.end(JSON.stringify({ ok: true, protocol: 2, lobbies: s.lobbies, listed: core.directory.listedCount, friends: s.pipes, websocketClients: wsConnections.size, forwarded: s.forwarded, signals: s.signals }));
 			return;
 		}
 		response.writeHead(200, { 'Content-Type': 'text/plain' });

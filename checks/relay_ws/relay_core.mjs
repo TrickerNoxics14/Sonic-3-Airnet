@@ -20,6 +20,8 @@ export const DEFAULT_LIMITS = Object.freeze({
 	dataPacketBurst: 6000.0,
 	dataBytesPerSecond: 3000000.0,
 	dataByteBurst: 6000000.0,
+	signalsPerSecond: 20.0,           // direct-connection signalling messages per friend and direction
+	signalBurst: 60.0,
 	maxSources: 8192,                 // IP addresses that are remembered for the rate limits
 });
 
@@ -47,7 +49,7 @@ export class RelayCore {
 		this.limits = { ...DEFAULT_LIMITS, ...limits };
 		this.stats = {
 			received: 0, forwarded: 0, forwardedBytes: 0, droppedInvalid: 0, droppedRate: 0, droppedBlocked: 0,
-			wrongKeys: 0, refused: 0, lobbiesCreated: 0, lobbies: 0, pipes: 0,
+			signals: 0, droppedSignals: 0, wrongKeys: 0, refused: 0, lobbiesCreated: 0, lobbies: 0, pipes: 0,
 		};
 		this.lobbies = new Map();          // lobby id (BigInt) -> lobby
 		this.hostByEndpoint = new Map();   // endpoint key -> lobby id
@@ -87,6 +89,8 @@ export class RelayCore {
 			}
 			case P.Type.DATA_C2R: this.#clientData(from, data, now); break;
 			case P.Type.DATA_H2R: this.#hostData(from, data, now); break;
+			case P.Type.SIGNAL_C2R: this.#clientData(from, data, now, true); break;
+			case P.Type.SIGNAL_H2R: this.#hostData(from, data, now, true); break;
 			default:
 				if (P.isDirectoryType(type)) this.directory.onMessage(type, from, ip, data, now);
 				else ++s.droppedInvalid;
@@ -243,6 +247,7 @@ export class RelayCore {
 			pipe = {
 				endpoint: from, token: randomToken(), id, lastSeen: now,
 				up: { packets: new Bucket(), bytes: new Bucket() }, down: { packets: new Bucket(), bytes: new Bucket() },
+				sigUp: new Bucket(), sigDown: new Bucket(),
 			};
 			lobby.pipes.push(pipe);
 			this.pipeByEndpoint.set(from, { lobbyID, pipeID: id });
@@ -252,7 +257,7 @@ export class RelayCore {
 		this.#refreshCounts();
 	}
 
-	#clientData(from, data, now) {
+	#clientData(from, data, now, signal = false) {
 		const s = this.stats;
 		if (data.length < P.HEADER_SIZE + 4) { ++s.droppedInvalid; return; }
 		const entry = this.pipeByEndpoint.get(from);
@@ -263,6 +268,13 @@ export class RelayCore {
 		if (now - lobby.hostSeen > this.limits.hostTimeoutSeconds || lobby.host === null) { ++s.droppedInvalid; return; }
 		const payload = data.subarray(P.HEADER_SIZE + 4);
 		const L = this.limits;
+		if (signal) {
+			if (payload.length > P.MAX_SIGNAL_PAYLOAD_SIZE || !pipe.sigUp.take(1, L.signalsPerSecond, L.signalBurst, now)) { ++s.droppedSignals; return; }
+			pipe.lastSeen = now;
+			++s.signals;
+			this.send(lobby.host, P.buildHostData(P.Type.SIGNAL_R2H, lobby.hostToken, pipe.id, payload));
+			return;
+		}
 		if (!pipe.up.packets.take(1, L.dataPacketsPerSecond, L.dataPacketBurst, now) || !pipe.up.bytes.take(payload.length, L.dataBytesPerSecond, L.dataByteBurst, now)) { ++s.droppedRate; return; }
 		pipe.lastSeen = now;
 		++s.forwarded;
@@ -270,7 +282,7 @@ export class RelayCore {
 		this.send(lobby.host, P.buildHostData(P.Type.DATA_R2H, lobby.hostToken, pipe.id, payload));
 	}
 
-	#hostData(from, data, now) {
+	#hostData(from, data, now, signal = false) {
 		const s = this.stats;
 		if (data.length < P.HEADER_SIZE + 6) { ++s.droppedInvalid; return; }
 		const id = this.hostByEndpoint.get(from);
@@ -281,6 +293,12 @@ export class RelayCore {
 		if (!pipe) { ++s.droppedInvalid; return; }
 		const payload = data.subarray(P.HEADER_SIZE + 6);
 		const L = this.limits;
+		if (signal) {
+			if (payload.length > P.MAX_SIGNAL_PAYLOAD_SIZE || !pipe.sigDown.take(1, L.signalsPerSecond, L.signalBurst, now)) { ++s.droppedSignals; return; }
+			++s.signals;
+			this.send(pipe.endpoint, P.buildClientData(P.Type.SIGNAL_R2C, pipe.token, payload));
+			return;
+		}
 		if (!pipe.down.packets.take(1, L.dataPacketsPerSecond, L.dataPacketBurst, now) || !pipe.down.bytes.take(payload.length, L.dataBytesPerSecond, L.dataByteBurst, now)) { ++s.droppedRate; return; }
 		++s.forwarded;
 		s.forwardedBytes += payload.length;
