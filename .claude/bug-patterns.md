@@ -558,3 +558,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -rl -a -i -E "<windows user name>|Users[/\]" web_build`
 - Siblings: web_build/loader.js fixed (path made relative after packaging) · web_build/sonic3air_web.wasm fixed (-ffile-prefix-map via WEB_SOURCE_PREFIX_MAP) · published gh-pages history fixed (branch replaced with a fresh single commit) · git-tracked files not a bug (git grep finds nothing)
 - Guard: build_web.ps1 scans every output file for the workspace path and user name and fails the build
+
+## 2026-11-15 · gui-exe-called-without-wait · powershell
+- Seed: checks/build_android.ps1 - `& .\Sonic3AIR.exe -pack` returned at once (GUI subsystem exe), the script then copied enginedata.bin before it was written; passed once by luck, failed the next run
+- Broken assumption: calling an .exe with & waits for it to finish
+- Search: `grep -rn '& *"\?\.\Sonic3AIR.exe' checks/*.ps1`
+- Siblings: build_android.ps1 fixed · build_web.ps1 same line fixed (latent race, was hidden by the 90 s wait for scripts.bin that follows)
+- Guard: both scripts use Start-Process -Wait and throw if audiodata/enginedata/gamedata.bin are missing afterwards
