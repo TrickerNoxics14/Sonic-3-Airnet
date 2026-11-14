@@ -551,3 +551,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `rg -n 'dispatchKeyEvent' checks/web_net`
 - Siblings: harness.mjs type() fixed (rawkeydown + char + keyup)
 - Guard: session A types the lobby code and must join
+
+## 2026-11-14 · build-output-leaks-local-path · powershell
+- Seed: checks/build_web.ps1 - web_build/loader.js and sonic3air_web.wasm carried the builder's absolute folder and Windows user name; published to GitHub Pages
+- Broken assumption: build output is anonymous, but file_packager writes absolute paths into loader.js and the compiler embeds __FILE__ paths in the wasm
+- Search: `grep -rl -a -i -E "<windows user name>|Users[/\]" web_build`
+- Siblings: web_build/loader.js fixed (path made relative after packaging) · web_build/sonic3air_web.wasm fixed (-ffile-prefix-map via WEB_SOURCE_PREFIX_MAP) · published gh-pages history fixed (branch replaced with a fresh single commit) · git-tracked files not a bug (git grep finds nothing)
+- Guard: build_web.ps1 scans every output file for the workspace path and user name and fails the build

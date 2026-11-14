@@ -36,7 +36,7 @@ $sw = [Diagnostics.Stopwatch]::StartNew()
 
 # 1. compile and link (wasm + js)
 Push-Location (Join-Path $work "cmake")
-emcmake cmake -G Ninja -DCMAKE_BUILD_TYPE=Release "-DWEB_OUTPUT_DIR=$OutDir" $cmakeSrc
+emcmake cmake -G Ninja -DCMAKE_BUILD_TYPE=Release "-DWEB_OUTPUT_DIR=$OutDir" "-DWEB_SOURCE_PREFIX_MAP=$($root.Replace('\','/'))" $cmakeSrc
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
 # The Windows clang / wasm-opt binaries of the SDK sometimes crash at random (out of memory / access violation) on this kind of machine: re-running ninja continues where it stopped
 $ok = $false
@@ -71,6 +71,10 @@ $packager = Join-Path $EmsdkDir "upstream\emscripten\tools\file_packager.py"
 	gamedata.bin@/sonic3air/data/gamedata.bin data/metadata.json@/sonic3air/data/metadata.json data/font@/sonic3air/data/font `
 	saves/scripts.bin@/sonic3air/data/scripts.bin --use-preload-cache
 if ($LASTEXITCODE -ne 0) { throw "file_packager failed" }
+# the packager writes the absolute build path into loader.js (only used as a cache key): make it relative so no folder or user name is published
+$loader = Join-Path $OutDir "loader.js"
+$abs = ($OutDir.Replace('\','/')) + "/"
+[IO.File]::WriteAllText($loader, ([IO.File]::ReadAllText($loader)).Replace($abs, ""))
 Pop-Location
 
 # 3. the page
@@ -80,5 +84,13 @@ Remove-Item -Recurse -Force $work
 # guard: the output must never contain a ROM
 $rom = Get-ChildItem $OutDir -Recurse -File | Where-Object { $_.Length -eq 4194304 }
 if ($rom) { throw "A 4 MB file (ROM?) is in the output: $($rom.FullName)" }
+# guard: the output must never contain the builder's folders or Windows user name (the output is published on a public page)
+$needles = @($root, $root.Replace('\','/'), $env:USERNAME) | Where-Object { $_ }
+foreach ($f in Get-ChildItem $OutDir -Recurse -File)
+{
+	$bytes = [IO.File]::ReadAllBytes($f.FullName)
+	$text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+	foreach ($n in $needles) { if ($text.Contains($n)) { throw "Build output $($f.Name) contains a local path or the user name" } }
+}
 "Web build done in $([int]$sw.Elapsed.TotalSeconds) s -> $OutDir"
 Get-ChildItem $OutDir -File | Select-Object Name, Length | Format-Table -AutoSize

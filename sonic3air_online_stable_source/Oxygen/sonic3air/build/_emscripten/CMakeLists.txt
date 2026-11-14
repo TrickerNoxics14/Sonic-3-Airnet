@@ -45,6 +45,11 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 set (CMAKE_CXX_FLAGS "-s USE_VORBIS=1 -s USE_SDL=2 -s USE_ZLIB=1")
+
+# Keep the builder's folder names out of the wasm (__FILE__ strings): checks/build_web.ps1 passes the workspace root here
+if (WEB_SOURCE_PREFIX_MAP)
+	add_compile_options("-ffile-prefix-map=${WEB_SOURCE_PREFIX_MAP}=src")
+endif()
 set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -s FETCH=1 -lidbfs.js -lwebsocket.js")
 
 include_directories(${WORKSPACE_DIR}/framework/external/sdl/SDL2/include)
