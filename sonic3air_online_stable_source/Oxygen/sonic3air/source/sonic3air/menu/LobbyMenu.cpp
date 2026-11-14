@@ -595,7 +595,7 @@ bool LobbyMenu::joinWithCode(const std::string& code)
 
 		case NetplayCodes::CodeKind::BAD_CHECK:
 			manager.reportFailure(NetplayFailure::Reason::WRONG_CODE, "This long code has a typing mistake. Check the digits.");
-			mMessage = manager.mLastErrorMessage;
+			mMessage = "This long code has a typing mistake.\nCheck the digits one by one.";
 			mFailure = NetplayFailure::Reason::NONE;
 			mScreen = Screen::JOIN;
 			rebuildEntries();
@@ -1438,7 +1438,7 @@ void LobbyMenu::update(float timeElapsed)
 			mListSelectedCode.clear();
 			mListFooterSelected = -1;
 			const int rows = (int)mShownList.size();
-			if (mMenuEntries.hasSelected())
+			if (mMenuEntries.hasSelected() && rows > 0)		// (nothing was there to choose from before: the first lobby that can be joined gets selected)
 			{
 				const int index = mMenuEntries.mSelectedEntryIndex;
 				if (index < rows)
@@ -2064,11 +2064,14 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 			statusLine(py);
 			py += 12;
 			const int tableLeft = anchorX - 176;
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft, py), "LOBBY", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, py), "HOST", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, py), "PLAYERS", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 234, py), "STATUS", 4, dark);
-			drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 292, py), "VERSION", 4, dark);
+			if (!mShownList.empty())
+			{
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft, py), "LOBBY", 4, dark);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 112, py), "HOST", 4, dark);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 178, py), "PLAYERS", 4, dark);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 234, py), "STATUS", 4, dark);
+				drawer.printText(global::mOxyfontSmall, Vec2i(tableLeft + 292, py), "VERSION", 4, dark);
+			}
 			py += 11;
 			const int rows = (int)mShownList.size();
 			const LobbyDirectory& directory = manager.getLobbyDirectory();
@@ -2174,7 +2177,7 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 	}
 	else if (mScreen == Screen::LIST || mScreen == Screen::HOME)
 	{
-		const char* hint = (mScreen == Screen::LIST) ? "Choose a lobby and press A to join it." : "";
+		const char* hint = (mScreen == Screen::LIST && !mShownList.empty()) ? "Choose a lobby and press A to join it." : "";
 		drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, bottomY + 6), hint, 5, dark);
 		mLastDrawnStatus.clear();
 	}

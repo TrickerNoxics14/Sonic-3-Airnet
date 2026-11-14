@@ -329,7 +329,7 @@ try
 		Start-Sleep -Seconds 2
 		[void](Save-Shot $friendProcess 'P4-list-no-server')
 		[void](Wait-Until { (Get-NetLog '_pfriend') -match 'showing the screen quick' } 30)
-		$quickTold = Wait-Until { (Get-NetLog '_pfriend') -match 'the lookup ended: No lobby server is set yet' } 20
+		$quickTold = Wait-Until { (Get-NetLog '_pfriend') -match 'on screen: message No lobby server is set yet' } 20
 		Start-Sleep -Seconds 1
 		[void](Save-Shot $friendProcess 'P4-quick-no-server')
 		[void](Wait-Until { (Get-NetLog '_pfriend') -match 'showing the screen create' } 30)
@@ -381,7 +381,8 @@ try
 		[void](Save-Shot $friendProcess 'P6-list-with-incompatible')
 		$list = Get-ListedLobbies
 		Add-Result 'P6a' 'The list holds three lobbies: the real one and the two fakes' ($null -ne $list -and $list.lobbies.Count -eq 3) ($(if ($list) { ($list.lobbies | ForEach-Object { $_.name + "(" + $_.players + "/" + $_.max + ")" }) -join ", " } else { '?' }))
-		Stop-StartedProcesses
+		Stop-Process -Id $friendProcess.Id -Force -ErrorAction SilentlyContinue		# (only the browsing friend: the host stays)
+		Start-Sleep -Seconds 1
 		Remove-GameLogs @('_pfriend')
 		$friendProcess = Start-GameProcess ($common + @{ 'S3AIR_LOBBY_OPEN' = 'quick'; 'S3AIR_LOGNAME' = '_pfriend'; 'S3AIR_PLAYER_NAME' = 'Friendy' })
 		$picked = Wait-Until { (Get-NetLog '_pfriend') -match 'quick join picks the lobby "Open Room" \(1/3\)' } 120
