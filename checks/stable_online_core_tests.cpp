@@ -4,6 +4,7 @@
 #include "oxygen/network/netplay/NetplayFailure.h"
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
 #include "oxygen/network/netplay/NetplayPackets.h"
+#include "oxygen/network/netplay/NetplayStallLogic.h"
 #include "oxygen_netcore/network/Sockets.h"
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
@@ -582,6 +583,82 @@ namespace
 
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// A player whose tab is in the background (browser build): who is waited for, what the screen says, when a silent friend is dropped, the "away" message
+namespace
+{
+	void runStallTests()
+	{
+		using namespace NetplayStall;
+
+		// Notices: a player that said "my tab is hidden" is noticed sooner than a silent one that said nothing, and nobody is noticed while answering normally
+		report("stall: a silent player without a message is noticed after 2.5 s, one that announced a hidden tab after 0.75 s, a normal lag spike (0.4 s) by nobody",
+			!isStalled(false, 0.4f) && !isStalled(true, 0.4f) && !isStalled(false, 2.4f) && isStalled(false, 2.5f) && !isStalled(true, 0.7f) && isStalled(true, 0.75f));
+		report("stall: a friend is dropped after 25 s of silence (the engine's own connection timeout is 30 s), a host that announced its hidden tab is given up after 60 s, one that said nothing is not (the old 10 s rule decides)",
+			!shouldDropFriend(24.9f) && shouldDropFriend(25.0f) && !shouldGiveUpOnHost(true, 59.0f) && shouldGiveUpOnHost(true, 60.0f) && !shouldGiveUpOnHost(false, 600.0f)
+			&& DROP_AFTER_SECONDS < (float)NetConnection::TIMEOUT_SECONDS);
+
+		// The "away" memory: counts while silent, or while the message is fresh; a player who keeps playing in a hidden tab stops counting once its message gets old
+		AwayTracker tracker;
+		report("stall: nobody is away before a message", !tracker.isAway(0.0f) && !tracker.isAway(100.0f));
+		tracker.onMessage(true);
+		bool ok = tracker.isAway(0.0f) && tracker.isAway(10.0f);
+		tracker.update(4.0f);
+		ok = ok && tracker.isAway(0.1f);					// fresh (4 s) and still answering: away, but it stalls nobody (isStalled decides on the silence)
+		tracker.update(2.0f);
+		ok = ok && !tracker.isAway(0.1f) && tracker.isAway(1.0f);		// old message, answering: not away any more; silent: still away
+		tracker.onMessage(false);
+		ok = ok && !tracker.isAway(100.0f);
+		tracker.onMessage(true);
+		tracker.reset();
+		ok = ok && !tracker.isAway(100.0f);
+		report("stall: the away memory follows the messages, goes stale for a player who answers again, and can be reset", ok);
+
+		// The text
+		std::vector<Waiting> list;
+		report("stall: nobody waits, no text", describeWaiting(list).empty());
+		Waiting sam; sam.mName = "Sam"; sam.mAway = true; sam.mSilentSeconds = 12;
+		list.push_back(sam);
+		report("stall: one hidden tab: \"Waiting for Sam: their tab is in the background (12 s)\"", describeWaiting(list) == "Waiting for Sam: their tab is in the background (12 s)");
+		Waiting kim; kim.mName = "Kim"; kim.mAway = false; kim.mSilentSeconds = 5;
+		list.push_back(kim);
+		report("stall: two players, one of them without a reason, and the longest wait: \"Waiting for Sam and Kim: no answer (12 s)\"", describeWaiting(list) == "Waiting for Sam and Kim: no answer (12 s)");
+		list[1].mAway = true;
+		Waiting lee; lee.mName = "Lee"; lee.mAway = true; lee.mSilentSeconds = 30;
+		list.push_back(lee);
+		report("stall: three hidden tabs: \"Waiting for Sam, Kim and Lee: their tabs are in the background (30 s)\"", describeWaiting(list) == "Waiting for Sam, Kim and Lee: their tabs are in the background (30 s)");
+		std::vector<Waiting> noName(1);
+		noName[0].mAway = false;
+		report("stall: an empty name reads \"a player\"", describeWaiting(noName) == "Waiting for a player: no answer (0 s)");
+		report("stall: the drop message names the player, says why and that the slot is kept", describeDropped("Sam", true) == "Sam was dropped: the tab stayed in the background too long. The slot is kept for a minute."
+			&& describeDropped("", false) == "A player was dropped: no answer for too long. The slot is kept for a minute.");
+		report("stall: the title of a hidden tab asks the player to return", std::string(RETURN_TO_TAB_TITLE).find("Return to the tab") == 0);
+
+		// The packet: two bytes, informational, its own type (an older game does not know it and drops it, see NetplayPackets.h)
+		PlayerAwayPacket packet;
+		packet.mSlot = 2;
+		packet.mAway = 1;
+		std::vector<uint8> bytes;
+		{
+			VectorBinarySerializer writer(false, bytes);
+			packet.serializePacket(writer, 1);
+		}
+		PlayerAwayPacket back;
+		VectorBinarySerializer reader(true, bytes);
+		const bool read = back.serializePacket(reader, 1);
+		report("away packet: writes two bytes and reads them back, is not reliable", read && bytes.size() == 2 && back.mSlot == 2 && back.mAway == 1 && !packet.isReliablePacket());
+		const uint32 awayType = (uint32)PlayerAwayPacket::PACKET_TYPE;
+		const uint32 others[] = { (uint32)StartGamePacket::PACKET_TYPE, (uint32)LobbyStatePacket::PACKET_TYPE, (uint32)LobbyReadyPacket::PACKET_TYPE, (uint32)LobbyChatPacket::PACKET_TYPE, (uint32)LobbyChatBroadcastPacket::PACKET_TYPE,
+			(uint32)LobbyPingPacket::PACKET_TYPE, (uint32)LobbyPongPacket::PACKET_TYPE, (uint32)LobbyLeavePacket::PACKET_TYPE, (uint32)SyncCheckPacket::PACKET_TYPE, (uint32)ResyncRequestPacket::PACKET_TYPE,
+			(uint32)JoinStateLoadedPacket::PACKET_TYPE, (uint32)GameStateIncrementPacket::PACKET_TYPE, (uint32)PlayerInputIncrementPacket::PACKET_TYPE, (uint32)JoinChallengePacket::PACKET_TYPE,
+			(uint32)JoinAuthPacket::PACKET_TYPE, (uint32)JoinReplyPacket::PACKET_TYPE, (uint32)JoinStateChunkPacket::PACKET_TYPE };
+		bool distinct = true;
+		for (const uint32 other : others)
+			distinct &= (other != awayType);
+		report("away packet: its type differs from every other netplay packet type", distinct);
+	}
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Character choice in the lobby: the rules of what each player may pick, the host's checks, the packets, and the picks that are fixed for a session
@@ -2048,6 +2125,7 @@ int main()
 	runBroadcastTests();
 	runPacketLimitTests();
 	runLobbyLogicTests();
+	runStallTests();
 	runCharacterTests();
 	Sockets::startupSockets();
 	runRelayTests();

@@ -57,7 +57,11 @@ also speaks UDP to Windows games, so browser and Windows players can be in the s
   server is used**: players behind NATs that STUN cannot cross (symmetric NAT, some mobile and company networks) simply stay on the relay.
   The Windows game has no WebRTC (see the handoff): a lobby with a Windows player keeps using the relay for that player, and a browser
   friend's offer to a Windows host is simply never answered.
-- Keep the tab visible while playing: browsers slow hidden tabs down to about one frame per second, which stalls the game for everybody.
+- A tab in the background: a browser stops the animation frames of a hidden tab (the game's main loop) and slows its timers to about one per second, which used to stall an online game for everybody. The game now keeps
+  an online tab running in the background with a Web Worker that ticks the main loop (the browsers that were tried do not slow worker timers; `?bgtick=off` switches it off), tells the other players at once when its tab
+  is hidden ("Waiting for NAME: their tab is in the background"), asks the player to return in the tab title, plays on without a player that is gone for 8 s, drops a friend after 25 s (the slot is kept for a minute)
+  and ends a friend's game when the host's tab stays away for 60 s. An online game is never paused by losing the focus. Browsers that stop a hidden page entirely (a tab frozen or discarded by the browser, phones) still stall it;
+  keep the tab visible there.
 - Tested: see the handoff (headless Chrome, relay on 127.0.0.1, direct connections between two Chrome instances on this PC with STUN off). Not tested:
   a real internet relay, real NATs / STUN / TURN-needing networks, a real GPU, Firefox, Safari, phones.
 - Automated check: `node checks/web_net/run_web_net_checks.mjs` (browser sessions A, B, C and P = direct connections), `--native` adds the Windows game sessions.

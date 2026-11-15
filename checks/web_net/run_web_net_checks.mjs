@@ -1323,11 +1323,11 @@ const tPlay = (inst) => async (seconds) => {	// inputs of the one visible player
 	while (Date.now() < end) { await inst.hold('Right', 700); await sleep(300); }
 };
 
-async function tSetup(relay, { seed, basePort, extra = '' }) {
+async function tSetup(relay, { seed, basePort, extra = '', p2p = false }) {
 	const h = await startHarness({ webDir, instances: 2, seeds: [seed, 0x52], basePort, throttled: true });
 	try {
 		const [host, friend] = h.instances;
-		const query = `?relay=ws://127.0.0.1:${relay.ports.port}&p2p=off${extra}`;
+		const query = `?relay=ws://127.0.0.1:${relay.ports.port}${p2p ? '&stun=none' : '&p2p=off'}${extra}`;
 		await Promise.all([host.openGame(h.baseURL, query), friend.openGame(h.baseURL, query)]);
 		await Promise.all([host.waitLog(/Ready to go/, 90000), friend.waitLog(/Ready to go/, 90000)]);
 		await sleep(2000);
@@ -1393,6 +1393,7 @@ async function sessionT2(relay) {
 		await friend.hide();
 		const tHide = Date.now();
 		const [oh, of] = await tObserve([host, friend], 20, tPlay(host));
+		console.log(`      without ticks, friend hidden: its own frame counter ${of[0].frame} -> ${of.at(-1).frame} (${tRate(of).toFixed(2)} frames/s, stale while the page cannot run), the host ${tRate(oh).toFixed(1)} frames/s over the 20 s (longest wait ${tStall(oh).toFixed(1)} s)`);
 		const notice = tFirst(oh, /waiting for/i);
 		check('T2b', 'the host sees a "waiting for NAME" notice within 4 s of the friend\'s tab going hidden (the friend tells it at once, nothing has to time out)', notice !== null && notice <= 4, `first notice after ${notice} s: "${oh.find((x) => /waiting for/i.test(x.banner))?.banner ?? ''}"`);
 		const ret = tFirst(of, /return to/i, 'title');
@@ -1453,14 +1454,35 @@ async function sessionT4(relay) {
 	try {
 		check('T4a', 'two browsers with real background throttling are in a running game, worker ticks off', s.ok, s.detail);
 		await host.hide();
-		const [, ff] = await tObserve([host, friend], 75, tPlay(friend));
+		const [, ff] = await tObserve([host, friend], 70, tPlay(friend));
 		const first = tFirst(ff, /waiting for/i);
-		const lobbyMsg = friend.allLogs.filter((l) => /showing the problem to the player|Could not reconnect|background|too long/i.test(l));
+		const lobbyMsg = friend.allLogs.filter((l) => /Netplay failure: HOST_CLOSED .The host.s tab stayed in the background/.test(l));
 		const told = tFirst(ff, /background|too long|gave up|did not come back|closed|lost/i);
-		check('T4b', 'the friend is not frozen forever: it sees a "waiting for NAME" notice at once (within 4 s) and is told clearly within 70 s that the host did not come back (a message, back to the menu)', first !== null && first <= 4 && (told !== null || lobbyMsg.length > 0), `waiting after ${first} s; clear message after ${told} s: "${ff.find((x) => /background|too long|gave up|did not come back|closed|lost/i.test(x.banner))?.banner ?? ''}"; ${lobbyMsg.slice(-3).join(' | ')}`);
+		check('T4b', 'the friend is not frozen forever: it sees a "waiting for NAME" notice at once (within 4 s) and is told clearly within 70 s of the host going hidden (the failure message of the game names the background tab; the host tab is still hidden)', first !== null && first <= 4 && lobbyMsg.length > 0, `waiting after ${first} s; clear message after ${told} s: "${ff.find((x) => /background|too long|gave up|did not come back|closed|lost/i.test(x.banner))?.banner ?? ''}"; ${lobbyMsg.slice(-3).join(' | ')}`);
 		await shot(friend, 'T4_friend_told');
 		await host.show();
 		fs.writeFileSync(path.join(logDir, 'web_net_T4_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|Lobby|tab|EXC/i.test(l)).join('\n')}\n`);
+	} finally { await h.close(); }
+}
+
+// ---- T5: the same with the direct (WebRTC) connection on: the hidden tab's data channel is driven by a main-thread timer that the browser slows down ----
+async function sessionT5(relay) {
+	console.log('--- session T5: a hidden tab with a direct (peer to peer) connection');
+	const s = await tSetup(relay, { seed: 0x66, basePort: 9486, p2p: true });
+	const { h, host, friend } = s;
+	try {
+		await drive(host, [friend], 6);
+		const pre = await p2pLines(host, friend);
+		check('T5a', 'two browsers are in a running game and both report the direct connection as the transport (online log: transport p2p)', s.ok && pre.host?.transport === 'p2p' && pre.friend?.transport === 'p2p', `${s.detail}; ${JSON.stringify(pre)}`);
+		await drive(host, [friend], 4);
+		const infoBefore = await p2pLines(host, friend);
+		await friend.hide();
+		const [oh, of] = await tObserve([host, friend], 25, tPlay(host));
+		const lines = await p2pLines(host, friend);
+		check('T5b', 'the hidden friend keeps playing with the direct connection on (45 frames per second or more, the host never waits more than 2 s)', tRate(of) >= 45 && tStall(oh) <= 2 && tStall(of) <= 2, `hidden friend ${tRate(of).toFixed(1)} frames/s, host ${tRate(oh).toFixed(1)} frames/s; transport before the hiding ${JSON.stringify(infoBefore.friend?.transport)}, at its end host ${lines.host?.transport} friend ${lines.friend?.transport}`);
+		await friend.show();
+		const sync = await tSync(host, friend);
+		check('T5c', 'after the return both games are in sync (repairs 0), whichever path the game took meanwhile', sync.ok, `${sync.why}; transport now: host ${(await p2pLines(host, friend)).host?.transport}, friend ${(await p2pLines(host, friend)).friend?.transport}`);
 	} finally { await h.close(); }
 }
 
@@ -1483,6 +1505,7 @@ try {
 	if (only.includes('T') || only.includes('T2')) await sessionT2(relay);
 	if (only.includes('T') || only.includes('T3')) await sessionT3(relay);
 	if (only.includes('T') || only.includes('T4')) await sessionT4(relay);
+	if (only.includes('T') || only.includes('T5')) await sessionT5(relay);
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}
