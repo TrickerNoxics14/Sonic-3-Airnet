@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import * as P from '../protocol.mjs';
+import { RelayCore } from '../relay_core.mjs';
 import { startRelay, UdpPeer, WsPeer, registerHost, joinFriend, rawRequest, sleep, LOBBY, KEY, SECRET } from './helpers.mjs';
 
 const payload = (text) => Buffer.from(text, 'latin1');
@@ -511,4 +512,82 @@ test('signalling: an unknown signalling type from a client that never joined is 
 	const host = await UdpPeer.create(r.udpPort);
 	t.after(() => host.close());
 	assert.ok(await registerHost(host));
+});
+
+// ---- signalling hardening: lobby isolation and no addresses ----
+test('signalling: stays inside its lobby (two lobbies, both with a friend number 1): nothing crosses over', async (t) => {
+	const r = await startRelay();
+	t.after(() => r.stop());
+	const h1 = await UdpPeer.create(r.udpPort), h2 = await WsPeer.create(r.port);
+	const f1 = await WsPeer.create(r.port), f2 = await UdpPeer.create(r.udpPort);
+	t.after(() => { h1.close(); h2.close(); f1.close(); f2.close(); });
+	const L2 = 0x99aa99aa99aa99aan, K2 = 0x1111222233334444n, S2 = 0x5555666677778888n;
+	const t1 = await registerHost(h1), t2 = await registerHost(h2, L2, K2, S2);
+	const j1 = await joinFriend(f1), j2 = await joinFriend(f2, L2, K2);
+	assert.ok(t1 && t2 && j1?.token && j2?.token);
+
+	f1.send(P.buildClientData(P.Type.SIGNAL_C2R, j1.token, payload('from lobby 1')));
+	const got1 = await h1.nextOfType(P.Type.SIGNAL_R2H);
+	assert.equal(got1.subarray(P.HEADER_SIZE + 6).toString('latin1'), 'from lobby 1');
+	assert.ok(await h2.silent(250), 'the host of the other lobby heard nothing');
+
+	// the host of lobby 2 addressing "friend 1" reaches only its own friend 1, and a token of lobby 1 means nothing to it
+	h2.send(P.buildHostData(P.Type.SIGNAL_H2R, t2, 1, payload('to lobby 2')));
+	const got2 = await f2.nextOfType(P.Type.SIGNAL_R2C);
+	assert.equal(got2.subarray(P.HEADER_SIZE + 4).toString('latin1'), 'to lobby 2');
+	f2.send(P.buildClientData(P.Type.SIGNAL_C2R, j2.token, payload('from lobby 2')));
+	assert.equal((await h2.nextOfType(P.Type.SIGNAL_R2H))?.subarray(P.HEADER_SIZE + 6).toString('latin1'), 'from lobby 2');
+	assert.ok(await h1.silent(150), 'and the host of lobby 1 did not hear it');
+	h2.send(P.buildHostData(P.Type.SIGNAL_H2R, t1, 1, payload('wrong lobby token')));
+	f1.send(P.buildClientData(P.Type.SIGNAL_C2R, j2.token, payload('token of another lobby')));
+	assert.ok(await f1.silent(250) && await h1.silent(100) && await h2.silent(100) && await f2.silent(100));
+	assert.equal(r.relay.core.stats.signals, 3);
+});
+
+test('signalling: a friend that left or moved to another lobby cannot signal into the old one', async (t) => {
+	const r = await startRelay();
+	t.after(() => r.stop());
+	const h1 = await UdpPeer.create(r.udpPort), h2 = await UdpPeer.create(r.udpPort), f = await WsPeer.create(r.port);
+	t.after(() => { h1.close(); h2.close(); f.close(); });
+	const L2 = 0x99aa99aa99aa99aan, K2 = 0x1111222233334444n, S2 = 0x5555666677778888n;
+	await registerHost(h1); await registerHost(h2, L2, K2, S2);
+	const old = await joinFriend(f);
+	const moved = await joinFriend(f, L2, K2);                       // same connection joins lobby 2: it is no longer a friend of lobby 1
+	f.send(P.buildClientData(P.Type.SIGNAL_C2R, old.token, payload('old token')));
+	assert.ok(await h1.silent(250) && await h2.silent(100), 'the old token is dead');
+	f.send(P.buildClientData(P.Type.SIGNAL_C2R, moved.token, payload('new token')));
+	assert.ok(await h2.nextOfType(P.Type.SIGNAL_R2H));
+	assert.ok(await h1.silent(150));
+});
+
+test('signalling: no datagram the relay sends ever contains an address (checked with non-loopback addresses), and non-members get no reply at all', () => {
+	const sent = [];                                                  // [endpoint, buffer]
+	const core = new RelayCore((to, buf) => sent.push([to, Buffer.from(buf)]));
+	const hostIP = '203.0.113.7', friendIP = '198.51.100.23', outsiderIP = '192.0.2.99';
+	const now = 100;
+	core.onDatagram('ws:host', hostIP, P.buildHostHello(LOBBY, KEY, SECRET), now);
+	const hostToken = sent.shift()[1].readUInt32BE(P.HEADER_SIZE + 8);
+	core.onDatagram('ws:friend', friendIP, P.buildHello(P.Type.CLIENT_JOIN, LOBBY, KEY), now);
+	const friendToken = sent.shift()[1].readUInt32BE(P.HEADER_SIZE);
+	core.onDatagram('ws:friend', friendIP, P.buildClientData(P.Type.SIGNAL_C2R, friendToken, payload('offer')), now);
+	core.onDatagram('ws:host', hostIP, P.buildHostData(P.Type.SIGNAL_H2R, hostToken, 1, payload('answer')), now);
+	assert.deepEqual(sent.map(([to]) => to), ['ws:host', 'ws:friend'], 'exactly one message to each member');
+	// an outsider tries everything: guessed tokens, host messages, a signalling flood
+	const before = sent.length;
+	for (let i = 0; i < 100; ++i) {
+		core.onDatagram('ws:outsider', outsiderIP, P.buildClientData(P.Type.SIGNAL_C2R, friendToken, payload('x')), now);
+		core.onDatagram('ws:outsider', outsiderIP, P.buildHostData(P.Type.SIGNAL_H2R, hostToken, 1, payload('x')), now);
+		core.onDatagram('ws:outsider', outsiderIP, P.buildClientData(P.Type.SIGNAL_C2R, i, payload('x')), now);
+	}
+	assert.equal(sent.length, before, 'the relay says nothing to a non-member, not even an error');
+	for (const [to, buf] of sent) {
+		assert.ok(to.startsWith('ws:'));
+		for (const ip of [hostIP, friendIP, outsiderIP]) {
+			assert.equal(buf.includes(Buffer.from(ip)), false, `text of ${ip}`);
+			assert.equal(buf.includes(Buffer.from(ip.split('.').map(Number))), false, `bytes of ${ip}`);
+		}
+	}
+	// the friend's number and the host token are the only identity a member gets about the other one
+	assert.equal(sent[0][1].length, P.HEADER_SIZE + 6 + 5);
+	assert.equal(sent[1][1].length, P.HEADER_SIZE + 4 + 6);
 });
