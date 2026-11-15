@@ -10,7 +10,7 @@
 //              P3 the host cannot do it (old client / Windows game), P4 the channel dies during the game (closed, silent, one-way, long)
 //              P5 the path is blocked at the start and again in the middle of the game, and the game returns to the channel each time it opens up (relay idle again)
 //            L the public lobby in the browser menus: L1 list + quick join + play in sync, L2 6 digit number (keyboard and number pad) and private lobby, L3 wrong codes and lockout,
-//              L4 server asleep (waking message, retries) , L5 server down, L6 old page vs new page (reload message), L7 a server without a lobby list
+//              L4 server asleep (waking message, retries) , L5 server down, L6 old page vs new page (reload message), L7 a server without a lobby list, L8 the host leaves / closes the tab / freezes
 //            N a Windows game and a browser in one lobby (both ways round)
 // Everything it starts (relay, web server, browsers, game) is stopped at the end; the ROM is only served from where the game keeps it, to 127.0.0.1.
 import fs from 'node:fs';
@@ -965,11 +965,13 @@ async function sessionL4() {
 }
 
 async function sessionL5() {
-	console.log('--- session L5: the server stays down');
+	console.log('--- session L5: the server stays down for longer than the waking window; every new request gets its own full window');
+	const port = await freePort();
 	const h = await startHarness({ webDir, instances: 1, basePort: 9436 });
+	let R = null;
 	try {
 		const [b] = h.instances;
-		await bootPage(b, h.baseURL, '?relay=ws://127.0.0.1:9&p2p=off');
+		await bootPage(b, h.baseURL, relayQuery(port));
 		await b.toLobby();
 		b.forgetLogs();
 		const t0 = Date.now();
@@ -980,7 +982,7 @@ async function sessionL5() {
 		await sleep(600);
 		await shot(b, 'L_server_down');
 		await shotSizes(b, 'server_down', [[360, 640, '_phone']]);
-		b.forgetLogs();
+		b.forgetLogs();		// (kept from here on: the waking line of the next window must show up in it)
 		await b.key('Down');		// the menu is not broken: PUBLIC LOBBIES, then back
 		await b.key('Up');
 		await b.key('Return');
@@ -989,14 +991,32 @@ async function sessionL5() {
 		await shot(b, 'L_list_down');
 		await b.key('Escape');
 		const back = await b.waitLog(/Lobby: screen START/, 8000);
+
+		// A NEW request after the first window has run out gets a full window of its own (it used to fail at once: the window was counted from the start of the menu, not from the request)
 		await b.keys(['Down', 'Down', 'Down', 'Return'], 500);
 		const join = await b.waitLog(/Lobby: screen JOIN/, 8000);
 		await b.type('123456');
-		b.forgetLogs();
+		const t1 = Date.now();
 		await b.key('Return');
+		const waking2 = await b.waitLog(/Lobby: waking the server/, 15000);
+		await sleep(15000);
+		const early = b.hasLog(/Lobby: the lookup ended/);
 		const joinEnd = await b.waitLog(/Lobby: the lookup ended: The lobby server does not answer/, 90000);
-		check('L5b', 'with the server down the menu stays usable (list opens with a clear text, back works, the code screen opens and a code lookup ends with the same clear message)', list && back && join && joinEnd, `${!!list} ${!!back} ${!!join} ${joinEnd ?? 'no end'}`);
-	} finally { await h.close(); }
+		const seconds2 = (Date.now() - t1) / 1000;
+		check('L5b', 'with the server down the menu stays usable (list opens with a clear text, back works, the code screen opens); a code lookup made after the first window says "waking the server" again, is still waiting after 15 s, and ends with the clear message after about another minute (50..75 s)', list && back && join && waking2 && !early && joinEnd && seconds2 > 50 && seconds2 < 75, `${!!list} ${!!back} ${!!join} ${waking2 ?? 'no waking'} early=${early} ${joinEnd ?? 'no end'} after ${Math.round(seconds2)} s`);
+
+		// and a later request succeeds when the server wakes up inside its window
+		await b.key('Escape');
+		await b.waitLog(/Lobby: screen START/, 8000);
+		b.forgetLogs();
+		const t2 = Date.now();
+		await b.keys(['Down', 'Down', 'Return'], 500);		// QUICK JOIN again (the first entry is RETRY after the failed lookup)
+		await b.waitLog(/Lobby: waking the server/, 15000);
+		await sleep(12000);
+		R = await startLobbyRelay({ port });
+		const ok = await b.waitLog(/Lobby: the lookup ended: There is no open lobby/, 45000);
+		check('L5c', 'a third request, made when the server has been down for minutes, waits again and succeeds when the server comes up inside its window (answered by itself, no key pressed)', ok && R.core.directory.stats.listRequests >= 1, `${ok ?? 'no answer'} after ${Math.round((Date.now() - t2) / 1000)} s; ${b.allLogs.filter((l) => /Lobby: (the lookup|waking|the server)/.test(l)).slice(-4).join(' | ')}`);
+	} finally { await h.close(); if (R) await R.stop(); }
 }
 
 async function sessionL6() {
@@ -1129,6 +1149,104 @@ async function sessionL7() {
 	} finally { await h.close(); await R.stop(); }
 }
 
+/** Host opens a public lobby, the friend joins it by QUICK JOIN. Both pages must already be in the main menu. Returns the listing. */
+async function openAndQuickJoin(host, friend, R) {
+	await host.toLobby();
+	host.forgetLogs();
+	await host.createLobby();
+	await host.waitLog(/Lobby: screen HOSTING/, 10000);
+	const entry = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
+	await friend.toLobby();
+	friend.forgetLogs();
+	await friend.keys(['Down', 'Return'], 500);
+	const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+	await sleep(2000);
+	return proved ? entry : null;
+}
+
+async function sessionL8() {
+	console.log('--- session L8: the host goes away (Leave Lobby, tab closed, page frozen): the listing goes, the joiner is told');
+	const h = await startHarness({ webDir, instances: 2, basePort: 9448 });
+	let R = null;
+	try {
+		const [host, friend] = h.instances;
+		// ---- (a1) the host leaves while B only looks at the list: the list refreshes to nothing
+		R = await startLobbyRelay();
+		await Promise.all([bootPage(host, h.baseURL, relayQuery(R.ports.port)), bootPage(friend, h.baseURL, relayQuery(R.ports.port))]);
+		await host.toLobby();
+		host.forgetLogs();
+		await host.createLobby();
+		await host.waitLog(/Lobby: screen HOSTING/, 10000);
+		await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.key('Return');		// PUBLIC LOBBIES
+		await friend.waitLog(/Lobby: screen LIST/, 8000);
+		const seen = await friend.waitLog(/Lobby: the list shows 1 public lobby/, 15000);
+		host.forgetLogs();
+		const tLeave = Date.now();
+		await host.key('Up');		// from START GAME round to LEAVE LOBBY
+		await host.key('Return');
+		const left = await host.waitLog(/Lobby: screen START/, 8000);
+		const gone = await waitFor(() => R.entries().length === 0, 10000, 200);
+		const goneSeconds = (Date.now() - tLeave) / 1000;
+		friend.forgetLogs();
+		const empty = await friend.waitLog(/Lobby: the list shows 0 public lobbies/, 20000);
+		check('L8a', 'the host leaves with LEAVE LOBBY: the server\'s listing is gone at once, and the list on B\'s screen refreshes to 0 lobbies by itself (its refresh is every 8 s)', seen && left && gone && empty, `listing gone after ${goneSeconds.toFixed(1)} s; ${empty ?? 'list did not refresh'}`);
+		await shot(friend, 'L_list_after_leave');
+		await R.stop(); R = null;
+
+		// ---- (a2) the host leaves while B is in the lobby
+		R = await startLobbyRelay();
+		await Promise.all([bootPage(host, h.baseURL, relayQuery(R.ports.port)), bootPage(friend, h.baseURL, relayQuery(R.ports.port))]);
+		const entry = await openAndQuickJoin(host, friend, R);
+		friend.forgetLogs();
+		const t1 = Date.now();
+		await host.key('Up');
+		await host.key('Return');
+		const gone2 = await waitFor(() => R.entries().length === 0, 10000, 200);
+		const told = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 90000);
+		await sleep(800);
+		const msg = lobbyMenuMessage(friend);
+		check('L8b', 'the host leaves while B is in its lobby: the listing is gone and B is told within 15 s that the host closed the lobby (the host says goodbye to the relay connection before it is closed), not after a timeout of more than a minute', entry && gone2 && told && (Date.now() - t1) / 1000 < 15 && /The host closed the lobby or stopped answering/.test(msg), `${Math.round((Date.now() - t1) / 1000)} s until told; ${msg}; gone2=${!!gone2}; friend: ${friend.allLogs.filter((l) => /Netplay|Lobby/.test(l)).slice(-6).join(" | ")}`);
+		await shot(friend, 'L_host_left_message');
+		friend.forgetLogs();
+		await friend.keys(['Down', 'Return'], 400);		// (the first entry is RETRY, then PUBLIC LOBBIES)
+		check('L8b2', 'B is back on the first screen and can open PUBLIC LOBBIES', !!(await friend.waitLog(/Lobby: screen LIST/, 8000)));
+		await R.stop(); R = null;
+
+		// ---- (b) the host closes the tab (the page is gone: its WebSocket closes)
+		R = await startLobbyRelay();
+		await Promise.all([bootPage(host, h.baseURL, relayQuery(R.ports.port)), bootPage(friend, h.baseURL, relayQuery(R.ports.port))]);
+		const entry3 = await openAndQuickJoin(host, friend, R);
+		friend.forgetLogs();
+		const t2 = Date.now();
+		await host.navigate('about:blank');
+		const gone3 = await waitFor(() => R.entries().length === 0, 60000, 500);
+		const goneSeconds3 = (Date.now() - t2) / 1000;
+		const told3 = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 90000);
+		await sleep(800);
+		check('L8c', 'the host closes its tab: the listing is gone (the relay drops a host whose WebSocket closed) and B is told the host closed the lobby', entry3 && gone3 && told3 && /The host closed the lobby or stopped answering/.test(lobbyMenuMessage(friend)), `listing gone after ${goneSeconds3.toFixed(1)} s; B told after ${Math.round((Date.now() - t2) / 1000)} s; ${lobbyMenuMessage(friend)}`);
+		await R.stop(); R = null;
+
+		// ---- (c) the host's page freezes or its network dies without a close (the WebSocket stays open, nothing is published or answered): the listing runs out, B is told.
+		// The server's listing expiry is 20 s by default (the game publishes every 5 s); the test shortens it to 6 s so that the check is quick. The relay also drops a host that is silent.
+		R = await startLobbyRelay({ limits: { listingTimeoutSeconds: 6 } });
+		await Promise.all([bootPage(host, h.baseURL, relayQuery(R.ports.port)), bootPage(friend, h.baseURL, relayQuery(R.ports.port))]);
+		const entry4 = await openAndQuickJoin(host, friend, R);
+		friend.forgetLogs();
+		const t3 = Date.now();
+		await host.send('Debugger.enable');
+		await host.send('Debugger.pause');		// the host's JavaScript stops: no more publishing, no answers
+		const gone4 = await waitFor(() => R.entries().length === 0, 60000, 500);
+		const goneSeconds4 = (Date.now() - t3) / 1000;
+		const told4 = await friend.waitLog(/Lobby: showing the problem to the player \((HOST_CLOSED|CONNECTION_LOST)\)/, 120000);
+		await sleep(800);
+		check('L8d', 'the host freezes without closing (no publishing, no answers): the listing runs out after the expiry (6 s in this test, 20 s by default) and B is not frozen forever: it gets a clear message', entry4 && gone4 && goneSeconds4 < 30 && told4 && lobbyMenuMessage(friend) !== '', `listing gone after ${goneSeconds4.toFixed(1)} s; ${told4 ?? 'B never told'} after ${Math.round((Date.now() - t3) / 1000)} s; ${lobbyMenuMessage(friend)}`);
+		await shot(friend, 'L_host_frozen_message');
+	} finally { await h.close(); if (R) await R.stop(); }
+}
+
 let exitCode = 0;
 const relay ={ relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
@@ -1142,7 +1260,7 @@ try {
 	if (only.includes('P') || only.includes('P4')) await sessionP4(relay);
 	if (only.includes('P') || only.includes('P5')) await sessionP5(relay);
 	if (only.includes('P') || only.includes('P6')) await sessionP6(relay);
-	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7]]) if (only.includes('L') || only.includes(id)) await fn();
+	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7], ['L8', sessionL8]]) if (only.includes('L') || only.includes(id)) await fn();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

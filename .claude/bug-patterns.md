@@ -628,3 +628,23 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `git grep -n 'mRelayRejoinCount\|mDirectRejoinSeen' ; git grep -n 'closePeer(' `
 - Siblings: Sockets.cpp updateDirect rejoin handler fixed (kept, now idempotent; the close happens at the moment the new place is learned) · host side stale direct peer of the old friend number not a bug (closes by itself when the friend closes its pc; relay drops data to a gone pipe)
 - Guard: web_net session P6 (relay WebSockets dropped during direct play, friend frames must advance)
+
+## 2026-11-15 · patience-clock-anchored-to-start-not-request · c++ (shared netcore)
+- Seed: oxygen_netcore/network/LobbyDirectory.h isWaitingForServer / mSecondsNotReady - the 60 s "server may be asleep" window counted from the start of the directory (or the last answer), not from the player's request. After one window ran out, every later quick join / code lookup failed at once with "does not answer".
+- Broken assumption: "the time since the connection started" is the same thing as "how long this request has waited".
+- Evidence: session L5 (first version) against a closed port: the second lookup ended after 30 s of the test's own sleeps with no waking state (red before the fix); after the fix the second lookup takes 60 s and shows waking again.
+- Fix: `restartPatience()` called by requestList (player requests only; the menu's own 8 s refresh passes userRequest=false, or a server that stays down would never be given up on), requestResolve, startPublishing and NetplayManager::startPublishingLobby.
+- Search: `rg -n "mSecondsNotReady|isWaitingForServer|restartPatience" sonic3air_online_stable_source` and every caller of requestList/requestResolve/startPublishing.
+- Siblings: requestList | fixed | requestResolve | fixed | startPublishing (and the host's startPublishingLobby) | fixed | LobbyMenu auto refresh | deliberately not restarting
+- Guard: core tests "a request of the player restarts the patience clock" (+ the refresh and list variants); web_net L5a-L5c (the second lookup must take 50..75 s and show waking, the third must succeed when the relay starts inside its window).
+- Lesson: a timeout that belongs to a request must be started by the request.
+
+## 2026-11-15 · goodbye-sent-after-transport-stopped · c++ (netplay)
+- Seed: NetplayManager::closeConnections stopped the relay (browser: closed the WebSocket) and only then deleted the host and client, whose destructors send the "I am leaving" packet. In relay mode the goodbye never left: a friend learned that the host had left only after about 72 s (10 s silence, 40 s rejoin attempts), instead of at once.
+- Broken assumption: the destructor can still send, whatever was torn down before it.
+- Evidence: web_net L8 (first run): host presses LEAVE LOBBY, the listing was gone in 0.2 s but the joiner got HOST_CLOSED only after 72 s; after reordering, 1 s.
+- Fix: delete host and client first, then stop the relay (same function). The friend leaving gets the same benefit (the host sees it at once).
+- Search: `rg -n "stopRelay\(\)|SAFE_DELETE\(mNetplay" sonic3air_online_stable_source/Oxygen/oxygenengine/source` (only closeConnections tears both down).
+- Siblings: LobbyDirectory::stop (own socket, nothing to say goodbye with) | not a bug; closing a browser tab has no goodbye at all (a page cannot send while it is unloading a WebSocket reliably): the joiner is told after about 72 s by the existing rejoin timeout | by design, reported.
+- Guard: web_net L8b (joiner told within 15 s after LEAVE LOBBY).
+- Lesson: teardown order matters when the objects being destroyed still need the connection to say goodbye.
