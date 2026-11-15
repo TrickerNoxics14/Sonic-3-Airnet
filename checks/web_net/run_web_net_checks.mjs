@@ -145,7 +145,7 @@ async function sessionA(relay) {
 		const r = await hostAndJoin(host, [friend], query, code);
 		check('A2', 'the host opens a lobby (relay knows it) and shows the screen', r.hosted && r.known);
 		check('A3', 'the friend joins with the lobby code through the relay (code proof both ways, player slot 2)', r.joined[0]);
-		check('A3b', 'the relay holds one lobby and one friend, both browsers connected by WebSocket', relay.relay.core.stats.lobbies === 1 && relay.relay.core.stats.pipes === 1 && relay.relay.wsConnections.size === 2, JSON.stringify(relay.relay.core.stats));
+		check('A3b', 'the relay holds one lobby and one friend, both browsers connected by WebSocket (the game, and the lobby directory while the menu is open)', relay.relay.core.stats.lobbies === 1 && relay.relay.core.stats.pipes === 1 && relay.relay.wsConnections.size >= 2 && relay.relay.wsConnections.size <= 4, JSON.stringify(relay.relay.core.stats) + ' websockets: ' + relay.relay.wsConnections.size);		// (each browser has one for the game and, while its menu is open, one for the lobby directory)
 		const loaded = await startNormalGame(host, [friend]);
 		check('A4', 'the host starts a new game and the friend loads the game state (wasm to wasm)', loaded[0]);
 		const play = await playAndMeasure(host, [friend], 25, 'A5');
@@ -168,7 +168,7 @@ async function sessionA(relay) {
 		check('A6b', 'the friend notices that its place at the relay is new and starts the connection to the host again, which puts it back into its slot', reconnecting && slotBack, `${reconnecting ?? ''} | ${slotBack ? 'slot back' : 'no slot message'}`);
 		await sleep(12000);
 		const after = { host: parseOnlineLog(await host.onlineLog()).pop(), friend: parseOnlineLog(await friend.onlineLog()).pop() };
-		check('A6c', 'the game runs again on both sides after the drop (frames advanced by more than 600) and the friend is back in sync', after.host && after.friend && after.host.frame > before.host + 600 && after.friend.frame > before.friend + 300 && after.friend.syncOk >= after.friend.frame - 360, `host frame ${before.host} -> ${after.host?.frame}; friend frame ${before.friend} -> ${after.friend?.frame}, last sync ok ${after.friend?.syncOk}, repairs ${after.friend?.repairs}`);
+		check('A6c', 'the game runs again on both sides after the drop (frames advanced by more than 300; the online log is written every 5 s, so the last sample is up to 300 frames behind) and the friend is back in sync', after.host && after.friend && after.host.frame > before.host + 300 && after.friend.frame > before.friend + 300 && after.friend.syncOk >= after.friend.frame - 360, `host frame ${before.host} -> ${after.host?.frame}; friend frame ${before.friend} -> ${after.friend?.frame}, last sync ok ${after.friend?.syncOk}, repairs ${after.friend?.repairs}`);
 		await shot(host, 'A6_host'); await shot(friend, 'A6_friend');
 
 		// ---- A7: only the host's WebSocket drops: the lobby stays at the relay, the host registers again with its secret, the friend's connection survives

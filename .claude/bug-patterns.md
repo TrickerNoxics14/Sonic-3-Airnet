@@ -593,3 +593,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -rn "setMaxPlayers\|mMaxClients" sonic3air_online_stable_source/Oxygen`
 - Siblings: none (only the menu calls setMaxPlayers)
 - Guard: stage X6/X7 (full lobby, retry) in run_online_backend_checks.ps1
+
+## 2026-11-15 · threshold-inside-sampling-noise · js
+- Seed: checks/web_net/run_web_net_checks.mjs A6c required the host to advance more than 600 frames between two samples of an online log that is written every 5 s (up to 300 frames of noise); it failed twice with +581 although sync and repairs were fine
+- Broken assumption: the last log line is the current frame
+- Search: `grep -n "frame >" checks/web_net/run_web_net_checks.mjs`
+- Siblings: the friend side of the same check already used +300; A5/B2 compare repairs and sync, not frame counts
+- Guard: threshold now +300 with the reason written next to it

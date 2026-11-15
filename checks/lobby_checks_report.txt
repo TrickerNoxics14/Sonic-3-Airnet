@@ -1,13 +1,29 @@
-﻿Sonic 3 AirNet lobby checks (stage P) - 2026-11-15 03:36 
+﻿Sonic 3 AirNet lobby checks (stage P) - 2026-11-15 04:29 
 PASS  P0   The lobby server program starts and answers on 127.0.0.1  -- listed lobbies: 0
+PASS  P1a  The host opens a public lobby and the lobby server gives it a 6 digit code  -- code: received
+PASS  P1b  The list shows the lobby with its name, host name and player count  -- name=Check Lobby host=Hosty players=1/4
+PASS  P1c  QUICK JOIN picks the lobby from the list and the lobby server looks it up
+PASS  P1d  The friend gets into the host lobby through the lobby server and proves the code
+PASS  P1e  The list shows 2 of 4 players after the friend joined  -- players=2
+PASS  P1f  Both play the level together through the lobby server relay, with no repair needed (hash checks stay in sync)  -- friend lines in game: 8, repairs: 0, last frame 2386, last sync ok at frame 2340, relay: True
+PASS  P1g  While they play, the list shows the lobby as already playing  -- flags=1
+PASS  P1h  A lobby whose host vanished without a word disappears from the list by itself  -- gone after about 16 s (limit 20 s of silence)
+PASS  P2a  The private lobby has a code but is not in the public list  -- code: received, listed: 0
+PASS  P2b  The lobby server resolves the code, and answers with nothing about the host address  -- {"status":0,"sessionID":"815839954625","players":1,"max":4,"flags":0}
+PASS  P2c  A friend types the 6 digit code and joins the private lobby
 PASS  P3a  A lobby code that does not exist ends in "no lobby with this code" within seconds
 PASS  P3b  A long code with a wrong check digit is refused at once, nothing is sent
 PASS  P3c  A code of the wrong length is refused at once with the rule
 PASS  P4a  Quick join without a lobby server says that none is set (no hang, back on the first screen)
 PASS  P4b  The game stayed alive and responsive through all of it
+PASS  P5a  With the lobby server down the game reports it as not reachable
+PASS  P5b  Quick join tells the player that the server does not answer, within 30 seconds
+PASS  P5c  The game keeps running (no hang, no crash)
 PASS  P6a  The list holds three lobbies: the real one and the two fakes  -- Other Version(2/4), Open Room(1/3), Already Playing(3/4)
 PASS  P6b  Quick join skips the other version and the running game and picks "Open Room"
 PASS  P6c  It gets into that lobby
+PASS  P7a  All screens of the menu were opened and photographed  -- P-P7-*.png in checks\last_logs
+PASS  P7b  Typing on the code screen keeps the digits and ignores letters (48a2b916 gives 6 digits)
 PASS  P8   The player save files (storage folder) are untouched: same content and same time stamps as before the run  --  3 files checked
 
-Result: 10 of 10 passed.
+Result: 26 of 26 passed.
