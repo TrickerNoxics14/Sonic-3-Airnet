@@ -1151,16 +1151,19 @@ async function sessionL7() {
 
 /** Host opens a public lobby, the friend joins it by QUICK JOIN. Both pages must already be in the main menu. Returns the listing. */
 async function openAndQuickJoin(host, friend, R) {
-	await host.toLobby();
 	host.forgetLogs();
+	const toLobbyOk = await host.toLobby();
 	await host.createLobby();
-	await host.waitLog(/Lobby: screen HOSTING/, 10000);
+	const hosted = await host.waitLog(/Lobby: screen HOSTING/, 10000);
 	const entry = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
-	await friend.toLobby();
+	const hostTail = host.allLogs.slice(-14).join(' | ');
+	const friendLobbyOk = await friend.toLobby();
 	friend.forgetLogs();
 	await friend.keys(['Down', 'Return'], 500);
 	const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
 	await sleep(2000);
+	// what happened during the setup, for a failing run (a failure to set up is not a failure of the case that follows, and must be told apart from it)
+	openAndQuickJoin.last = { hostToLobby: toLobbyOk, hostScreen: !!hosted, listed: !!entry, friendToLobby: friendLobbyOk, friendJoined: !!proved, hostTail, friendTail: friend.allLogs.slice(-10).join(' | '), relay: JSON.stringify(R.core.stats), lobbies: R.core.lobbies.size };
 	return proved ? entry : null;
 }
 
@@ -1204,11 +1207,12 @@ async function sessionL8() {
 		const t1 = Date.now();
 		await host.key('Up');
 		await host.key('Return');
+		const hostLeftB = await host.waitLog(/Lobby: screen START/, 8000);
 		const gone2 = await waitFor(() => R.entries().length === 0, 10000, 200);
 		const told = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 90000);
 		await sleep(800);
 		const msg = lobbyMenuMessage(friend);
-		check('L8b', 'the host leaves while B is in its lobby: the listing is gone and B is told within 15 s that the host closed the lobby (the host says goodbye to the relay connection before it is closed), not after a timeout of more than a minute', entry && gone2 && told && (Date.now() - t1) / 1000 < 15 && /The host closed the lobby or stopped answering/.test(msg), `${Math.round((Date.now() - t1) / 1000)} s until told; ${msg}; gone2=${!!gone2}; friend: ${friend.allLogs.filter((l) => /Netplay|Lobby/.test(l)).slice(-6).join(" | ")}`);
+		check('L8b', 'the host leaves while B is in its lobby: the listing is gone and B is told within 15 s that the host closed the lobby (the host says goodbye to the relay connection before it is closed), not after a timeout of more than a minute', entry && gone2 && told && (Date.now() - t1) / 1000 < 15 && /The host closed the lobby or stopped answering/.test(msg), `${Math.round((Date.now() - t1) / 1000)} s until told; ${msg}; gone2=${!!gone2}; hostLeft=${!!hostLeftB}; setup=${JSON.stringify(openAndQuickJoin.last)}; friend: ${friend.allLogs.filter((l) => /Netplay|Lobby/.test(l)).slice(-6).join(" | ")}`);
 		await shot(friend, 'L_host_left_message');
 		friend.forgetLogs();
 		await friend.keys(['Down', 'Return'], 400);		// (the first entry is RETRY, then PUBLIC LOBBIES)
@@ -1226,7 +1230,7 @@ async function sessionL8() {
 		const goneSeconds3 = (Date.now() - t2) / 1000;
 		const told3 = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 90000);
 		await sleep(800);
-		check('L8c', 'the host closes its tab: the listing is gone (the relay drops a host whose WebSocket closed) and B is told the host closed the lobby', entry3 && gone3 && told3 && /The host closed the lobby or stopped answering/.test(lobbyMenuMessage(friend)), `listing gone after ${goneSeconds3.toFixed(1)} s; B told after ${Math.round((Date.now() - t2) / 1000)} s; ${lobbyMenuMessage(friend)}`);
+		check('L8c', 'the host closes its tab: the listing is gone (the relay drops a host whose WebSocket closed) and B is told the host closed the lobby', entry3 && gone3 && told3 && (Date.now() - t2) / 1000 < 85 && /The host closed the lobby or stopped answering/.test(lobbyMenuMessage(friend)), `listing gone after ${goneSeconds3.toFixed(1)} s; B told after ${Math.round((Date.now() - t2) / 1000)} s; ${lobbyMenuMessage(friend)}`);
 		await R.stop(); R = null;
 
 		// ---- (c) the host's page freezes or its network dies without a close (the WebSocket stays open, nothing is published or answered): the listing runs out, B is told.
@@ -1242,8 +1246,40 @@ async function sessionL8() {
 		const goneSeconds4 = (Date.now() - t3) / 1000;
 		const told4 = await friend.waitLog(/Lobby: showing the problem to the player \((HOST_CLOSED|CONNECTION_LOST)\)/, 120000);
 		await sleep(800);
-		check('L8d', 'the host freezes without closing (no publishing, no answers): the listing runs out after the expiry (6 s in this test, 20 s by default) and B is not frozen forever: it gets a clear message', entry4 && gone4 && goneSeconds4 < 30 && told4 && lobbyMenuMessage(friend) !== '', `listing gone after ${goneSeconds4.toFixed(1)} s; ${told4 ?? 'B never told'} after ${Math.round((Date.now() - t3) / 1000)} s; ${lobbyMenuMessage(friend)}`);
+		check('L8d', 'the host freezes without closing (no publishing, no answers): the listing runs out after the expiry (6 s in this test, 20 s by default) and B is not frozen forever: it gets a clear message', entry4 && gone4 && goneSeconds4 < 30 && told4 && (Date.now() - t3) / 1000 < 85 && lobbyMenuMessage(friend) !== '', `listing gone after ${goneSeconds4.toFixed(1)} s; ${told4 ?? 'B never told'} after ${Math.round((Date.now() - t3) / 1000)} s; ${lobbyMenuMessage(friend)}`);
 		await shot(friend, 'L_host_frozen_message');
+	} finally { await h.close(); if (R) await R.stop(); }
+}
+
+/** Repeats the "host leaves while the friend is in the lobby" case (L8b) many times and keeps the logs of EVERY run in checks/last_logs (never overwritten). `--repeat N` (default 10). */
+async function sessionL8R() {
+	const runs = Number(args.includes('--repeat') ? args[args.indexOf('--repeat') + 1] : 10);
+	console.log(`--- session L8R: the host leaves LEAVE LOBBY while the friend is in the lobby, ${runs} times (logs of every run kept)`);
+	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+	const file = path.join(logDir, `web_net_L8R_${stamp}.txt`);
+	const h = await startHarness({ webDir, instances: 2, basePort: 9456 });
+	let R = null;
+	try {
+		const [host, friend] = h.instances;
+		for (let n = 1; n <= runs; ++n) {
+			R = await startLobbyRelay();
+			await Promise.all([bootPage(host, h.baseURL, relayQuery(R.ports.port)), bootPage(friend, h.baseURL, relayQuery(R.ports.port))]);
+			const entry = await openAndQuickJoin(host, friend, R);
+			const statsBefore = JSON.stringify(R.core.stats);
+			friend.forgetLogs(); host.forgetLogs();
+			const t1 = Date.now();
+			await host.key('Up');
+			await host.key('Return');
+			const hostLeft = await host.waitLog(/Lobby: screen START/, 8000);
+			const gone = await waitFor(() => R.entries().length === 0, 10000, 200);
+			const told = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 100000);
+			const seconds = (Date.now() - t1) / 1000;
+			await sleep(800);
+			const detail = `run ${n}: joined=${!!entry} hostLeft=${!!hostLeft} listingGone=${!!gone} told after ${seconds.toFixed(1)} s; ${lobbyMenuMessage(friend)}${entry ? '' : ' SETUP FAILED: ' + JSON.stringify(openAndQuickJoin.last)}`;
+			fs.appendFileSync(file, `=== ${detail}\nrelay stats before ${statsBefore}\nrelay stats after ${JSON.stringify(R.core.stats)} ws=${R.server.wsConnections.size}\nHOST (last 12 lines)\n${host.allLogs.slice(-12).join('\n')}\nFRIEND (last 25 lines)\n${friend.allLogs.slice(-25).join('\n')}\n\n`);
+			check(`L8R-${n}`, 'host leaves with LEAVE LOBBY while the friend is in the lobby: the host really left, the listing is gone and the friend is told within 15 s', entry && hostLeft && gone && told && seconds < 15, `${detail} (log: ${path.basename(file)})`);
+			await R.stop(); R = null;
+		}
 	} finally { await h.close(); if (R) await R.stop(); }
 }
 
@@ -1261,6 +1297,7 @@ try {
 	if (only.includes('P') || only.includes('P5')) await sessionP5(relay);
 	if (only.includes('P') || only.includes('P6')) await sessionP6(relay);
 	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7], ['L8', sessionL8]]) if (only.includes('L') || only.includes(id)) await fn();
+	if (only.includes('L8R')) await sessionL8R();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

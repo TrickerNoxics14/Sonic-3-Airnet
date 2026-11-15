@@ -640,7 +640,7 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Lesson: a timeout that belongs to a request must be started by the request.
 
 ## 2026-11-15 · goodbye-sent-after-transport-stopped · c++ (netplay)
-- Seed: NetplayManager::closeConnections stopped the relay (browser: closed the WebSocket) and only then deleted the host and client, whose destructors send the "I am leaving" packet. In relay mode the goodbye never left: a friend learned that the host had left only after about 72 s (10 s silence, 40 s rejoin attempts), instead of at once.
+- Seed: NetplayManager::closeConnections stopped the relay (browser: closed the WebSocket) and only then deleted the host and client, whose destructors send the "I am leaving" packet. In relay mode the goodbye never left: a friend learned that the host had left only after about 72 s (the 30 s lobby timeout, then 40 s rejoin attempts), instead of at once.
 - Broken assumption: the destructor can still send, whatever was torn down before it.
 - Evidence: web_net L8 (first run): host presses LEAVE LOBBY, the listing was gone in 0.2 s but the joiner got HOST_CLOSED only after 72 s; after reordering, 1 s.
 - Fix: delete host and client first, then stop the relay (same function). The friend leaving gets the same benefit (the host sees it at once).
