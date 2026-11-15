@@ -233,6 +233,25 @@ struct LobbyLeavePacket : public highlevel::PacketBase
 };
 
 
+// "My tab is hidden" / "I am back" (browser build, see NetplayStallLogic.h). Unreliable and purely informational: a game that does not know this packet type ignores it (an unknown type
+// is dropped by the listener), so old and new games still play together, and the simulation and the game packets are unchanged. A friend sends it to the host (mSlot is ignored, the host
+// knows who sent it), the host sends it to the other friends about the player in mSlot (0 = the host itself).
+struct PlayerAwayPacket : public highlevel::PacketBase
+{
+	HIGHLEVEL_PACKET_DEFINE_PACKET_TYPE("PlayerAwayPacket");
+
+	uint8 mSlot = 0;
+	uint8 mAway = 0;		// 1 = the tab is in the background (the game of this player may stand still), 0 = back
+
+	virtual bool isReliablePacket() const override  { return false; }
+	virtual void serializeContent(VectorBinarySerializer& serializer, uint8 protocolVersion) override
+	{
+		serializer.serialize(mSlot);
+		serializer.serialize(mAway);
+	}
+};
+
+
 // Sent regularly from host to clients: fingerprint of the game state at the start of a frame, to detect when a client's game drifted away
 struct SyncCheckPacket : public highlevel::PacketBase
 {

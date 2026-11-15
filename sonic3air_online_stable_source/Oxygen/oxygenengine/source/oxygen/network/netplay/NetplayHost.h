@@ -14,6 +14,7 @@
 
 #include "oxygen/network/netplay/NetplayPackets.h"
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
+#include "oxygen/network/netplay/NetplayStallLogic.h"
 
 class ControlsIn;
 class NetplayManager;
@@ -111,6 +112,12 @@ public:
 	bool canBeginNextFrame(uint32 frameNumber);
 	void onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber);
 	bool onReceivedPacket(ReceivedPacketEvaluation& evaluation);
+
+#ifdef PLATFORM_WEB
+	// Browser build: players whose tab is in the background or who do not answer (see NetplayStallLogic.h)
+	void collectStalledPlayers(std::vector<NetplayStall::Waiting>& outWaiting, std::string& outDroppedText);		// Also drops a friend that was silent too long
+	void sendAwayState(int slot, bool away, const PlayerConnection* except = nullptr);		// Tells the friends (all but "except") about a player's tab
+#endif
 
 	uint32 getRegularInputChecksum(int& outFrameNumber) const;
 

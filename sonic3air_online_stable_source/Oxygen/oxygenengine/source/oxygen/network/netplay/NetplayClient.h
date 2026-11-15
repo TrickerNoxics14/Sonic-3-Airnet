@@ -13,6 +13,7 @@
 #include "oxygen_netcore/serverclient/NetplaySetupPackets.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
+#include "oxygen/network/netplay/NetplayStallLogic.h"
 
 class ControlsIn;
 class NetplayManager;
@@ -106,6 +107,14 @@ public:
 	void sendChat(int quickMessage, const std::string& freeText);
 	inline bool isRejoiningLobby() const  { return mLobbyRejoin; }		// The connection broke while in the lobby and is being restored
 
+#ifdef PLATFORM_WEB
+	// Browser build: a host (or another friend) whose tab is in the background or who does not answer (see NetplayStallLogic.h)
+	void collectStalledPlayers(std::vector<NetplayStall::Waiting>& outWaiting);
+	void sendAwayState(bool away);
+	float getHostSilentSeconds() const;		// 0 unless a game runs and the host is connected
+	inline bool isReconnectingToGame() const  { return mResumeSession && mState != State::GAME_RUNNING && mState != State::FAILED; }		// The connection of a running game broke and is being restored
+#endif
+
 private:
 	struct ReceivedFrame
 	{
@@ -156,6 +165,10 @@ private:
 	std::deque<ReceivedFrame> mReceivedFrames;
 	uint32 mNextFrameNumber = 0;
 	int mCurrentLatency = 0;
+#ifdef PLATFORM_WEB
+	uint32 mStarvationLastFrame = 0;		// mNextFrameNumber at the last update: no news from the host means no progress
+	float mStarvationSeconds = 0.0f;		// How long no new frame came from the host while the game runs
+#endif
 
 	uint32 mInputChecksum = 0;
 	uint32 mRegularInputChecksum = 0;

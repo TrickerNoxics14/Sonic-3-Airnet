@@ -1502,6 +1502,23 @@ bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 			return true;
 		}
 
+#ifdef PLATFORM_WEB
+		case PlayerAwayPacket::PACKET_TYPE:
+		{
+			// A friend's browser says that its tab is hidden (or back): the others are told, and the game says who is waited for
+			PlayerAwayPacket packet;
+			if (!evaluation.readPacket(packet))
+				return false;
+			PlayerConnection& connection = static_cast<PlayerConnection&>(evaluation.mConnection);
+			if (connection.mPlayerIndex >= 1 && connection.mPlayerIndex < MAX_PLAYERS)
+			{
+				mNetplayManager.onPeerAway(connection.mPlayerIndex, packet.mAway != 0);
+				sendAwayState(connection.mPlayerIndex, packet.mAway != 0, &connection);
+			}
+			return true;
+		}
+#endif
+
 		case LobbyPongPacket::PACKET_TYPE:
 		{
 			LobbyPongPacket packet;
@@ -1592,6 +1609,57 @@ bool NetplayHost::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 
 	return false;
 }
+
+#ifdef PLATFORM_WEB
+void NetplayHost::sendAwayState(int slot, bool away, const PlayerConnection* except)
+{
+	PlayerAwayPacket packet;
+	packet.mSlot = (uint8)slot;
+	packet.mAway = away ? 1 : 0;
+	for (PlayerConnection* connection : mPlayerConnections)
+	{
+		if (connection != except && connection->isActive() && connection->mPlayerIndex != slot)
+			connection->sendPacket(packet, NetConnection::SendFlags::UNRELIABLE);
+	}
+}
+
+void NetplayHost::collectStalledPlayers(std::vector<NetplayStall::Waiting>& outWaiting, std::string& outDroppedText)
+{
+	// Nobody is waited for while the game is not running here, or while a friend is still receiving the game (that pause is not a stall)
+	if (mHostState != HostState::GAME_RUNNING || mJoinPhase != JoinPhase::NONE || !Application::instance().getSimulation().isRunning())
+		return;
+
+	// The host's own wait for a friend that lags behind (canBeginNextFrame): how long it lasts
+	const float waitSeconds = (mStallStartTicks != 0) ? (float)(SDL_GetTicks() - mStallStartTicks) * 0.001f : 0.0f;
+
+	const auto connections = mPlayerConnections;
+	for (PlayerConnection* connection : connections)
+	{
+		if (!connection->isActive() || !connection->mReadyForGame || connection->mPlayerIndex < 1 || connection->mPlayerIndex >= MAX_PLAYERS)
+			continue;
+		const float silentSeconds = (float)connection->getMillisecondsSinceLastMessage() * 0.001f;
+		const bool away = mNetplayManager.isPeerAway(connection->mPlayerIndex, silentSeconds);
+		const bool behind = ((uint64)mLastSeenFrameNumber > (uint64)connection->mLastReceivedFrameNumber + 22);
+		const float stallSeconds = std::max(silentSeconds, behind ? waitSeconds : 0.0f);
+
+		if (NetplayStall::shouldDropFriend(silentSeconds))
+		{
+			RMX_LOG_INFO("Netplay host: dropping player " << (int)(connection->mPlayerIndex + 1) << " (" << connection->mName << "): nothing heard for " << (int)silentSeconds << " seconds" << (away ? " (the tab is in the background)" : ""));
+			outDroppedText = NetplayStall::describeDropped(connection->mName, away);
+			connection->disconnect(NetConnection::DisconnectReason::TIMEOUT);		// (the slot is kept for a minute, see retireConnection)
+			continue;
+		}
+		if (NetplayStall::isStalled(away, stallSeconds))
+		{
+			NetplayStall::Waiting waiting;
+			waiting.mName = connection->mName;
+			waiting.mAway = away;
+			waiting.mSilentSeconds = (int)stallSeconds;
+			outWaiting.push_back(waiting);
+		}
+	}
+}
+#endif
 
 uint32 NetplayHost::getRegularInputChecksum(int& outFrameNumber) const
 {

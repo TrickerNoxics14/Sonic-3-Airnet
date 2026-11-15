@@ -21,6 +21,7 @@
 #include "oxygen/simulation/Simulation.h"
 #include "oxygen/simulation/CodeExec.h"
 #include "oxygen/simulation/LemonScriptRuntime.h"
+#include "oxygen/simulation/LogDisplay.h"
 
 #ifndef _WIN32
 	// The MSVC names of the case-insensitive string compares (used below) do not exist on other platforms, e.g. the web build
@@ -39,6 +40,66 @@
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 
 #include <future>
+
+
+#ifdef PLATFORM_WEB
+// ---- Browser build: the tab in the background (see NetplayStallLogic.h) ----
+// A browser stops the animation frames of a hidden tab and slows its timers down to about one per second (after some minutes to one per minute), and the game's main loop runs on
+// animation frames. Two things keep a hidden tab's game going: a Web Worker (its timers are not slowed down in the browsers that were tried, see CLAUDE_HANDOFF.md) ticks the main loop while the
+// tab is hidden, and the page tells the game at once when the tab goes away or comes back (the event handler runs even when nothing else does). Without ticks (?bgtick=off, or a browser that
+// slows the worker as well) the others are told that this tab is away, and the hidden tab's title asks the player to return.
+// The page's own state for the player and for the checks: globalThis.__s3tab = { hidden, banner, frame, netplay, bgtick, ticks }
+EM_JS(void, s3web_tab_glue_install, (const char* returnTitlePtr, int returnTitleLen), {
+	if (globalThis.__s3tabInstalled)
+		return;
+	globalThis.__s3tabInstalled = true;
+	const returnTitle = new TextDecoder().decode(HEAPU8.subarray(returnTitlePtr, returnTitlePtr + returnTitleLen));
+	const S = globalThis.__s3tab = { hidden: document.visibilityState === 'hidden', banner: "", frame: -1, netplay: false, bgtick: 'on', ticks: 0, title: document.title };
+	try { const p = new URLSearchParams(location.search).get('bgtick'); if (p === 'off' || p === '0' || globalThis.S3AIR_BG_TICK === false) S.bgtick = 'off'; } catch (e) {}
+	let worker = null;
+	if (S.bgtick === 'on' && typeof Worker !== 'undefined' && typeof Blob !== 'undefined')
+	{
+		try
+		{
+			worker = new Worker(URL.createObjectURL(new Blob(['let id = 0; onmessage = (e) => { clearInterval(id); id = 0; if (e.data > 0) id = setInterval(() => postMessage(0), e.data); };'], { type: 'text/javascript' })));
+			worker.onmessage = () => { if (S.hidden && S.netplay && Module._s3air_background_tick) { ++S.ticks; Module._s3air_background_tick(); } };
+		}
+		catch (e) { worker = null; S.bgtick = 'off'; console.log('Netplay (browser): no worker ticks for a hidden tab (' + e + ')'); }
+	}
+	const apply = () => {
+		S.hidden = document.visibilityState === 'hidden';
+		if (worker) worker.postMessage(S.hidden ? 33 : 0);
+		if (S.hidden && S.netplay && !worker) document.title = returnTitle;
+		else if (document.title === returnTitle) document.title = S.title;
+		if (Module._s3air_netplay_tab_changed) Module._s3air_netplay_tab_changed(S.hidden ? 1 : 0);
+	};
+	document.addEventListener('visibilitychange', apply);
+	if (S.hidden) apply();
+});
+
+EM_JS(void, s3web_tab_publish, (int frame, int netplay, const char* bannerPtr, int bannerLen), {
+	const S = globalThis.__s3tab;
+	if (!S)
+		return;
+	S.frame = frame;
+	S.netplay = !!netplay;
+	S.banner = (bannerLen > 0) ? new TextDecoder().decode(HEAPU8.subarray(bannerPtr, bannerPtr + bannerLen)) : "";
+});
+
+// Called by the page's worker while the tab is hidden: one pass of the game's main loop (what an animation frame does when the tab is visible)
+extern "C" EMSCRIPTEN_KEEPALIVE void s3air_background_tick()
+{
+	if (FTX::System.valid())
+		FTX::System->mainLoop();
+}
+
+// Called by the page's visibilitychange handler
+extern "C" EMSCRIPTEN_KEEPALIVE void s3air_netplay_tab_changed(int hidden)
+{
+	if (NetplayManager::hasInstance())
+		NetplayManager::instance().onLocalTabVisibility(hidden != 0);
+}
+#endif
 
 
 #define USE_IPv6 false
@@ -796,6 +857,8 @@ void NetplayManager::closeConnections()
 	// that datagram needs the relay connection, so they go first and the relay is stopped afterwards (the other way round the goodbye was lost: a friend found out after 70 seconds)
 	SAFE_DELETE(mNetplayHost);
 	SAFE_DELETE(mNetplayClient);
+	for (NetplayStall::AwayTracker& tracker : mPeerAway)
+		tracker.reset();
 	mUDPSocket.clearLan();
 	clearSessionCharacters();
 	mHostCharacterPick = NetplayLobby::CHARACTER_MENU;
@@ -880,6 +943,7 @@ void NetplayManager::writeOnlineLog(float deltaSeconds)
 
 void NetplayManager::updateConnections(float deltaSeconds)
 {
+	updateTabState(deltaSeconds);
 	writeOnlineLog(deltaSeconds);
 	updateLobbyDirectory(deltaSeconds);
 	if (!mUDPSocket.isValid())
@@ -954,6 +1018,136 @@ bool NetplayManager::onReceivedGameServerPacket(ReceivedPacketEvaluation& evalua
 			return true;
 	}
 	return false;
+}
+
+bool NetplayManager::isGameSessionRunning() const
+{
+	if (nullptr != mNetplayHost)
+		return mNetplayHost->getHostState() == NetplayHost::HostState::GAME_RUNNING && mNetplayHost->getAuthenticatedCount() > 0;
+	if (nullptr != mNetplayClient)
+		return mNetplayClient->getState() == NetplayClient::State::GAME_RUNNING;
+	return false;
+}
+
+void NetplayManager::onPeerAway(int slot, bool away)
+{
+	if (slot < 0 || slot >= 4)
+		return;
+	if (mPeerAway[slot].mAway != away)
+	{
+		RMX_LOG_INFO("Netplay: the tab of player " << (slot + 1) << " is " << (away ? "in the background" : "back"));
+	}
+	mPeerAway[slot].onMessage(away);
+}
+
+bool NetplayManager::isPeerAway(int slot, float silentSeconds) const
+{
+	return (slot >= 0 && slot < 4) && mPeerAway[slot].isAway(silentSeconds);
+}
+
+void NetplayManager::onLocalTabVisibility(bool hidden)
+{
+#ifdef PLATFORM_WEB
+	if (mTabHidden == hidden)
+		return;
+	mTabHidden = hidden;
+	mAwayResendTimer = 0.0f;
+	RMX_LOG_INFO("Netplay (browser): this tab is " << (hidden ? "hidden" : "visible again") << (nullptr != mNetplayHost || nullptr != mNetplayClient ? ", telling the other players" : ""));
+	// Tell the others right away (this runs from the page's event handler, even if no frame is drawn): three times, an unreliable packet can get lost
+	for (int k = 0; k < 3; ++k)
+	{
+		if (nullptr != mNetplayHost)
+			mNetplayHost->sendAwayState(0, hidden);
+		if (nullptr != mNetplayClient)
+			mNetplayClient->sendAwayState(hidden);
+	}
+#endif
+}
+
+void NetplayManager::updateTabState(float deltaSeconds)
+{
+#ifdef PLATFORM_WEB
+	static bool glueInstalled = false;
+	if (!glueInstalled)
+	{
+		glueInstalled = true;
+		s3web_tab_glue_install(NetplayStall::RETURN_TO_TAB_TITLE, (int)strlen(NetplayStall::RETURN_TO_TAB_TITLE));
+	}
+
+	for (NetplayStall::AwayTracker& tracker : mPeerAway)
+		tracker.update(deltaSeconds);
+
+	const bool inSession = (nullptr != mNetplayHost || nullptr != mNetplayClient);
+	if (!inSession)
+	{
+		mStallBanner.clear();
+		mStallLogged.clear();
+		LogDisplay::instance().setBannerDisplay(std::string());
+		s3web_tab_publish((int)Application::instance().getSimulation().getFrameNumber(), 0, "", 0);
+		return;
+	}
+
+	// A hidden tab that still runs says so again every second (a new friend, a lost packet)
+	if (mTabHidden)
+	{
+		mAwayResendTimer += deltaSeconds;
+		if (mAwayResendTimer >= NetplayStall::AWAY_RESEND_SECONDS)
+		{
+			mAwayResendTimer = 0.0f;
+			if (nullptr != mNetplayHost)
+				mNetplayHost->sendAwayState(0, true);
+			if (nullptr != mNetplayClient)
+				mNetplayClient->sendAwayState(true);
+		}
+	}
+
+	// A frame that took long means that this tab was away itself: the messages that arrived meanwhile are not processed yet, so nobody is judged in the next moments
+	if (deltaSeconds > 0.5f)
+		mStallGrace = 3.0f;
+	else
+		mStallGrace = std::max(mStallGrace - deltaSeconds, 0.0f);
+
+	std::vector<NetplayStall::Waiting> waiting;
+	std::string dropped;
+	if (mStallGrace <= 0.0f && !mTabHidden)
+	{
+		if (nullptr != mNetplayHost)
+			mNetplayHost->collectStalledPlayers(waiting, dropped);
+		else if (nullptr != mNetplayClient)
+			mNetplayClient->collectStalledPlayers(waiting);
+	}
+	if (!dropped.empty())
+	{
+		mDropBanner = dropped;
+		mDropBannerTimer = 10.0f;
+	}
+	mDropBannerTimer = std::max(mDropBannerTimer - deltaSeconds, 0.0f);
+
+	std::string banner = NetplayStall::describeWaiting(waiting);
+	if (banner.empty() && mDropBannerTimer > 0.0f)
+		banner = mDropBanner;
+	if (banner.empty() && nullptr != mNetplayClient && mNetplayClient->isReconnectingToGame())
+		banner = "Connection lost. Reconnecting to your game...";
+
+	// One log line when the notice changes (the text without its running seconds)
+	const size_t cut = banner.rfind(" (");
+	const std::string kind = (cut != std::string::npos && banner.back() == ')') ? banner.substr(0, cut) : banner;
+	if (kind != mStallLogged)
+	{
+		mStallLogged = kind;
+		if (kind.empty())
+		{
+			RMX_LOG_INFO("Netplay: the notice about a waiting player is gone");
+		}
+		else
+		{
+			RMX_LOG_INFO("Netplay: notice: " << kind);
+		}
+	}
+	mStallBanner = banner;
+	LogDisplay::instance().setBannerDisplay(banner);
+	s3web_tab_publish((int)Application::instance().getSimulation().getFrameNumber(), 1, banner.c_str(), (int)banner.size());
+#endif
 }
 
 bool NetplayManager::canBeginNextFrame(uint32 frameNumber)

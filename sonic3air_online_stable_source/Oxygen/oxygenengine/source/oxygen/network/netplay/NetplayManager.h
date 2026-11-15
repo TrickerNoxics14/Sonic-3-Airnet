@@ -11,6 +11,7 @@
 #include "oxygen/network/netplay/ExternalAddressQuery.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
+#include "oxygen/network/netplay/NetplayStallLogic.h"
 
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
@@ -162,6 +163,15 @@ public:
 	bool canBeginNextFrame(uint32 frameNumber);
 	void onFrameUpdate(ControlsIn& controlsIn, uint32 frameNumber);
 
+	// A netplay game is running on this computer (host or friend); false in a lobby and when nothing is set up
+	bool isGameSessionRunning() const;
+
+	// What the players know about each other's tabs (browser build, see NetplayStallLogic.h): a PlayerAwayPacket arrived about the player in this slot
+	void onPeerAway(int slot, bool away);
+	bool isPeerAway(int slot, float silentSeconds) const;
+	void onLocalTabVisibility(bool hidden);			// The page's own tab went into the background or came back (called by the page's JavaScript right away)
+	inline const std::string& getStallBanner() const  { return mStallBanner; }		// What the screen says about a player who is waited for ("" = nothing)
+
 protected:
 	virtual NetConnection* createNetConnection(ConnectionManager& connectionManager, const SocketAddress& senderAddress) override;
 	virtual void destroyNetConnection(NetConnection& connection) override;
@@ -176,6 +186,7 @@ private:
 	bool resolveServerSetting(const std::string& setting, SocketAddress& outAddress) const;
 	std::string getExplicitRelaySetting() const;
 	void updateLobbyDirectory(float deltaSeconds);
+	void updateTabState(float deltaSeconds);		// Browser build: tab notices, the page's state; nothing on other platforms
 
 private:
 	UDPSocket mUDPSocket;
@@ -216,6 +227,15 @@ private:
 	bool mPublishIsPublic = true;
 	std::string mPublishName;
 	float mPublishInfoTimer = 0.0f;
+	// Tab in the background (browser build, see NetplayStallLogic.h)
+	NetplayStall::AwayTracker mPeerAway[4];
+	bool mTabHidden = false;
+	float mAwayResendTimer = 0.0f;
+	float mStallGrace = 0.0f;				// After a long frame (this tab was away itself) nobody is judged for a moment: the messages that came in meanwhile are not counted yet
+	std::string mStallBanner;
+	std::string mStallLogged;
+	std::string mDropBanner;
+	float mDropBannerTimer = 0.0f;
 	std::string mCompatCache;
 	uint32 mCompatCacheTicks = 0;
 	bool mCompatCacheValid = false;

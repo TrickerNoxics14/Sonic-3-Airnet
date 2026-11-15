@@ -32,6 +32,9 @@
 #include "oxygen/simulation/CodeExec.h"
 #include "oxygen/simulation/EmulatorInterface.h"
 #include "oxygen/simulation/Simulation.h"
+#ifdef PLATFORM_WEB
+	#include "oxygen/network/netplay/NetplayManager.h"
+#endif
 
 #include <lemon/program/function/FunctionWrapper.h>
 #include <lemon/program/Module.h>
@@ -638,6 +641,11 @@ void Game::onActiveModsChanged()
 
 bool Game::shouldPauseOnFocusLoss() const
 {
+#ifdef PLATFORM_WEB
+	// An online game cannot be paused by one player: the game would stand still for everybody (a click into another window, a tab in the background)
+	if (NetplayManager::hasInstance() && NetplayManager::instance().isGameSessionRunning())
+		return false;
+#endif
 	return (GameApp::hasInstance() && Application::instance().getSimulation().isRunning() && Application::instance().getSimulation().getSpeed() > 0.0f && !isInMainMenuMode());
 }
 

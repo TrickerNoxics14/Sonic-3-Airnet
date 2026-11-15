@@ -742,6 +742,14 @@ void Application::render()
 				drawer.printText(mLogDisplayFont, Vec2i(5, 5), logDisplay.mModeDisplayString);
 			}
 
+			if (!logDisplay.mBannerString.empty())
+			{
+				// A player who is waited for (see NetplayManager::updateTabState): centered below the mode display
+				const Recti rect(0, 34, FTX::screenWidth(), 26);
+				drawer.drawRect(rect, Color(0.0f, 0.0f, 0.0f, 0.6f));
+				drawer.printText(mLogDisplayFont, rect, String(logDisplay.mBannerString), 5, Color(1.0f, 0.9f, 0.3f));
+			}
+
 			if (logDisplay.mLogDisplayTimeout > 0.0f)
 			{
 				drawer.printText(mLogDisplayFont, Vec2i(5, FTX::screenHeight() - 25), logDisplay.mLogDisplayString, 1, Color(1.0f, 1.0f, 1.0f, saturate(logDisplay.mLogDisplayTimeout / 0.25f)));

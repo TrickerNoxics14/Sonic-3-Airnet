@@ -22,12 +22,17 @@ public:
 	// Log display (single line)
 	void setLogDisplay(const String& string, float time = 2.0f);
 
+	// Banner (browser build, online play): a notice that stays as long as the situation does, e.g. "Waiting for Sam"; empty clears it
+	void setBannerDisplay(const std::string& text);
+
 	// Log error display
 	void clearLogErrors();
 	void addLogError(const String& string);
 
 private:
 	String mModeDisplayString;
+
+	std::string mBannerString;
 
 	String mLogDisplayString;
 	float  mLogDisplayTimeout = 0.0f;

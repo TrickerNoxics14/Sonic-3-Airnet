@@ -21,6 +21,11 @@ void LogDisplay::setLogDisplay(const String& string, float time)
 	mLogDisplayTimeout = time;
 }
 
+void LogDisplay::setBannerDisplay(const std::string& text)
+{
+	mBannerString = text;
+}
+
 void LogDisplay::clearLogErrors()
 {
 	mLogErrorStrings.clear();

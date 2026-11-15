@@ -104,6 +104,15 @@ bool NetplayClient::startRelayFallback(const char* why)
 
 void NetplayClient::updateConnection(float deltaSeconds)
 {
+#ifdef PLATFORM_WEB
+	// How long no new frame came from the host (what a player who waits for a stalled host sees)
+	if (mState == State::GAME_RUNNING && !mReceivingJoinState && mNextFrameNumber != mStarvationLastFrame)
+		mStarvationSeconds = 0.0f;
+	else
+		mStarvationSeconds += deltaSeconds;
+	mStarvationLastFrame = mNextFrameNumber;
+#endif
+
 	EngineServerClient& engineServerClient = EngineServerClient::instance();
 	if (!mReconnectTestTriggered && nullptr != TestHooks::getEnv("S3AIR_NETPLAY_RECONNECT_TEST") && mState == State::GAME_RUNNING && !mReceivingJoinState && mStateTimer > 12.0f)
 	{
@@ -130,6 +139,20 @@ void NetplayClient::updateConnection(float deltaSeconds)
 			else
 				mHostConnection.clear();
 		}
+#ifdef PLATFORM_WEB
+		else if (mState == State::GAME_RUNNING && !mReceivingJoinState && mHostConnection.getState() == NetConnection::State::CONNECTED && mNetplayManager.isPeerAway(0, getHostSilentSeconds()) && mHostConnection.getMillisecondsSinceLastMessage() > 10000)
+		{
+			// The host said that its tab is in the background: that is not a lost connection, it normally comes back. The wait is announced on the screen (see NetplayManager::updateStallNotice)
+			// and ends after NetplayStall::HOST_AWAY_GIVE_UP_SECONDS
+			if (NetplayStall::shouldGiveUpOnHost(true, getHostSilentSeconds()))
+			{
+				RMX_LOG_INFO("Netplay client: the host's tab stayed in the background for " << (int)getHostSilentSeconds() << " seconds, giving up");
+				mHostConnection.disconnect(NetConnection::DisconnectReason::MANUAL_LOCAL);
+				fail(NetplayFailure::Reason::HOST_CLOSED, "The host's tab stayed in the background for more than a minute. Join again when the host is back.");
+				return;
+			}
+		}
+#endif
 		else if (mState == State::GAME_RUNNING && !mReceivingJoinState && mHostConnection.getState() == NetConnection::State::CONNECTED && mHostConnection.getMillisecondsSinceLastMessage() > 10000)
 		{
 			RMX_LOG_INFO("Netplay client: nothing from the host for 10 seconds, the connection through the relay is considered lost");
@@ -386,6 +409,60 @@ bool NetplayClient::onReceivedGameServerPacket(ReceivedPacketEvaluation& evaluat
 	return false;
 }
 
+#ifdef PLATFORM_WEB
+float NetplayClient::getHostSilentSeconds() const
+{
+	if (mState != State::GAME_RUNNING || mReceivingJoinState || mHostConnection.getState() != NetConnection::State::CONNECTED)
+		return 0.0f;
+	return (float)mHostConnection.getMillisecondsSinceLastMessage() * 0.001f;
+}
+
+void NetplayClient::sendAwayState(bool away)
+{
+	if (mHostConnection.getState() != NetConnection::State::CONNECTED || !mHostVerified)
+		return;
+	PlayerAwayPacket packet;
+	packet.mSlot = mLobbyYourSlot;
+	packet.mAway = away ? 1 : 0;
+	mHostConnection.sendPacket(packet, NetConnection::SendFlags::UNRELIABLE);
+}
+
+void NetplayClient::collectStalledPlayers(std::vector<NetplayStall::Waiting>& outWaiting)
+{
+	if (mState != State::GAME_RUNNING || mReceivingJoinState || mHostConnection.getState() != NetConnection::State::CONNECTED)
+		return;
+
+	// The game stands still because no new frame comes: either the host itself is silent, or the host waits for another player (it keeps answering pings then, but plays no frames)
+	const float silentSeconds = getHostSilentSeconds();
+	const float stallSeconds = std::max(silentSeconds, mStarvationSeconds);
+	const bool hostAway = mNetplayManager.isPeerAway(0, silentSeconds);
+	if (!NetplayStall::isStalled(hostAway, stallSeconds))
+		return;
+
+	bool blamedOther = false;
+	for (int slot = 1; slot < MAX_PLAYERS; ++slot)
+	{
+		if (slot != mLobbyYourSlot && mNetplayManager.isPeerAway(slot, stallSeconds))
+		{
+			NetplayStall::Waiting waiting;
+			waiting.mName = mNetplayManager.getPlayerName(slot);
+			waiting.mAway = true;
+			waiting.mSilentSeconds = (int)stallSeconds;
+			outWaiting.push_back(waiting);
+			blamedOther = true;
+		}
+	}
+	if (!blamedOther)
+	{
+		NetplayStall::Waiting waiting;
+		waiting.mName = mNetplayManager.getPlayerName(0);
+		waiting.mAway = hostAway;
+		waiting.mSilentSeconds = (int)stallSeconds;
+		outWaiting.push_back(waiting);
+	}
+}
+#endif
+
 bool NetplayClient::canBeginNextFrame(uint32 frameNumber)
 {
 	// Don't proceed beyond the latest received frame number
@@ -630,6 +707,19 @@ bool NetplayClient::onReceivedPacket(ReceivedPacketEvaluation& evaluation)
 				RMX_LOG_INFO("Netplay client: lobby: you are slot " << (int)(mLobbyYourSlot + 1) << ", players " << (int)mLobbySlotState[0] << (int)mLobbySlotState[1] << (int)mLobbySlotState[2] << (int)mLobbySlotState[3] << (mLobbyHostStarting ? ", the host is picking the game" : ""));
 			return true;
 		}
+
+#ifdef PLATFORM_WEB
+		case PlayerAwayPacket::PACKET_TYPE:
+		{
+			// The host's browser says that a player's tab (its own, or a friend's) is in the background or back
+			PlayerAwayPacket packet;
+			if (!evaluation.readPacket(packet))
+				return false;
+			if (packet.mSlot < MAX_PLAYERS)
+				mNetplayManager.onPeerAway(packet.mSlot, packet.mAway != 0);
+			return true;
+		}
+#endif
 
 		case LobbyChatBroadcastPacket::PACKET_TYPE:
 		{
