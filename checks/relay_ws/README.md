@@ -38,6 +38,7 @@ not game traffic), caps each at 3000 bytes and limits them to 20 per second (bur
 types drop them, so old and new versions share a lobby (the protocol version stays 2). The relay never reads them, and it needs no STUN or TURN of its own.
 When a direct channel works the relay forwards nothing for that player (its byte counters stay near zero) and it is the automatic fallback when the
 channel cannot be made or dies.
+The web checks (checks/web_net, session P) prove this on one PC only: headless Chrome connects over loopback with STUN off, so there is no real NAT, firewall, packet loss or TURN in the test, and a blocked path is simulated by hiding the ICE candidates. They show that the game really leaves the relay when the channel works and returns to it when the channel fails or recovers, not that two players behind different routers can reach each other.
 
 ## Tell the game where it is
 
