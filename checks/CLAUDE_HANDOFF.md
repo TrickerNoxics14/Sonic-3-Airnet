@@ -847,3 +847,10 @@ Real internet, a really hosted lobby server, a real phone, Firefox/Safari, a con
 
 ### What to try by hand
 Run the server on one PC (`node server.mjs`), put its address into SETTINGS > LOBBY SERVER on two PCs, CREATE LOBBY on one, PUBLIC LOBBIES / QUICK JOIN on the other; try the number pad with a controller; try LAN GAME with no server; try a wrong code three times.
+
+## Addendum 2026-11-15 (controller): web build checked, Android stopped
+
+- `checks/build_web.ps1 -EmsdkDir <emsdk folder>` (backslashes) builds the new menu in 129 s; scan of `web_build` for the user name, workspace path and `Users/` found nothing. An earlier attempt failed only because the emsdk path was given with forward slashes.
+- Web checks: sessions A (14/14), B and C pass. A3b and A6c were stale expectations in the checks (the menu holds a second WebSocket for the lobby directory; A6c threshold sat inside the 5 s log sampling noise), not game bugs. Session N needs `--native` and was NOT run on this build (browser to Windows crossplay untested here).
+- Full backend suite: 424 PASS, 1 FAIL (K1f, lobby/game reconnect check). L, K4a and M2 from the older addenda did not fail this time. K1f was not investigated; it is the same item as in the earlier addenda (pre-existing).
+- The Android build for this lobby work was started and then stopped on the user's request. The only APK on disk is still v1.2.1; it does not contain the new menu or numeric codes. Not pushed or released.
