@@ -27,7 +27,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,N').split(',');
 const withNative = args.includes('--native');
 const webDir = path.join(root, 'web_build');
 
@@ -1283,6 +1283,187 @@ async function sessionL8R() {
 	} finally { await h.close(); if (R) await R.stop(); }
 }
 
+// =====================================================================================================================
+// Session T: a player's tab goes into the background (browsers stop animation frames and slow timers to about 1 per second in a hidden tab), which stalls the lockstep game for everybody.
+// The browser itself hides the tab: a second tab opens in the same (headless) window, see Instance.hide(). The browsers of this session run WITHOUT the flags that switch background
+// throttling off. What this reproduces: document.visibilityState 'hidden', visibilitychange, no animation frames, timers once a second, worker timers unthrottled (Chrome's own rules).
+// What it does not: Chrome's "intensive throttling" after 5 minutes hidden, a tab discarded or frozen by the browser (memory saver, mobile), Firefox and Safari (their own rules), a tab
+// that is merely out of focus next to another window.
+// The pages expose their tab state in globalThis.__s3tab = { hidden, banner, frame, bgtick } (written by the game's own web glue); banner is what the game shows on screen about it.
+const tState = (inst) => inst.eval(`(() => { const s = globalThis.__s3tab; return s ? { hidden: !!s.hidden, banner: String(s.banner || ''), frame: typeof s.frame === 'number' ? s.frame : -1, bgtick: String(s.bgtick || '') } : null; })()`);
+const tTitle = (inst) => inst.eval('document.title');
+
+/** Samples the given browsers every 250 ms for `seconds` while `driver` plays (inputs of the visible player). Returns, per browser, the samples { t, frame, banner, title }. */
+async function tObserve(insts, seconds, driver) {
+	const samples = insts.map(() => []);
+	const t0 = Date.now();
+	const sampler = (async () => {
+		while (Date.now() - t0 < seconds * 1000) {
+			await Promise.all(insts.map(async (inst, i) => {
+				try {
+					const [s, title] = await Promise.all([tState(inst), tTitle(inst)]);
+					samples[i].push({ t: (Date.now() - t0) / 1000, frame: s ? s.frame : -1, banner: s ? s.banner : '', title, hidden: s ? s.hidden : null });
+				} catch { /* page busy */ }
+			}));
+			await sleep(250);
+		}
+	})();
+	await Promise.all([sampler, driver ? driver(seconds) : Promise.resolve()]);
+	return samples;
+}
+const tStall = (samples) => {	// the longest time the frame number did not change (seconds)
+	let longest = 0, since = samples[0]?.t ?? 0, frame = samples[0]?.frame;
+	for (const s of samples) { if (s.frame !== frame) { frame = s.frame; since = s.t; } longest = Math.max(longest, s.t - since); }
+	return longest;
+};
+const tRate = (samples) => samples.length > 1 ? (samples.at(-1).frame - samples[0].frame) / (samples.at(-1).t - samples[0].t) : 0;
+const tFirst = (samples, pattern, field = 'banner') => samples.find((s) => pattern.test(s[field]))?.t ?? null;
+const tPlay = (inst) => async (seconds) => {	// inputs of the one visible player
+	const end = Date.now() + seconds * 1000;
+	while (Date.now() < end) { await inst.hold('Right', 700); await sleep(300); }
+};
+
+async function tSetup(relay, { seed, basePort, extra = '' }) {
+	const h = await startHarness({ webDir, instances: 2, seeds: [seed, 0x52], basePort, throttled: true });
+	try {
+		const [host, friend] = h.instances;
+		const query = `?relay=ws://127.0.0.1:${relay.ports.port}&p2p=off${extra}`;
+		await Promise.all([host.openGame(h.baseURL, query), friend.openGame(h.baseURL, query)]);
+		await Promise.all([host.waitLog(/Ready to go/, 90000), friend.waitLog(/Ready to go/, 90000)]);
+		await sleep(2000);
+		await Promise.all([host.toMainMenu(), friend.toMainMenu()]);
+		const r = await hostAndJoin(host, [friend], query, codeForSeed(seed));
+		const loaded = await startNormalGame(host, [friend]);
+		await drive(host, [friend], 6);
+		return { h, host, friend, ok: !!(r.hosted && r.known && r.joined[0] && loaded[0]), detail: `hosted=${!!r.hosted} known=${!!r.known} joined=${!!r.joined[0]} friendLoadedState=${!!loaded[0]}` };
+	} catch (e) { await h.close(); throw e; }
+}
+
+const tSync = async (host, friend, framesAfter = 0) => {
+	await sleep(6000);
+	const hr = parseOnlineLog(await host.onlineLog()), fr = parseOnlineLog(await friend.onlineLog());
+	const h = syncOk(hr, 'host'), f = syncOk(fr, 'friend');
+	return { ok: h.ok && f.ok, why: `host: ${h.why}; friend: ${f.why}`, hostLast: hr.at(-1), friendLast: fr.at(-1) };
+};
+
+// ---- T1: the mitigation is on (default): a hidden tab keeps playing ----
+async function sessionT1(relay) {
+	console.log('--- session T1: a tab in the background keeps playing (worker driven ticks), both ways round');
+	const s = await tSetup(relay, { seed: 0x62, basePort: 9470 });
+	const { h, host, friend } = s;
+	try {
+		check('T1a', 'two browsers (with real background throttling) are in a running game', s.ok, s.detail);
+		const t0 = await Promise.all([tState(host), tState(friend)]);
+		check('T1b', 'both pages expose their tab state (globalThis.__s3tab) and report the worker ticks as on', !!t0[0] && !!t0[1] && t0[0].bgtick === 'on' && t0[1].bgtick === 'on', JSON.stringify(t0));
+		const visible = await tObserve([host, friend], 5, (sec) => drive(host, [friend], sec));
+		console.log(`      visible: host ${tRate(visible[0]).toFixed(1)} frames/s, friend ${tRate(visible[1]).toFixed(1)} frames/s`);
+
+		// -- the friend's tab goes into the background
+		const hid = await friend.hide();
+		const obs = await tObserve([host, friend], 20, tPlay(host));
+		const [oh, of] = obs;
+		const hiddenRate = tRate(of), hostRate = tRate(oh);
+		check('T1c', 'the friend\'s tab really is hidden (visibilityState hidden)', hid && of.every((x) => x.hidden !== false));
+		check('T1d', 'the hidden friend keeps playing: 20 s in the background run at 45 frames per second or more (visible: ~60), and the host never waits more than 2 s for it', hiddenRate >= 45 && tStall(oh) <= 2 && tStall(of) <= 2, `hidden friend ${hiddenRate.toFixed(1)} frames/s, host ${hostRate.toFixed(1)} frames/s, longest stall: friend ${tStall(of).toFixed(1)} s, host ${tStall(oh).toFixed(1)} s`);
+		check('T1e', 'nobody sees a "waiting" banner, and the hidden tab shows no "return to the tab" title', !oh.some((x) => x.banner) && !of.some((x) => /return/i.test(x.title)), `host banners: ${[...new Set(oh.map((x) => x.banner))].join('|')}; friend titles: ${[...new Set(of.map((x) => x.title))].join('|')}`);
+		await friend.show();
+		const sync1 = await tSync(host, friend);
+		check('T1f', 'after the tab returned both games are in sync (no repairs, last sync recent)', sync1.ok, sync1.why);
+
+		// -- the host's tab goes into the background
+		const hid2 = await host.hide();
+		const obs2 = await tObserve([host, friend], 20, tPlay(friend));
+		check('T1g', 'the hidden host keeps playing too: 45 frames per second or more on both sides, the friend never waits more than 2 s', hid2 && tRate(obs2[0]) >= 45 && tRate(obs2[1]) >= 45 && tStall(obs2[1]) <= 2 && tStall(obs2[0]) <= 2, `hidden host ${tRate(obs2[0]).toFixed(1)} frames/s, friend ${tRate(obs2[1]).toFixed(1)} frames/s, longest stall: host ${tStall(obs2[0]).toFixed(1)} s, friend ${tStall(obs2[1]).toFixed(1)} s`);
+		await host.show();
+		const sync2 = await tSync(host, friend);
+		check('T1h', 'after the host\'s tab returned both games are in sync (no repairs)', sync2.ok && !host.hasLog(/EXC/) && !friend.hasLog(/EXC/), sync2.why);
+		await shot(friend, 'T1_friend'); await shot(host, 'T1_host');
+	} finally { await h.close(); }
+}
+
+// ---- T2/T3: the mitigation is off (bgtick=off, as in a browser that does not keep a hidden tab running): the stall, the notices, the way back ----
+async function sessionT2(relay) {
+	console.log('--- session T2: no worker ticks (bgtick=off): the friend\'s tab is hidden for 20 s, then comes back');
+	const s = await tSetup(relay, { seed: 0x63, basePort: 9474, extra: '&bgtick=off' });
+	const { h, host, friend } = s;
+	try {
+		check('T2a', 'two browsers with real background throttling are in a running game (worker ticks off by the page link)', s.ok, s.detail);
+		const st0 = await tState(friend);
+		check('T2a2', 'the page exposes its tab state (globalThis.__s3tab) and says that the worker ticks are off', !!st0 && st0.bgtick === 'off', JSON.stringify(st0));
+		await friend.hide();
+		const tHide = Date.now();
+		const [oh, of] = await tObserve([host, friend], 20, tPlay(host));
+		const notice = tFirst(oh, /waiting for/i);
+		check('T2b', 'the host sees a "waiting for NAME" notice within 4 s of the friend\'s tab going hidden (the friend tells it at once, nothing has to time out)', notice !== null && notice <= 4, `first notice after ${notice} s: "${oh.find((x) => /waiting for/i.test(x.banner))?.banner ?? ''}"`);
+		const ret = tFirst(of, /return to/i, 'title');
+		check('T2c', 'the hidden tab says "return to the tab" in its title (what the stalled player can see in the tab strip) within 2 s', ret !== null && ret <= 2, `title after ${ret} s: "${of.find((x) => /return to/i.test(x.title))?.title ?? of.at(-1)?.title}"`);
+		const stall = tStall(oh);
+		check('T2d', 'the host is not frozen for good: it waits at most 10 s, then plays on (20 s window: more than 300 frames)', oh.at(-1).frame - oh[0].frame > 300 && stall <= 10, `host frames ${oh[0].frame} -> ${oh.at(-1).frame}, longest stall ${stall.toFixed(1)} s`);
+		await shot(host, 'T2_host_waiting');
+		await friend.show();
+		const back = await waitFor(async () => { const a = await tState(host), b = await tState(friend); return a && b && a.banner === '' && b.banner === '' && !/return to/i.test(await tTitle(friend)) ? true : null; }, 8000, 250);
+		check('T2e', 'when the tab returns the "waiting" banner of the host and the "return to the tab" banner of the friend clear within 8 s', !!back, `host banner "${(await tState(host))?.banner}", friend banner "${(await tState(friend))?.banner}", title "${await tTitle(friend)}"`);
+		const after = await tObserve([host, friend], 10, (sec) => drive(host, [friend], sec));
+		check('T2f', 'after the return both games run again (60 frames per second or close, more than 300 frames each in 10 s)', after[0].at(-1).frame - after[0][0].frame > 300 && after[1].at(-1).frame - after[1][0].frame > 300, `host ${tRate(after[0]).toFixed(1)}, friend ${tRate(after[1]).toFixed(1)} frames/s`);
+		const sync = await tSync(host, friend);
+		check('T2g', 'and they are in sync: repairs 0 on both sides, last sync recent', sync.ok, sync.why);
+		await shot(friend, 'T2_friend_back');
+
+		// -- the host's tab
+		await host.hide();
+		const [hh, ff] = await tObserve([host, friend], 20, tPlay(friend));
+		const n2 = tFirst(ff, /waiting for/i);
+		check('T2h', 'the friend sees a "waiting for NAME" notice within 4 s of the host\'s tab going hidden', n2 !== null && n2 <= 4, `first notice after ${n2} s: "${ff.find((x) => /waiting for/i.test(x.banner))?.banner ?? ''}"`);
+		check('T2i', 'the hidden host\'s tab says "return to the tab" in its title within 2 s', tFirst(hh, /return to/i, 'title') !== null && tFirst(hh, /return to/i, 'title') <= 2, `title: "${hh.at(-1)?.title}"`);
+		await shot(friend, 'T2_friend_waiting');
+		await host.show();
+		const back2 = await waitFor(async () => { const a = await tState(host), b = await tState(friend); return a && b && a.banner === '' && b.banner === '' && !/return to/i.test(await tTitle(host)) ? true : null; }, 15000, 250);
+		check('T2j', 'when the host returns, the banners clear within 15 s', !!back2, `host banner "${(await tState(host))?.banner}", friend banner "${(await tState(friend))?.banner}"`);
+		const after2 = await tObserve([host, friend], 12, (sec) => drive(host, [friend], sec));
+		check('T2k', 'and the game runs again on both sides (more than 300 frames in 12 s)', after2[0].at(-1).frame - after2[0][0].frame > 300 && after2[1].at(-1).frame - after2[1][0].frame > 300, `host ${tRate(after2[0]).toFixed(1)}, friend ${tRate(after2[1]).toFixed(1)} frames/s`);
+		const sync2 = await tSync(host, friend);
+		check('T2l', 'in sync, repairs 0 on both sides', sync2.ok, sync2.why);
+		fs.writeFileSync(path.join(logDir, 'web_net_T2_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\n`);
+	} finally { await h.close(); }
+}
+
+async function sessionT3(relay) {
+	console.log('--- session T3: no worker ticks: the friend\'s tab stays hidden too long, the host drops it with a message');
+	const s = await tSetup(relay, { seed: 0x64, basePort: 9478, extra: '&bgtick=off' });
+	const { h, host, friend } = s;
+	try {
+		check('T3a', 'two browsers with real background throttling are in a running game, worker ticks off', s.ok, s.detail);
+		await friend.hide();
+		const [oh] = await tObserve([host, friend], 50, tPlay(host));
+		const dropped = tFirst(oh, /dropped|removed|left the game/i);
+		check('T3b', 'the host is not frozen and the stalled friend is dropped after a timeout (within 45 s), with a banner that says so ("NAME dropped: tab in the background")', dropped !== null && dropped <= 45 && tStall(oh) <= 10, `banner after ${dropped} s: "${oh.find((x) => /dropped|removed|left the game/i.test(x.banner))?.banner ?? ''}"; longest stall ${tStall(oh).toFixed(1)} s; banners: ${[...new Set(oh.map((x) => x.banner))].join(' | ')}`);
+		await shot(host, 'T3_host_dropped');
+		await friend.show();
+		const msg = await waitFor(async () => { const b = (await tState(friend))?.banner ?? ''; return /reconnect|dropped|away|background|too long/i.test(b) ? b : null; }, 15000, 250);
+		check('T3c', 'the returning friend is told on its screen (banner) that the connection was lost and it is reconnecting, within 15 s', !!msg, `banner "${(await tState(friend))?.banner}"; ${friend.allLogs.filter((l) => /Netplay client/.test(l)).slice(-4).join(' | ')}`);
+		await shot(friend, 'T3_friend_back');
+		fs.writeFileSync(path.join(logDir, 'web_net_T3_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\n`);
+	} finally { await h.close(); }
+}
+
+async function sessionT4(relay) {
+	console.log('--- session T4: no worker ticks: the host\'s tab stays hidden too long, the friend is told');
+	const s = await tSetup(relay, { seed: 0x65, basePort: 9482, extra: '&bgtick=off' });
+	const { h, host, friend } = s;
+	try {
+		check('T4a', 'two browsers with real background throttling are in a running game, worker ticks off', s.ok, s.detail);
+		await host.hide();
+		const [, ff] = await tObserve([host, friend], 75, tPlay(friend));
+		const first = tFirst(ff, /waiting for/i);
+		const lobbyMsg = friend.allLogs.filter((l) => /showing the problem to the player|Could not reconnect|background|too long/i.test(l));
+		const told = tFirst(ff, /background|too long|gave up|did not come back|closed|lost/i);
+		check('T4b', 'the friend is not frozen forever: it sees a "waiting for NAME" notice at once (within 4 s) and is told clearly within 70 s that the host did not come back (a message, back to the menu)', first !== null && first <= 4 && (told !== null || lobbyMsg.length > 0), `waiting after ${first} s; clear message after ${told} s: "${ff.find((x) => /background|too long|gave up|did not come back|closed|lost/i.test(x.banner))?.banner ?? ''}"; ${lobbyMsg.slice(-3).join(' | ')}`);
+		await shot(friend, 'T4_friend_told');
+		await host.show();
+		fs.writeFileSync(path.join(logDir, 'web_net_T4_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|Lobby|tab|EXC/i.test(l)).join('\n')}\n`);
+	} finally { await h.close(); }
+}
+
 let exitCode = 0;
 const relay ={ relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
@@ -1298,6 +1479,10 @@ try {
 	if (only.includes('P') || only.includes('P6')) await sessionP6(relay);
 	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7], ['L8', sessionL8]]) if (only.includes('L') || only.includes(id)) await fn();
 	if (only.includes('L8R')) await sessionL8R();
+	if (only.includes('T') || only.includes('T1')) await sessionT1(relay);
+	if (only.includes('T') || only.includes('T2')) await sessionT2(relay);
+	if (only.includes('T') || only.includes('T3')) await sessionT3(relay);
+	if (only.includes('T') || only.includes('T4')) await sessionT4(relay);
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}
@@ -1309,7 +1494,11 @@ try {
 	const failed = results.filter((r) => !r.ok);
 	const lines = results.map((r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.id}  ${r.text}${r.detail ? `  [${r.detail}]` : ''}`);
 	lines.push('', `${results.length - failed.length} of ${results.length} checks passed`);
-	fs.writeFileSync(path.join(root, 'checks', 'web_net_report.txt'), lines.join('\n') + '\n');
+	// The committed report comes only from a run of the whole standard set (everything but the native session N); a run of some sessions writes its own file in last_logs
+	const standardSet = ['A', 'B', 'C', 'P', 'L', 'T'].every((id) => only.includes(id));
+	const reportFile = standardSet ? path.join(root, 'checks', 'web_net_report.txt') : path.join(logDir, `web_net_report_${only.join('_')}.txt`);
+	fs.writeFileSync(reportFile, lines.join('\n') + '\n');
+	console.log(`report: ${standardSet ? 'checks/web_net_report.txt' : `checks/last_logs/${path.basename(reportFile)} (some of the sessions only: the committed report is left alone)`}`);
 	console.log(`\n${results.length - failed.length} of ${results.length} checks passed`);
 	exitCode = failed.length ? 1 : 0;
 }

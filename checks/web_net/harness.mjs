@@ -62,10 +62,11 @@ export class Instance {
 		this.nextID = 0;
 	}
 
-	async launch(chrome, debugPort, profileDir, extraSeedFill) {
+	async launch(chrome, debugPort, profileDir, extraSeedFill, throttled = false) {
+		this.debugPort = debugPort;
 		this.profileDir = profileDir;
 		this.process = spawn(chrome, ['--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profileDir}`, '--window-size=1280,720', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
-			'--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
+			'--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', ...(throttled ? [] : ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows']),
 			'--disable-features=WebRtcHideLocalIpsWithMdns', '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' });
 		let list;
 		for (let i = 0; i < 100 && !list; ++i) {
@@ -74,12 +75,33 @@ export class Instance {
 		}
 		if (!list) throw new Error('Chrome did not start');
 		const page = list.find((t) => t.type === 'page');
+		this.pageID = page.id;
 		this.ws = new WebSocket(page.webSocketDebuggerUrl);
 		await new Promise((resolve) => { this.ws.onopen = resolve; });
 		this.ws.onmessage = (event) => this.#onMessage(JSON.parse(event.data));
 		await this.send('Runtime.enable');
 		await this.send('Page.enable');
 		if (extraSeedFill !== undefined) await this.send('Page.addScriptToEvaluateOnNewDocument', { source: seedScript(extraSeedFill) });
+	}
+
+	/**
+	 * Puts this tab in the background the way a player does: a second tab opens in the same browser window and takes the front, so the browser itself makes the game tab hidden
+	 * (document.visibilityState 'hidden', no animation frames, timers about once a second). Only real if the browser was started with `throttled: true` (without the flags
+	 * that switch background throttling off). Returns once the page reports 'hidden'.
+	 */
+	async hide() {
+		const r = await fetch(`http://127.0.0.1:${this.debugPort}/json/new?about:blank`, { method: 'PUT' });
+		this.otherTabID = (await r.json()).id;
+		for (let i = 0; i < 50; ++i) { if (await this.eval('document.visibilityState') === 'hidden') return true; await sleep(100); }
+		return false;
+	}
+
+	/** Brings the game tab back to the front (and closes the tab that was opened to hide it). */
+	async show() {
+		await (await fetch(`http://127.0.0.1:${this.debugPort}/json/activate/${this.pageID}`)).text();
+		for (let i = 0; i < 50; ++i) { if (await this.eval('document.visibilityState') === 'visible') break; await sleep(100); }
+		if (this.otherTabID) { try { await (await fetch(`http://127.0.0.1:${this.debugPort}/json/close/${this.otherTabID}`)).text(); } catch { /* gone */ } this.otherTabID = null; }
+		return (await this.eval('document.visibilityState')) === 'visible';
 	}
 
 	/** Runs a script in every page this browser loads from now on, before the page's own scripts (test hooks, e.g. to break WebRTC). */
@@ -244,7 +266,7 @@ export class Instance {
 /**
  * @param {object} options { webDir, romPath, instances, seeds: [fill byte per instance] }
  */
-export async function startHarness({ webDir, romPath = defaultRomPath(), instances = 1, seeds = [], basePort = 9340 }) {
+export async function startHarness({ webDir, romPath = defaultRomPath(), instances = 1, seeds = [], basePort = 9340, throttled = false }) {
 	const chrome = findChrome();
 	if (!chrome) throw new Error('No Chrome found (set CHROME)');
 	if (!fs.existsSync(path.join(webDir, 'sonic3air_web.html'))) throw new Error(`web build not found in ${webDir}`);
@@ -254,7 +276,7 @@ export async function startHarness({ webDir, romPath = defaultRomPath(), instanc
 	for (let i = 0; i < instances; ++i) {
 		const instance = new Instance(i, harness);
 		const profile = fs.mkdtempSync(path.join(os.tmpdir(), `s3air-web-${i}-`));
-		await instance.launch(chrome, basePort + i, profile, seeds[i]);
+		await instance.launch(chrome, basePort + i, profile, seeds[i], throttled);
 		harness.instances.push(instance);
 	}
 	harness.close = async () => {
