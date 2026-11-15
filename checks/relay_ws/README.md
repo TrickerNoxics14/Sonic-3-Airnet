@@ -40,6 +40,26 @@ When a direct channel works the relay forwards nothing for that player (its byte
 channel cannot be made or dies.
 The web checks (checks/web_net, session P) prove this on one PC only: headless Chrome connects over loopback with STUN off, so there is no real NAT, firewall, packet loss or TURN in the test, and a blocked path is simulated by hiding the ICE candidates. They show that the game really leaves the relay when the channel works and returns to it when the channel fails or recovers, not that two players behind different routers can reach each other.
 
+### What signalling reveals, stores and logs (ICE candidate policy)
+
+* **Who may signal:** only the host and the friends of one lobby, and only to each other. A message is accepted when the sender's connection joined that
+  lobby and carries its token; the relay always addresses the other side itself (the host's message names a friend number of *its own* lobby, a friend's
+  message always goes to its own lobby's host). Messages from outsiders, with wrong tokens, from a connection that left or moved to another lobby, or
+  larger than 3000 bytes are dropped without any answer, so an outsider learns nothing, not even an error.
+* **What the relay sends:** only the header, the token or friend number and the payload the other member wrote. The relay never puts an address, port or
+  name into a signalling message, and the lobby directory (list, resolve, errors) never contains an address either (tests: signalling with non-loopback
+  addresses, `no answer contains an address of a host`).
+* **What the relay stores and logs:** nothing of the content. It never parses the payload. The only trace is the counters `signals` and `droppedSignals`
+  (in `/health` and the counter line). No candidate, address or offer is kept, written to a file or logged.
+* **Candidate policy:** the game adds no candidates of its own and does not filter the browser's. Browsers hide local network addresses behind random `.local` (mDNS) names, so
+  the other player does not learn the private address of a home network. A direct link between two players cannot work without each side learning the
+  other's **public** address (and port) from the candidates, so a lobby member can read the public IP of the player on the other end (for example
+  in the browser's developer tools). This is the nature of a direct link and is why it is only made between members of the same lobby; a player who does
+  not want to show their address to the lobby uses the relay only (the direct link is optional and the game falls back to the relay when it fails or is
+  off). A public address is shown to nobody outside the lobby, and nobody in the lobby learns anything about players other than the one they are
+  directly connected to through the relay's signalling (friends are only connected to the host).
+* **STUN/TURN:** the relay runs none and has no TURN. The game (setting `StunServers`, default two public Google STUN servers, empty = none) asks those STUN servers for the player's public address; they see that address by design, which is how a browser learns it. With no STUN server only players in the same network can connect directly.
+
 ## Tell the game where it is
 
 * **Browser version:** the page's owner puts the address into `relay_config.js` next to the page
@@ -118,7 +138,7 @@ what the game sends to it (lobby names, session IDs) and could join any lobby: r
 
     node --test test/relay.test.mjs test/directory.test.mjs   # Node 22 or newer (built-in WebSocket client)
 
-(31 tests: 24 for the relay itself and 7 for the signalling messages: all four UDP/WebSocket host and friend combinations in both directions, payload sizes up to the cap, not counted as game traffic, forged tokens / wrong host token / unknown friend / stranger / oversize dropped, rate limit that does not hold back game data, no crash from signals of a client that never joined.)
+(34 relay tests: 24 for the relay itself and 10 for the signalling messages: all four UDP/WebSocket host and friend combinations in both directions, payload sizes up to the cap, not counted as game traffic, forged tokens / wrong host token / unknown friend / stranger / oversize dropped, rate limit that does not hold back game data, no crash from signals of a client that never joined, two lobbies never hear each other's signalling, a friend that moved lobby cannot signal into the old one, no datagram contains an address and outsiders get no reply; plus 27 directory tests.)
 They start the real server on loopback and check the protocol (garbage, versions, sizes), joining and forwarding for all
 combinations of UDP and WebSocket hosts and friends, full lobbies, drop of friends and hosts, reconnect (a host takes its lobby back
 with its secret, a friend gets a new place), timeouts, wrong keys and blocking, forged tokens, rate limits, the WebSocket
