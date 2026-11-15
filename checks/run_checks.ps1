@@ -544,6 +544,9 @@ try
 
 	$hookHits = @(Select-String -Path (Join-Path $sourceMod "scripts\*.lemon") -Pattern 'test\.frame|S3AIR_|Checks\.report' | ForEach-Object { $_.Filename + ":" + $_.LineNumber })
 	Add-Result "B2" "Co-op scripts contain no test hooks" ($hookHits.Count -eq 0) ($hookHits -join ", ")
+	# Static guard: the browser-only WebRTC bridge (DirectLink.h) must not reach the Windows / Android builds
+	$directLinkOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_directlink_guard.ps1") 2>&1 | ForEach-Object { "$_" })
+	Add-Result "B5" "Browser-only WebRTC code stays behind __EMSCRIPTEN__ (lint_directlink_guard.ps1)" ($LASTEXITCODE -eq 0) (($directLinkOut | Select-Object -Last 1) -join "")
 	# The private memory areas of the mod (speed caps and scratch space of players 2, 3 and 4) must not overlap: two characters that share them would corrupt each other
 	$modSource = (@($modScripts | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n")
 	$constants = @{}

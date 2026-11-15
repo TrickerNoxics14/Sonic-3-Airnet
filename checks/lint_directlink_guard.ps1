@@ -44,11 +44,27 @@ function Find-UnguardedWebCode([string[]]$lines)
 	return $problems
 }
 
+# Returns problem strings for one other source file (rules 2 and 3); $name is the file name, $text its content
+function Find-OutsideUse([string]$name, [string]$text)
+{
+	$problems = @()
+	if ($text -match '\bs3p2p_\w+' -or $text -match 'RTCPeerConnection') { $problems += ($name + ": uses the WebRTC bridge outside DirectLink.h") }
+	if ($text -match '#\s*include\s*[<"][^>"]*DirectLink\.h[>"]' -and $name -ne "Sockets.cpp") { $problems += ($name + ": includes DirectLink.h (only Sockets.cpp may)") }
+	return $problems
+}
+
 if ($SelfTest)
 {
 	$bad = @('#include <emscripten.h>', 'EM_JS(int, s3p2p_x, (), {});', 'int a = s3p2p_state(0);')
 	$good = @('#ifdef __EMSCRIPTEN__', '#include <emscripten.h>', 'EM_JS(int, s3p2p_x, (), {});', '#else', 'int a = 0;', '#endif')
 	$ok = ((Find-UnguardedWebCode $bad).Count -eq 3) -and ((Find-UnguardedWebCode $good).Count -eq 0)
+	# rule 2: the bridge or RTCPeerConnection in another file
+	$ok = $ok -and ((Find-OutsideUse "Other.cpp" 'int a = s3p2p_state(0);').Count -eq 1)
+	$ok = $ok -and ((Find-OutsideUse "Other.cpp" 'auto pc = new RTCPeerConnection();').Count -eq 1)
+	$ok = $ok -and ((Find-OutsideUse "Other.cpp" 'int a = state(0); // nothing special').Count -eq 0)
+	# rule 3: only Sockets.cpp may include DirectLink.h
+	$ok = $ok -and ((Find-OutsideUse "NetplayManager.cpp" '#include "oxygen_netcore/network/DirectLink.h"').Count -eq 1)
+	$ok = $ok -and ((Find-OutsideUse "Sockets.cpp" '#include "oxygen_netcore/network/DirectLink.h"').Count -eq 0)
 	if ($ok) { Write-Host "PASS lint_directlink_guard self test"; exit 0 }
 	Write-Host "FAIL lint_directlink_guard self test" -ForegroundColor Red; exit 1
 }
@@ -61,9 +77,7 @@ $files = Get-ChildItem -Path $Source -Recurse -Include *.cpp,*.h,*.hpp,*.mm -Fil
 foreach ($f in $files)
 {
 	if ($f.FullName -eq (Resolve-Path $dl).Path) { continue }
-	$text = Get-Content $f.FullName -Raw
-	if ($text -match '\bs3p2p_\w+' -or $text -match 'RTCPeerConnection') { $problems += ($f.Name + ": uses the WebRTC bridge outside DirectLink.h") }
-	if ($text -match '#\s*include\s*[<"][^>"]*DirectLink\.h[>"]' -and $f.Name -ne "Sockets.cpp") { $problems += ($f.Name + ": includes DirectLink.h (only Sockets.cpp may)") }
+	$problems += @(Find-OutsideUse $f.Name (Get-Content $f.FullName -Raw))
 }
 
 if ($problems.Count -gt 0) { $problems | ForEach-Object { Write-Host "FAIL $_" -ForegroundColor Red }; exit 1 }
