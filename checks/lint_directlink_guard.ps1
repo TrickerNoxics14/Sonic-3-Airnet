@@ -3,6 +3,7 @@
 #   1. In DirectLink.h, everything that needs emscripten (the emscripten.h include, EM_JS, EM_ASM, calls of s3p2p_*) sits inside an #ifdef __EMSCRIPTEN__ block
 #   2. s3p2p_* and RTCPeerConnection appear in no other C++ file
 #   3. DirectLink.h is included only by oxygen_netcore/network/Sockets.cpp
+#   4. In Sockets.cpp, every mDirect.setup( call is on a line that excludes the lobby directory socket (RelayRole::DIRECTORY): the bridge is one browser-wide object that only a game socket may own
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File checks\lint_directlink_guard.ps1            scan, exit 1 on a problem
 #   powershell -NoProfile -ExecutionPolicy Bypass -File checks\lint_directlink_guard.ps1 -SelfTest  prove the scanner catches the bad forms
@@ -53,6 +54,17 @@ function Find-OutsideUse([string]$name, [string]$text)
 	return $problems
 }
 
+# Returns problem strings for rule 4 (the text of Sockets.cpp)
+function Find-DirectorySetup([string]$text)
+{
+	$problems = @()
+	foreach ($line in ($text -split '\r?\n'))
+	{
+		if ($line -match 'mDirect\.setup\(' -and $line -notmatch 'RelayRole::DIRECTORY') { $problems += ("Sockets.cpp: mDirect.setup( on a line that does not exclude RelayRole::DIRECTORY: " + $line.Trim()) }
+	}
+	return $problems
+}
+
 if ($SelfTest)
 {
 	$bad = @('#include <emscripten.h>', 'EM_JS(int, s3p2p_x, (), {});', 'int a = s3p2p_state(0);')
@@ -65,6 +77,9 @@ if ($SelfTest)
 	# rule 3: only Sockets.cpp may include DirectLink.h
 	$ok = $ok -and ((Find-OutsideUse "NetplayManager.cpp" '#include "oxygen_netcore/network/DirectLink.h"').Count -eq 1)
 	$ok = $ok -and ((Find-OutsideUse "Sockets.cpp" '#include "oxygen_netcore/network/DirectLink.h"').Count -eq 0)
+	# rule 4
+	$ok = $ok -and ((Find-DirectorySetup "x = isValid() && mInternal->mDirect.setup(a, b);").Count -eq 1)
+	$ok = $ok -and ((Find-DirectorySetup "x = (role != RelayRole::DIRECTORY) && isValid() && mInternal->mDirect.setup(a, b);").Count -eq 0)
 	if ($ok) { Write-Host "PASS lint_directlink_guard self test"; exit 0 }
 	Write-Host "FAIL lint_directlink_guard self test" -ForegroundColor Red; exit 1
 }
@@ -78,6 +93,7 @@ foreach ($f in $files)
 {
 	if ($f.FullName -eq (Resolve-Path $dl).Path) { continue }
 	$problems += @(Find-OutsideUse $f.Name (Get-Content $f.FullName -Raw))
+	if ($f.Name -eq "Sockets.cpp") { $problems += @(Find-DirectorySetup (Get-Content $f.FullName -Raw)) }
 }
 
 if ($problems.Count -gt 0) { $problems | ForEach-Object { Write-Host "FAIL $_" -ForegroundColor Red }; exit 1 }

@@ -1181,7 +1181,9 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 	mDirectFailures = 0;
 	mDirectLastStart = -1000.0;
 	memset(mDirectLastStates, 0, sizeof(mDirectLastStates));
-	mDirectSupported = isValid() && mInternal->mDirect.setup(mDirectIceServers, mDirectEnabled);
+	// Only a game connection (host or friend) may use the direct connections: they live in ONE browser-wide object (globalThis.__s3p2p), so a lobby directory socket that set it up
+	// would reset the game's channels, take over the signalling messages meant for the game (and drop them) and shut everything down when it closes
+	mDirectSupported = (role != RelayRole::DIRECTORY) && isValid() && mInternal->mDirect.setup(mDirectIceServers, mDirectEnabled);
 #ifdef __EMSCRIPTEN__
 	if (isValid())
 	{

@@ -614,3 +614,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `rg -n 'std::(min|max)\(' sonic3air_online_stable_source/Oxygen/oxygenengine/source/oxygen_netcore` (only unparenthesised uses inside files that include windows headers matter)
 - Siblings: Sockets.cpp:1422 fixed ((std::min)); DirectLink.h has none; other files already use the parenthesised form or do not include windows headers
 - Guard: build_online_stable.ps1 (Windows build) is part of the final verification of every change to shared netcore files
+
+## 2026-11-15 · shared-global-owned-by-every-instance · cpp
+- Seed: Sockets.cpp:1184 - startRelay() set up the browser-wide direct-connection bridge for the lobby directory socket too
+- Broken assumption: only one UDPSocket per page uses the direct connections; every relay role is a game connection
+- Search: `git grep -n 'mDirect.setup(' ; git grep -n 'startRelay(' ; checks/lint_directlink_guard.ps1`
+- Siblings: Sockets.cpp stopRelay mDirect.shutdown fixed (inert when never set up) · Sockets.cpp updateDirect polling the shared signal queue fixed (returns when mdirectsupported false)
+- Guard: checks/lint_directlink_guard.ps1 rule 4 plus self test; web_net P1b/P1c
