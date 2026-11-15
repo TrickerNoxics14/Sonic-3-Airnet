@@ -196,19 +196,22 @@ export class Instance {
 	async openGame(baseURL, query = '') {
 		await this.navigate(`${baseURL}/sonic3air_web.html${query}`);
 		for (let i = 0; i < 120; ++i) {
-			const state = await this.eval(`(typeof Module !== 'undefined' && Module.calledRun ? 'run' : 'wait') + ':' + (document.getElementById('s3kPromptMessage') ? 'prompt' : 'noprompt') + ':' + (typeof FS !== 'undefined')`).catch(() => 'wait');
+			const state = await this.eval(`(typeof Module !== 'undefined' && Module.calledRun ? 'run' : 'wait') + ':' + (document.getElementById('s3kPromptMessage') ? 'prompt' : 'noprompt') + ':' + (typeof FS !== 'undefined' && FS.analyzePath('/sonic3air/savedata').exists)`).catch(() => 'wait');
 			if (/^run:prompt:true/.test(state)) break;
 			await sleep(250);
 		}
 		const result = await this.eval(`(async () => {
-			const data = new Uint8Array(await (await fetch('/__rom.bin')).arrayBuffer());
-			if (data.length !== 4194304) return 'rom size ' + data.length;
-			Module['FS_createDataFile']('/sonic3air/savedata/', 'Sonic_Knuckles_wSonic3.bin', data, true, true, true);
-			await new Promise((resolve) => FS.syncfs(resolve));
-			hidePageUI();
-			if (!FS.analyzePath('/sonic3air/___internal/').exists) FS.mkdir('/sonic3air/___internal/');
-			startGame();
-			return 'started';
+			let step = 'fetch the ROM';
+			try {
+				const data = new Uint8Array(await (await fetch('/__rom.bin')).arrayBuffer());
+				if (data.length !== 4194304) return 'rom size ' + data.length;
+				step = 'create the ROM file'; if (!FS.analyzePath('/sonic3air/savedata').exists) FS.mkdir('/sonic3air/savedata'); Module['FS_createDataFile']('/sonic3air/savedata/', 'Sonic_Knuckles_wSonic3.bin', data, true, true, true);
+				step = 'sync the file system'; await new Promise((resolve) => FS.syncfs(resolve));
+				step = 'hide the page UI'; hidePageUI();
+				step = 'make the internal folder'; if (!FS.analyzePath('/sonic3air/___internal/').exists) FS.mkdir('/sonic3air/___internal/');
+				step = 'start the game'; startGame();
+				return 'started';
+			} catch (e) { return 'failed at "' + step + '": ' + (e && (e.message || e.name)) + ' errno=' + (e && e.errno); }
 		})()`);
 		if (result !== 'started') throw new Error(`could not start the game: ${result}`);
 	}

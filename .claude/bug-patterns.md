@@ -621,3 +621,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `git grep -n 'mDirect.setup(' ; git grep -n 'startRelay(' ; checks/lint_directlink_guard.ps1`
 - Siblings: Sockets.cpp stopRelay mDirect.shutdown fixed (inert when never set up) · Sockets.cpp updateDirect polling the shared signal queue fixed (returns when mdirectsupported false)
 - Guard: checks/lint_directlink_guard.ps1 rule 4 plus self test; web_net P1b/P1c
+
+## 2026-11-15 · stale-channel-after-identity-change · cpp
+- Seed: Sockets.cpp CLIENT_JOINED: a friend that got a new relay place kept using its old direct channel for the first datagrams of the restarted game connection
+- Broken assumption: updateDirect() runs before the netplay layer sends again after a relay rejoin
+- Search: `git grep -n 'mRelayRejoinCount\|mDirectRejoinSeen' ; git grep -n 'closePeer(' `
+- Siblings: Sockets.cpp updateDirect rejoin handler fixed (kept, now idempotent; the close happens at the moment the new place is learned) · host side stale direct peer of the old friend number not a bug (closes by itself when the friend closes its pc; relay drops data to a gone pipe)
+- Guard: web_net session P6 (relay WebSockets dropped during direct play, friend frames must advance)

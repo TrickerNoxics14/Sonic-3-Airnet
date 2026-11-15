@@ -1327,7 +1327,18 @@ bool UDPSocket::handleRelayPacket(ReceiveResult& outReceiveResult)
 				// The host knows us by the old place, so the game connection has to start again over the new one.
 				const uint32 newToken = RelayProtocol::get32(data + RelayProtocol::HEADER_SIZE);
 				if (mRelayToken != 0 && newToken != mRelayToken)
+				{
 					++mRelayRejoinCount;
+					// A direct channel built for the old place is useless too (the host knows it as the old friend number), and it must be gone BEFORE the game connection
+					// starts again: the netplay layer reacts to the new place at once, and its first datagrams would otherwise still travel over the old channel
+					// and reach the host as the old friend (updateDirect() only runs later in the same tick)
+					if (mDirectSupported && nullptr != mInternal)
+					{
+						mInternal->mDirect.closePeer(0);
+						mDirectFailures = 0;
+						mDirectRejoinSeen = mRelayRejoinCount;
+					}
+				}
 				mRelayToken = newToken;
 			}
 			mRelayReady = true;
