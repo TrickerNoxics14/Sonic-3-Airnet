@@ -23,7 +23,8 @@ export function defaultRomPath() {
 	return path.join(base, 'Sonic_Knuckles_wSonic3.bin');
 }
 
-export function startWebServer(webDir, romPath, port = 0) {
+// patchFile(name, data) may return other bytes for a file (used to serve an "old version" of the page: the same build with another netplay compatibility text)
+export function startWebServer(webDir, romPath, port = 0, patchFile = null) {
 	const server = http.createServer((request, response) => {
 		const url = new URL(request.url, 'http://x');
 		response.setHeader('Cache-Control', 'no-store');
@@ -35,7 +36,8 @@ export function startWebServer(webDir, romPath, port = 0) {
 		}
 		let file = path.normalize(path.join(webDir, decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname)));
 		if (!file.startsWith(path.normalize(webDir)) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { response.writeHead(404); response.end('not found'); return; }
-		const data = fs.readFileSync(file);
+		let data = fs.readFileSync(file);
+		if (patchFile) data = patchFile(path.basename(file), data) ?? data;
 		response.writeHead(200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream', 'Content-Length': data.length });
 		response.end(data);
 	});
@@ -133,6 +135,12 @@ export class Instance {
 			await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 			await sleep(gap);
 		}
+	}
+
+	/** Makes the page area this big (a phone, a small window); without arguments it goes back to the window's own size. */
+	async resize(width, height) {
+		if (width) await this.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+		else await this.send('Emulation.clearDeviceMetricsOverride');
 	}
 
 	async shot(file) {

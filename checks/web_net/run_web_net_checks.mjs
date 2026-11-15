@@ -9,6 +9,8 @@
 //            P direct (WebRTC) connections between two browsers: P1 works (traffic on the data channel, relay idle), P2 blocked (relay carries the game),
 //              P3 the host cannot do it (old client / Windows game), P4 the channel dies during the game (closed, silent, one-way, long)
 //              P5 the path is blocked at the start and again in the middle of the game, and the game returns to the channel each time it opens up (relay idle again)
+//            L the public lobby in the browser menus: L1 list + quick join + play in sync, L2 6 digit number (keyboard and number pad) and private lobby, L3 wrong codes and lockout,
+//              L4 server asleep (waking message, retries) , L5 server down, L6 old page vs new page (reload message), L7 a server without a lobby list
 //            N a Windows game and a browser in one lobby (both ways round)
 // Everything it starts (relay, web server, browsers, game) is stopped at the end; the ROM is only served from where the game keeps it, to 127.0.0.1.
 import fs from 'node:fs';
@@ -16,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { startHarness, sleep, defaultRomPath } from './harness.mjs';
+import { startHarness, startWebServer, sleep, defaultRomPath } from './harness.mjs';
 import { createRelayServer } from '../relay_ws/server.mjs';
 import { startLagProxy } from './tcp_lag_proxy.mjs';
 
@@ -25,7 +27,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,N').split(',');
 const withNative = args.includes('--native');
 const webDir = path.join(root, 'web_build');
 
@@ -266,8 +268,9 @@ async function sessionC(relay) {
 		await b.toLobby();
 		b.forgetLogs();
 		await b.createLobby();
-		const unreachable = await b.waitLog(/Lobby: cannot reach the relay server/, 25000);
-		check('C4', 'a relay that cannot be reached: the host lobby says so after 10 s, and the game keeps trying to connect', unreachable && b.hasLog(/connecting to the relay server/));
+		const unreachable = await b.waitLog(/Lobby: the relay server has not registered this lobby after 10 seconds/, 25000);
+		const waking = b.hasLog(/Lobby: waking the server/);
+		check('C4', 'a relay that cannot be reached: the host lobby says it is waking the server (the server may be asleep; session L4 and L5 follow that through to the end), and the game keeps trying to connect', unreachable && waking && b.hasLog(/connecting to the relay server/));
 		await shot(b, 'C4_unreachable');
 	} finally {
 		await h.close();
@@ -694,8 +697,440 @@ async function sessionP6(relay) {
 	} finally { dumpConsole('P6', host, friend); await h.close(); }
 }
 
+// =====================================================================================================================
+// Session L: the public lobby in the browser menus (list, quick join, number codes, wrong codes and lockout, a server that is asleep or down, an old page)
+// Every part uses its own lobby server on 127.0.0.1 (WebSocket only, no UDP), so its counters, listings and the lockout of an address start from nothing.
+async function startLobbyRelay({ port = 0, limits = {} } = {}) {
+	const server = createRelayServer({ port, udp: false, bind: '127.0.0.1', statsSeconds: 0, limits });
+	const ports = await server.start();
+	return { server, ports, core: server.core, entries: () => [...server.core.directory.entries.values()], stop: () => server.stop() };
+}
+
+const relayQuery = (port, extra = '') => `?relay=ws://127.0.0.1:${port}&p2p=off${extra}`;
+
+/** Opens the page in a browser (gives it the ROM the first time for each address) and goes on to the main menu. */
+async function bootPage(inst, baseURL, query) {
+	inst.forgetLogs();
+	inst.opened ??= new Set();
+	if (!inst.opened.has(baseURL)) { await inst.openGame(baseURL, query); inst.opened.add(baseURL); }
+	else await inst.navigate(`${baseURL}/sonic3air_web.html${query}`);
+	await inst.waitLog(/Ready to go/, 90000);
+	await sleep(3000);
+	return inst.toMainMenu();
+}
+
+/** Screenshots of the menu at the window's own size, at a small window and at a phone held upright (the game picture shrinks with the page). */
+async function shotSizes(inst, name, sizes = [[0, 0, ''], [640, 360, '_small'], [360, 640, '_phone']]) {
+	for (const [w, hgt, suffix] of sizes) {
+		await inst.resize(w, hgt);
+		await sleep(700);
+		await shot(inst, `L_${name}${suffix}`);
+	}
+	await inst.resize();
+	await sleep(300);
+}
+
+/** The digit keys of the number pad: moves from the pad key `from` (0-11, rows of 3: 1 2 3 / 4 5 6 / 7 8 9 / DEL 0 JOIN) to the key for `digit` and presses A. Returns the new position. */
+async function padPress(inst, from, digit) {
+	const target = digit === 0 ? 10 : digit - 1;
+	let dx = (target % 3) - (from % 3), dy = Math.floor(target / 3) - Math.floor(from / 3);
+	if (dx === 2) dx = -1; else if (dx === -2) dx = 1;		// the columns wrap around
+	const keys = [];
+	for (let i = 0; i < Math.abs(dy); ++i) keys.push(dy > 0 ? 'Down' : 'Up');
+	for (let i = 0; i < Math.abs(dx); ++i) keys.push(dx > 0 ? 'Right' : 'Left');
+	await inst.keys(keys, 180);
+	await inst.key('a');
+	await sleep(250);
+	return target;
+}
+
+const lobbyMenuMessage = (inst) => [...inst.allLogs].reverse().map((l) => /Lobby: whole message: (.*)/s.exec(l)?.[1]?.trim()).find(Boolean) ?? '';
+
+async function sessionL1() {
+	console.log('--- session L1: a public lobby is listed, quick join finds it, both play in sync');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 2, basePort: 9420 });
+	try {
+		const [host, friend] = h.instances;
+		const query = relayQuery(R.ports.port);
+		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
+		await host.toLobby();
+		await shotSizes(host, 'home');
+		host.forgetLogs();
+		await host.createLobby();
+		await host.waitLog(/Lobby: screen HOSTING/, 10000);
+		const published = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
+		check('L1a', 'browser A creates a lobby in the ONLINE menu (public by default): the lobby server lists it with a 6 digit code, its name, 1 of 4 players, waiting', published && /^[1-9][0-9]{5}$/.test(published.code) && published.name === 'My lobby' && published.players === 1 && published.max === 4 && !published.inGame, JSON.stringify(published && { code: published.code, name: published.name, host: published.host, players: published.players, max: published.max }));
+		await sleep(1500);
+		await shot(host, 'L_hosting');
+		await shotSizes(host, 'hosting', [[640, 360, '_small'], [360, 640, '_phone']]);
+
+		// B opens PUBLIC LOBBIES and sees it
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.key('Return');
+		await friend.waitLog(/Lobby: screen LIST/, 8000);
+		const seen = await friend.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
+		await sleep(800);
+		await shotSizes(friend, 'list');
+		check('L1b', 'browser B opens PUBLIC LOBBIES and the list shows the lobby of A', seen, seen ?? friend.allLogs.slice(-5).join(' | '));
+
+		// quick join from the first screen
+		await friend.key('Escape');
+		await friend.waitLog(/Lobby: screen START/, 8000);
+		friend.forgetLogs();
+		await friend.keys(['Down', 'Return'], 500);
+		const picked = await friend.waitLog(/Lobby: quick join picks the lobby "My lobby" \(1\/4\)/, 15000);
+		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+		check('L1c', 'QUICK JOIN picks the lobby from the list and B ends up in it as player 2 (code proof both ways through the relay)', picked && proved, `${picked ?? 'no pick'} | ${proved ?? 'not joined'}`);
+		await sleep(2500);
+		await shot(friend, 'L_joined');
+		await shotSizes(friend, 'joined', [[360, 640, '_phone']]);
+		const after = await waitFor(() => R.entries()[0]?.players === 2 ? R.entries()[0] : null, 15000);
+		check('L1d', 'the listing follows the lobby: 2 of 4 players after B joined', after, JSON.stringify(after && { players: after.players }));
+
+		const loaded = await startNormalGame(host, [friend]);
+		const play = await playAndMeasure(host, [friend], 20, 'L1');
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('L1e', 'the host starts a new game, both browsers load it and stay in sync for 20 s of play with inputs from both (no repairs, last sync recent)', loaded[0] && hs.ok && fs_.ok && !host.hasLog(/state differs from the host|EXC/) && !friend.hasLog(/state differs from the host|EXC/), `host: ${hs.why}; friend: ${fs_.why}`);
+		const playing = R.entries()[0];
+		check('L1f', 'the listing shows the lobby as playing now, and nothing was dropped as invalid by the server', playing?.inGame === true && R.core.stats.droppedInvalid === 0, JSON.stringify({ inGame: playing?.inGame, dropped: R.core.stats.droppedInvalid }));
+	} finally { await h.close(); await R.stop(); }
+}
+
+async function sessionL2() {
+	console.log('--- session L2: join with the 6 digit number (typed and with the number pad), a private lobby is not listed');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 2, basePort: 9424 });
+	try {
+		const [host, friend] = h.instances;
+		const query = relayQuery(R.ports.port);
+		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
+		await host.toLobby();
+		host.forgetLogs();
+		await host.keys(['Down', 'Down', 'Return'], 600);		// CREATE LOBBY
+		await host.waitLog(/Lobby: screen CREATE/, 8000);
+		await host.keys(['Down', 'Right', 'Down', 'Down', 'Return'], 600);		// LOBBY: public -> private, then OPEN LOBBY
+		await host.waitLog(/Lobby: screen HOSTING/, 10000);
+		const entry = await waitFor(() => R.entries().find((e) => e.code), 20000);
+		check('L2a', 'a private lobby gets its 6 digit code from the server but is not in the public list', entry && !entry.isPublic, JSON.stringify(entry && { code: entry.code, isPublic: entry.isPublic }));
+		await shot(host, 'L_hosting_private');
+
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.key('Return');
+		await friend.waitLog(/Lobby: screen LIST/, 8000);
+		await friend.waitLog(/Lobby: the list shows 0 public lobbies/, 15000);
+		await sleep(500);
+		await shot(friend, 'L_list_empty');
+		await friend.key('Escape');
+		await friend.waitLog(/Lobby: screen START/, 8000);
+		friend.forgetLogs();
+		await friend.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		const none = await friend.waitLog(/Lobby: the lookup ended: There is no open lobby for your version/, 20000);
+		await sleep(800);
+		check('L2b', 'the private lobby is not listed: B\'s list is empty and QUICK JOIN says there is no open lobby (it does not join a private one)', none && lobbyMenuMessage(friend).startsWith('There is no open lobby'), lobbyMenuMessage(friend));
+		await shot(friend, 'L_quick_none');
+
+		// the number pad: three digits typed on the keyboard, three with the D-pad and A
+		friend.forgetLogs();
+		await friend.openJoin();		// (the failed QUICK JOIN left the menu on its first screen)
+		await friend.waitLog(/Lobby: screen JOIN/, 8000);
+		await friend.type(entry.code.slice(0, 3));
+		await sleep(400);
+		let pad = 0;		// the cursor starts on the 1 key
+		for (const digit of entry.code.slice(3)) pad = await padPress(friend, pad, +digit);
+		const six = await friend.waitLog(/Lobby: the code screen holds 6 digits/, 5000);
+		check('L2c', 'the number pad takes digits typed on the keyboard and digits pressed with D-pad + A (6 digits in the field)', six, six ?? friend.allLogs.filter((l) => /Lobby/.test(l)).slice(-4).join(' | '));
+		await shotSizes(friend, 'join', [[0, 0, ''], [640, 360, '_small'], [360, 640, '_phone']]);
+		await friend.key('Return');		// START = JOIN
+		const resolved = await friend.waitLog(/Lobby: the lobby server found the lobby, joining it/, 20000);
+		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+		check('L2d', 'JOIN with the 6 digit number: the server resolves it, B joins the private lobby as player 2', resolved && proved, `${resolved ?? 'not resolved'} | ${proved ?? 'not joined'}`);
+		check('L2e', 'a right code costs no strike (the lockout counter stays empty)', R.core.directory.stats.notFound === 0 && R.core.directory.stats.resolved >= 1, JSON.stringify(R.core.directory.stats));
+	} finally { await h.close(); await R.stop(); }
+}
+
+async function sessionL3() {
+	console.log('--- session L3: wrong codes in the browser menu, and the lockout after five of them');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 1, basePort: 9428 });
+	try {
+		const [b] = h.instances;
+		await bootPage(b, h.baseURL, relayQuery(R.ports.port));
+		await b.toLobby();
+		// (pictures of two more screens while here: CREATE LOBBY and the settings, which in a browser hold the relay server and no lobby server)
+		await b.keys(['Down', 'Down', 'Return'], 500);
+		await b.waitLog(/Lobby: screen CREATE/, 8000);
+		await sleep(600);
+		await shotSizes(b, 'create', [[0, 0, ''], [640, 360, '_small']]);
+		await b.key('Escape');
+		await b.waitLog(/Lobby: screen START/, 8000);
+		await b.keys(['Down', 'Down', 'Down', 'Down', 'Return'], 500);
+		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
+		await sleep(600);
+		await shotSizes(b, 'settings', [[0, 0, ''], [640, 360, '_small']]);
+		await b.key('Escape');
+		await b.waitLog(/Lobby: screen START/, 8000);
+		b.forgetLogs();
+		await b.openJoin();
+		await b.waitLog(/Lobby: screen JOIN/, 8000);
+		await b.type('12345');
+		await b.key('Return');
+		await sleep(1200);
+		check('L3a', 'five digits: the menu says a lobby code has 6 digits and sends nothing to the server', /6 digits/.test(lobbyMenuMessage(b)) && R.core.directory.stats.notFound === 0 && R.core.directory.stats.resolved === 0, lobbyMenuMessage(b));
+		await shot(b, 'L_code_short');
+		await b.type('6');
+		b.forgetLogs();
+		await b.key('Return');
+		const unknown = await b.waitLog(/Lobby: the lookup ended: There is no lobby with this code/, 20000);
+		await sleep(600);
+		check('L3b', 'a 6 digit code that nobody has opened: "There is no lobby with this code" and the menu is back on the code screen', unknown && R.core.directory.stats.notFound === 1 && /no lobby with this code/.test(lobbyMenuMessage(b)), lobbyMenuMessage(b));
+		await shot(b, 'L_code_wrong');
+		// four more wrong codes (the last digit changes): the fifth in a minute locks the address
+		const start = Date.now();
+		for (let n = 2; n <= 5; ++n) {
+			await b.key('Backspace');
+			await b.type(String(n));
+			b.forgetLogs();
+			await b.key('Return');
+			await b.waitLog(/Lobby: the lookup ended/, 20000);
+			await sleep(400);
+		}
+		check('L3c', 'the fifth wrong code within a minute is counted by the server (5 strikes)', R.core.directory.stats.notFound === 5 && Date.now() - start < 60000, `${JSON.stringify(R.core.directory.stats)} in ${Math.round((Date.now() - start) / 1000)} s after the first`);
+		await b.key('Backspace');
+		await b.type('6');
+		b.forgetLogs();
+		await b.key('Return');
+		const locked = await b.waitLog(/Lobby: the lookup ended: Too many wrong codes/, 20000);
+		await sleep(600);
+		check('L3d', 'the sixth try is refused as "Too many wrong codes. Please wait 5 minute(s)" and the server did not look the code up (lockout holds for the browser path)', locked && R.core.directory.stats.throttled >= 1 && R.core.directory.stats.notFound === 5 && /Please wait 5 minute/.test(lobbyMenuMessage(b)), `${lobbyMenuMessage(b)}; ${JSON.stringify(R.core.directory.stats)}`);
+		await shot(b, 'L_code_locked');
+		// the menu is not stuck: back out, then another screen opens
+		b.forgetLogs();
+		await b.key('Escape');
+		const home = await b.waitLog(/Lobby: screen START/, 8000);
+		await b.key('Return');
+		const list = await b.waitLog(/Lobby: screen LIST/, 8000);
+		check('L3e', 'after the lockout the menu still works (back to the first screen, PUBLIC LOBBIES opens)', home && list);
+	} finally { await h.close(); await R.stop(); }
+}
+
+/** A free TCP port number on 127.0.0.1 (nothing listens on it afterwards). */
+async function freePort() {
+	const { default: net } = await import('node:net');
+	return new Promise((resolve) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
+}
+
+async function sessionL4() {
+	console.log('--- session L4: the server is asleep and wakes up late (waking message, retries), then a server that stays down');
+	const port = await freePort();
+	const h = await startHarness({ webDir, instances: 1, basePort: 9432 });
+	let R = null;
+	try {
+		const [b] = h.instances;
+		await bootPage(b, h.baseURL, relayQuery(port));
+		await b.toLobby();
+		b.forgetLogs();
+		await b.keys(['Down', 'Return'], 500);		// QUICK JOIN while the server does not answer
+		const waking = await b.waitLog(/Lobby: waking the server/, 12000);
+		const t0 = Date.now();
+		await sleep(14000);
+		const early = b.hasLog(/Lobby: the lookup ended/);
+		check('L4a', 'a server that does not answer: the menu says it is waking the server and keeps retrying (it has not given up after 25 s)', waking && !early, waking ?? b.allLogs.filter((l) => /Lobby/.test(l)).slice(-4).join(' | '));
+		await shotSizes(b, 'waking', [[0, 0, ''], [640, 360, '_small'], [360, 640, '_phone']]);
+		R = await startLobbyRelay({ port });		// the server wakes up
+		const ended = await b.waitLog(/Lobby: the lookup ended/, 45000);
+		check('L4b', 'when the server is up the retrying request goes through by itself (no key pressed): QUICK JOIN answers "no open lobby"', ended && /There is no open lobby/.test(ended) && R.core.directory.stats.listRequests >= 1, `${ended ?? 'no end'} after ${Math.round((Date.now() - t0) / 1000)} s`);
+		await shot(b, 'L_waking_done');
+		await R.stop(); R = null;
+
+		// a lobby opened while the server sleeps registers when it wakes up
+		await bootPage(b, h.baseURL, relayQuery(port));
+		await b.toLobby();
+		b.forgetLogs();
+		await b.createLobby();
+		await b.waitLog(/Lobby: screen HOSTING/, 10000);
+		const hostWaking = await b.waitLog(/Lobby: waking the server/, 20000);
+		await sleep(3000);
+		await shot(b, 'L_hosting_waking');
+		await shotSizes(b, 'hosting_waking', [[640, 360, '_small'], [360, 640, '_phone']]);
+		R = await startLobbyRelay({ port });
+		const listed = await waitFor(() => R.entries().find((e) => e.isPublic), 45000);
+		check('L4c', 'a lobby opened while the server sleeps says so, and is registered and listed by itself when the server wakes up', hostWaking && listed, `${hostWaking ?? 'no waking text'} | ${listed ? 'listed ' + listed.code : 'not listed'}`);
+		await sleep(2000);
+		await shot(b, 'L_hosting_after_waking');
+		await R.stop(); R = null;
+	} finally { await h.close(); if (R) await R.stop(); }
+}
+
+async function sessionL5() {
+	console.log('--- session L5: the server stays down');
+	const h = await startHarness({ webDir, instances: 1, basePort: 9436 });
+	try {
+		const [b] = h.instances;
+		await bootPage(b, h.baseURL, '?relay=ws://127.0.0.1:9&p2p=off');
+		await b.toLobby();
+		b.forgetLogs();
+		const t0 = Date.now();
+		await b.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		const ended = await b.waitLog(/Lobby: the lookup ended: The lobby server does not answer/, 90000);
+		const seconds = (Date.now() - t0) / 1000;
+		check('L5a', 'a server that stays down: after about a minute of retries QUICK JOIN says the lobby server does not answer (not before 50 s, not after 75 s)', ended && seconds > 50 && seconds < 75, `${ended ?? 'no end'} after ${Math.round(seconds)} s`);
+		await sleep(600);
+		await shot(b, 'L_server_down');
+		await shotSizes(b, 'server_down', [[360, 640, '_phone']]);
+		b.forgetLogs();
+		await b.key('Down');		// the menu is not broken: PUBLIC LOBBIES, then back
+		await b.key('Up');
+		await b.key('Return');
+		const list = await b.waitLog(/Lobby: screen LIST/, 8000);
+		await sleep(2500);
+		await shot(b, 'L_list_down');
+		await b.key('Escape');
+		const back = await b.waitLog(/Lobby: screen START/, 8000);
+		await b.keys(['Down', 'Down', 'Down', 'Return'], 500);
+		const join = await b.waitLog(/Lobby: screen JOIN/, 8000);
+		await b.type('123456');
+		b.forgetLogs();
+		await b.key('Return');
+		const joinEnd = await b.waitLog(/Lobby: the lookup ended: The lobby server does not answer/, 90000);
+		check('L5b', 'with the server down the menu stays usable (list opens with a clear text, back works, the code screen opens and a code lookup ends with the same clear message)', list && back && join && joinEnd, `${!!list} ${!!back} ${!!join} ${joinEnd ?? 'no end'}`);
+	} finally { await h.close(); }
+}
+
+async function sessionL6() {
+	let R2 = null;
+	console.log('--- session L6: an old page and a new page meet in a lobby (other version): reload message, no broken game');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 2, basePort: 9440 });
+	// "the old page" is this page with another netplay compatibility text ("airnet-1" -> "airnet-0", same length): the lobby server marks its lobbies and lists as another version, and the start of a game is refused
+	let patched = 0;
+	const old = await startWebServer(webDir, defaultRomPath(), 0, (name, data) => {
+		if (!name.endsWith('.wasm')) return null;
+		const copy = Buffer.from(data);
+		const at = copy.indexOf('airnet-1');
+		if (at < 0) return null;
+		copy.write('airnet-0', at, 'latin1'); ++patched;
+		return copy;
+	});
+	try {
+		const [newPage, oldPage] = h.instances;
+		const oldURL = `http://127.0.0.1:${old.port}`;
+		const query = relayQuery(R.ports.port);
+		await Promise.all([bootPage(newPage, h.baseURL, query), bootPage(oldPage, oldURL, query)]);
+		check('L6a', 'the old page (same build, other compatibility text) starts and reaches the menu', patched >= 1);
+
+		// the new page hosts; the old page sees the lobby as another version and is told to reload
+		await newPage.toLobby();
+		newPage.forgetLogs();
+		await newPage.createLobby();
+		await newPage.waitLog(/Lobby: screen HOSTING/, 10000);
+		const entry = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
+		await oldPage.toLobby();
+		oldPage.forgetLogs();
+		await oldPage.key('Return');
+		await oldPage.waitLog(/Lobby: screen LIST/, 8000);
+		await oldPage.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
+		await sleep(600);
+		await shotSizes(oldPage, 'list_other', [[0, 0, ''], [360, 640, '_phone']]);
+		oldPage.forgetLogs();
+		await oldPage.key('Up');		// (the cursor waits on REFRESH, because no lobby of the list can be joined)
+		await oldPage.key('Return');		// the row of the other version
+		await sleep(900);
+		const msg = lobbyMenuMessage(oldPage);
+		check('L6b', 'the list marks the lobby of the other version and choosing it says to reload the page (a new version is out) instead of trying to join', /[Rr]eload the page/.test(msg) && !oldPage.hasLog(/asking the relay server to let us in/), msg);
+		await shot(oldPage, 'L_other_message');
+
+		// joining with the number anyway: the lobby takes it, the start of the game is refused with the same advice
+		await oldPage.key('Escape');
+		await oldPage.waitLog(/Lobby: screen START/, 8000);
+		await oldPage.openJoin();
+		await oldPage.waitLog(/Lobby: screen JOIN/, 8000);
+		await oldPage.type(entry.code);
+		oldPage.forgetLogs();
+		await oldPage.key('Return');
+		const proved = await oldPage.waitLog(/the host proved the code, player slot 2/, 40000);
+		await sleep(2500);
+		await oldPage.key('Return');		// READY
+		await sleep(3000);
+		newPage.forgetLogs();
+		await newPage.key('Return');		// START GAME
+		const refused = await oldPage.waitLog(/Lobby: showing the problem to the player \((MOD|VERSION)_MISMATCH\)/, 30000);
+		await sleep(1200);
+		const msg2 = lobbyMenuMessage(oldPage);
+		check('L6c', 'the old page joined by number; when the host starts, the old page is refused and says "reload the page, a new version is out" (not a broken game: no error, back at the first screen)', proved && refused && /[Rr]eload (the|this) page/.test(msg2) && !oldPage.hasLog(/EXC|assert/i), `${refused ?? 'no refusal'} | ${msg2}`);
+		await shot(oldPage, 'L_mismatch_start');
+		await shotSizes(oldPage, 'mismatch_start', [[360, 640, '_phone']]);
+		await oldPage.key('Escape');
+		const usable = await oldPage.waitLog(/Lobby: screen/, 5000);
+		check('L6d', 'after the refusal the old page\'s menu is still usable', usable);
+
+		// the other way round (a fresh lobby server, so no listing of the first part is left): the old page hosts, the new page looks at the list
+		R2 = await startLobbyRelay();
+		const query2 = relayQuery(R2.ports.port);
+		await Promise.all([bootPage(newPage, h.baseURL, query2), bootPage(oldPage, oldURL, query2)]);
+		await oldPage.toLobby();
+		oldPage.forgetLogs();
+		await oldPage.createLobby();
+		await oldPage.waitLog(/Lobby: screen HOSTING/, 10000);
+		await waitFor(() => R2.entries().find((e) => e.isPublic && e.code), 20000);
+		await newPage.toLobby();
+		newPage.forgetLogs();
+		await newPage.key('Return');
+		await newPage.waitLog(/Lobby: screen LIST/, 8000);
+		await newPage.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
+		await sleep(600);
+		newPage.forgetLogs();
+		await newPage.key('Up');
+		await newPage.key('Return');
+		await sleep(900);
+		const msg3 = lobbyMenuMessage(newPage);
+		check('L6e', 'the other way round (old page hosts, new page browses) the lobby is also marked as another version, with the same advice', /[Rr]eload the page/.test(msg3), msg3);
+	} finally { await h.close(); await new Promise((resolve) => { old.server.closeAllConnections?.(); old.server.close(resolve); }); await R.stop(); if (R2) await R2.stop(); }
+}
+
+async function sessionL7() {
+	console.log('--- session L7: a server without a lobby list (a relay older than the lobby directory): a clear message, the long code still works');
+	const R = await startLobbyRelay({ limits: { directoryEnabled: false } });
+	const h = await startHarness({ webDir, instances: 2, seeds: [0x41, 0x52], basePort: 9444 });
+	try {
+		const [host, friend] = h.instances;
+		const query = relayQuery(R.ports.port);
+		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		const ended = await friend.waitLog(/Lobby: the lookup ended: This server has no list of public lobbies/, 30000);
+		await sleep(800);
+		check('L7a', 'a server that relays but has no lobby directory: QUICK JOIN says at once (within 30 s, not after a minute of retries) that the server has no list and that a long code still works', ended && /13 digits/.test(lobbyMenuMessage(friend)), `${ended ?? 'no end'} | ${lobbyMenuMessage(friend)}`);
+		await shot(friend, 'L_no_list_home');
+		await friend.key('Return');		// PUBLIC LOBBIES
+		await friend.waitLog(/Lobby: screen LIST/, 8000);
+		await sleep(1500);
+		await shot(friend, 'L_no_list_list');
+		await friend.key('Escape');
+		await friend.waitLog(/Lobby: screen START/, 8000);
+
+		await host.toLobby();
+		host.forgetLogs();
+		await host.createLobby();
+		const known = await host.waitLog(/the relay server knows this lobby/, 20000);
+		await sleep(9000);
+		await shot(host, 'L_hosting_no_list');
+		check('L7b', 'a lobby can still be opened on that server (the relay knows it) and nothing is listed', known && R.entries().length === 0, known ?? '');
+		friend.forgetLogs();
+		await friend.openJoin();
+		await friend.waitLog(/Lobby: screen JOIN/, 8000);
+		await friend.type(codeForSeed(0x41));
+		await friend.key('Return');
+		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+		check('L7c', 'the friend joins that lobby with the long code through the same server', proved);
+	} finally { await h.close(); await R.stop(); }
+}
+
 let exitCode = 0;
-const relay = { relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
+const relay ={ relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
 	relay.ports = await relay.relay.start();
 	if (only.includes('A')) await sessionA(relay);
@@ -707,6 +1142,7 @@ try {
 	if (only.includes('P') || only.includes('P4')) await sessionP4(relay);
 	if (only.includes('P') || only.includes('P5')) await sessionP5(relay);
 	if (only.includes('P') || only.includes('P6')) await sessionP6(relay);
+	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7]]) if (only.includes('L') || only.includes(id)) await fn();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

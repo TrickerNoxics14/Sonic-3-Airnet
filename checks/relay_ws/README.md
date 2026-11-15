@@ -80,7 +80,7 @@ The web checks (checks/web_net, session P) prove this on one PC only: headless C
 * **Zero-setup way for browser players only:** any free web host that runs a Docker image or Node program and supports
   WebSockets (Render, Koyeb, Fly.io and similar): connect the repository, use this folder as the root, command
   `node server.mjs`, set `UDP_PORT=0` and `TRUST_PROXY=1`. They give you the `https://`/`wss://` address. Free instances
-  usually go to sleep when unused, so the first player may wait up to a minute while the relay wakes up.
+  usually go to sleep when unused, so the first player may wait up to a minute while the relay wakes up. The browser build waits for that: its menus say "Waking the server up, retrying" and retry for 60 seconds before they give up (see session L4 and L5 in checks/web_net).
   These hosts have no UDP, so Windows players cannot use that relay.
 * Do not run it on the PC you play on, and do not leave it open on a home connection.
 
