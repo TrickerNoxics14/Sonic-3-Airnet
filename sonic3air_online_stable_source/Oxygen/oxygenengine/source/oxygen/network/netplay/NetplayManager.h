@@ -92,7 +92,10 @@ public:
 	std::string getLobbyServerDisplayName() const;
 	inline bool isLobbyServerConfigured() const  { return !getEffectiveLobbyServer().empty(); }
 	LobbyDirectory& getLobbyDirectory()  { return mLobbyDirectory; }
-	enum class LobbyServerState { NOT_SET, BAD_ADDRESS, CONNECTING, READY, UNREACHABLE };
+	// WAKING and NO_LIST happen in the browser build only: WAKING = the server does not answer yet and is being retried for up to SERVER_WAKE_SECONDS (a free web host puts a server to sleep when
+	// nobody uses it), NO_LIST = the connection is up and relays, but the server does not know the lobby list (a relay older than the lobby directory)
+	enum class LobbyServerState { NOT_SET, BAD_ADDRESS, CONNECTING, READY, UNREACHABLE, WAKING, NO_LIST };
+	static const constexpr float SERVER_WAKE_SECONDS = 60.0f;
 	LobbyServerState getLobbyServerState() const;		// What the menu says about the lobby server (NOT_SET means that nobody configured one)
 	void setLobbyDirectoryInUse(bool inUse);			// The online menu is open: keep the directory connection (it also stays while a lobby is published)
 	bool isLobbyServerAddressUsable() const;			// The setting is a name or address that can be used (it says nothing about the server answering)

@@ -329,7 +329,10 @@ NetplayManager::LobbyServerState NetplayManager::getLobbyServerState() const
 	switch (mLobbyDirectory.getStatus())
 	{
 		case LobbyDirectory::Status::READY:			return LobbyServerState::READY;
-		case LobbyDirectory::Status::UNREACHABLE:	return LobbyServerState::UNREACHABLE;
+		case LobbyDirectory::Status::UNREACHABLE:
+			if (mLobbyDirectory.isServerWithoutDirectory())
+				return LobbyServerState::NO_LIST;
+			return mLobbyDirectory.isWaitingForServer() ? LobbyServerState::WAKING : LobbyServerState::UNREACHABLE;
 		default:									return LobbyServerState::CONNECTING;
 	}
 }
@@ -418,6 +421,7 @@ void NetplayManager::updateLobbyDirectory(float deltaSeconds)
 		if (resolveServerSetting(server, address))
 		{
 			mDirectoryAddressState = DirectoryAddressState::OK;
+			mLobbyDirectory.setPatienceSeconds(SERVER_WAKE_SECONDS);		// (the server may be asleep: it is retried for a minute, see LobbyDirectory.h)
 			mLobbyDirectory.start(address);
 		}
 		else
@@ -769,6 +773,12 @@ void NetplayManager::reportFailure(NetplayFailure::Reason reason, const std::str
 	mLastErrorMessage = NetplayFailure::getMessage(reason);
 	if (!detail.empty())
 		mLastErrorMessage += std::string("\n") + detail;
+	if (isBrowserBuild() && (reason == NetplayFailure::Reason::VERSION_MISMATCH || reason == NetplayFailure::Reason::MOD_MISMATCH))
+	{
+		// In a browser the only thing a player can do about another version is to load the page again (an old copy of the page may be cached; a browser has no mods to switch off)
+		mLastErrorMessage = (reason == NetplayFailure::Reason::VERSION_MISMATCH) ? "This page and the host's game are different versions.\nReload the page: a new version is out. The host may need to reload too."
+																				  : "This page and the host's game differ (another version, or mods).\nReload the page: a new version may be out. Browsers cannot use mods.";
+	}
 	RMX_LOG_INFO("Netplay failure: " << NetplayFailure::getName(reason) << (detail.empty() ? "" : " (") << detail << (detail.empty() ? "" : ")"));
 }
 

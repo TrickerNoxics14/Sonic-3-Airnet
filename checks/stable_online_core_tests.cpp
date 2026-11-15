@@ -1912,6 +1912,41 @@ namespace
 			}
 			report("directory client: a server that comes back is found again by itself", back);
 		}
+		{
+			// The browser build sets a patience (a free web host puts a server to sleep): what the states mean. A connection that is up (here always: a UDP socket) to a server
+			// that never answers the directory is "a server without a lobby list" and its requests fail at once; without patience (every other build) that state does not exist.
+			FakeDirectoryServer silent;
+			silent.start();
+			silent.mAnswer = false;
+			LobbyDirectory patient, impatient;
+			patient.setPatienceSeconds(60.0f);
+			patient.start(SocketAddress("127.0.0.1", silent.mPort));
+			impatient.start(SocketAddress("127.0.0.1", silent.mPort));
+			patient.requestList(false, "x");
+			bool unreachable = false;
+			for (int i = 0; i < 40 && !unreachable; ++i)
+			{
+				silent.poll();
+				patient.update(0.5f);
+				impatient.update(0.5f);
+				unreachable = (patient.getStatus() == LobbyDirectory::Status::UNREACHABLE && impatient.getStatus() == LobbyDirectory::Status::UNREACHABLE);
+			}
+			patient.update(0.1f);
+			report("directory client: with patience, a silent server behind an open connection is 'no lobby list' (not waking), and the request fails at once", unreachable && patient.isServerWithoutDirectory() && !patient.isWaitingForServer() && patient.getListState() == LobbyDirectory::RequestState::FAILED);
+			report("directory client: without patience those states never happen", !impatient.isServerWithoutDirectory() && !impatient.isWaitingForServer());
+			report("directory client: the seconds without an answer are counted, and are 0 once the server answers", patient.getSecondsNotReady() > 2.0f);
+			silent.mAnswer = true;
+			bool back = false;
+			for (int i = 0; i < 60 && !back; ++i)
+			{
+				silent.poll();
+				patient.update(0.5f);
+				std::this_thread::sleep_for(std::chrono::milliseconds(3));
+				back = (patient.getStatus() == LobbyDirectory::Status::READY);
+			}
+			patient.update(0.1f);
+			report("directory client: ... and the server counts as ready again", back && patient.getSecondsNotReady() == 0.0f && !patient.isServerWithoutDirectory());
+		}
 	}
 }
 

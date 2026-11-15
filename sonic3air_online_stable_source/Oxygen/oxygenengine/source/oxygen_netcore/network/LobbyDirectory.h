@@ -56,6 +56,16 @@ public:
 	inline int getServerCodeDigits() const  { return mCodeDigits; }
 	inline int getDirectoryVersion() const  { return mVersion; }
 
+	// Patience with a server that does not answer (0 = none, the default: requests fail as soon as the server counts as unreachable).
+	// The browser build sets it: a free web host puts a server to sleep when nobody uses it and needs up to a minute to wake it, so the connection is retried
+	// (the WebSocket backs off by itself) and a request waits, instead of failing at once.
+	inline void setPatienceSeconds(float seconds)  { mPatienceSeconds = seconds; }
+	inline float getSecondsNotReady() const  { return mSecondsNotReady; }	// Seconds since the server last answered (since the start), 0 while it is ready
+	// Only with patience: the server does not answer, and the connection to it is not up (or is only just being made): it may be asleep. The seconds run out after the patience.
+	inline bool isWaitingForServer() const  { return mPatienceSeconds > 0.0f && mStarted && mStatus != Status::READY && !isServerWithoutDirectory() && mSecondsNotReady < mPatienceSeconds; }
+	// Only with patience: the connection to the server is up and it relays, but it never answers the directory (a server older than the lobby list)
+	inline bool isServerWithoutDirectory() const  { return mPatienceSeconds > 0.0f && mStarted && mStatus == Status::UNREACHABLE && mSocket.isTransportOpen(); }
+
 	// The list of public lobbies (best first, as the server sorts them). The previous list stays until the new one is complete.
 	void requestList(bool compatibleOnly, const std::string& compat);
 	inline RequestState getListState() const  { return mListState; }
@@ -110,6 +120,9 @@ private:
 	int mHelloTries = 0;
 	float mSecondsStarted = 0.0f;
 	float mSlowHelloTimer = 0.0f;
+	float mPatienceSeconds = 0.0f;
+	float mSecondsNotReady = 0.0f;
+	bool mTransportWasOpen = false;
 
 	// List
 	RequestState mListState = RequestState::IDLE;

@@ -333,7 +333,8 @@ void LobbyMenu::rebuildEntries()
 			mMenuEntries.addEntry("QUICK JOIN", QUICK_JOIN);
 			mMenuEntries.addEntry("CREATE LOBBY", CREATE_LOBBY);
 			mMenuEntries.addEntry("JOIN WITH CODE", JOIN_LOBBY);
-			mMenuEntries.addEntry("LAN GAME", LAN_GAME);
+			if (!NetplayManager::isBrowserBuild())		// (a browser cannot find games on the network: no UDP)
+				mMenuEntries.addEntry("LAN GAME", LAN_GAME);
 			mMenuEntries.addEntry("SETTINGS", SETTINGS);
 			mMenuEntries.addEntry("BACK", BACK);
 			break;
@@ -468,10 +469,16 @@ std::string LobbyMenu::getNoServerMessage() const
 	switch (manager.getLobbyServerState())
 	{
 		case NetplayManager::LobbyServerState::NOT_SET:
+			if (NetplayManager::isBrowserBuild())
+				return "No server is set, so online play is off in this page.\nChoose SETTINGS, then RELAY SERVER, and type the address of a server.";
 			return "No lobby server is set yet, so there are no public lobbies.\nYou can still play: LAN GAME, or JOIN WITH CODE with a long code.\nA lobby server can be added in SETTINGS.";
 		case NetplayManager::LobbyServerState::BAD_ADDRESS:
 			return "The lobby server address does not look right.\nCheck it in SETTINGS. You can still use LAN GAME.";
+		case NetplayManager::LobbyServerState::NO_LIST:
+			return "This server has no list of public lobbies (it may be an older version).\nYou can still join with a long code of 13 digits.";
 		default:
+			if (NetplayManager::isBrowserBuild())
+				return "The lobby server does not answer. It may be down, or you may be\noffline. Try again in a few minutes.";
 			return "The lobby server does not answer. It may be down, or you may be\noffline. Try again later, or use LAN GAME with a friend.";
 	}
 }
@@ -689,11 +696,13 @@ void LobbyMenu::updateFlow()
 	NetplayManager& manager = netplay();
 	LobbyDirectory& directory = manager.getLobbyDirectory();
 	const NetplayManager::LobbyServerState serverState = manager.getLobbyServerState();
-	if (serverState == NetplayManager::LobbyServerState::NOT_SET || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
+	if (serverState == NetplayManager::LobbyServerState::NOT_SET || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS || serverState == NetplayManager::LobbyServerState::NO_LIST)
 	{
 		finishFlow(getNoServerMessage(), NetplayFailure::Reason::NONE);
 		return;
 	}
+	// (Browser build: a server that does not answer may be asleep. The directory keeps the request and the menu waits for up to SERVER_WAKE_SECONDS, then this limit holds)
+	const float flowLimit = NetplayManager::isBrowserBuild() ? (NetplayManager::SERVER_WAKE_SECONDS + 20.0f) : 15.0f;
 
 	if (mFlow == Flow::QUICK)
 	{
@@ -722,7 +731,7 @@ void LobbyMenu::updateFlow()
 			mSearchReturnScreen = Screen::HOME;
 			return;
 		}
-		if (directory.getListState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > 15.0f)
+		if (directory.getListState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > flowLimit)
 		{
 			finishFlow(getNoServerMessage(), NetplayFailure::Reason::SERVER_UNREACHABLE);
 			return;
@@ -765,7 +774,7 @@ void LobbyMenu::updateFlow()
 					return;
 			}
 		}
-		if (directory.getResolveState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > 15.0f)
+		if (directory.getResolveState() == LobbyDirectory::RequestState::FAILED || mFlowSeconds > flowLimit)
 		{
 			finishFlow(getNoServerMessage(), NetplayFailure::Reason::SERVER_UNREACHABLE);
 			return;
@@ -782,7 +791,8 @@ void LobbyMenu::joinListEntry(int index)
 	if (!entry.isCompatible())
 	{
 		playMenuSound(0xad);
-		mMessage = "This lobby plays another version of the game, or has other mods.\nYou cannot join it.";
+		mMessage = NetplayManager::isBrowserBuild() ? "This lobby plays another version of the game.\nReload the page: a new version may be out. Then try again."
+													 : "This lobby plays another version of the game, or has other mods.\nYou cannot join it.";
 		return;
 	}
 	if (entry.isInGame())
@@ -1118,6 +1128,12 @@ void LobbyMenu::updateEntryTexts()
 
 void LobbyMenu::updateJoinScreenInput(const InputManager::ControllerScheme& keys)
 {
+	if (mCodeDigits.size() != mLoggedCodeDigits)
+	{
+		mLoggedCodeDigits = mCodeDigits.size();
+		RMX_LOG_INFO("Lobby: the code screen holds " << mLoggedCodeDigits << " digits");		// (the automated checks read this)
+	}
+
 	// The number pad: 3 columns and 4 rows (1 2 3 / 4 5 6 / 7 8 9 / delete 0 join), then BACK. The D-pad moves, A presses.
 	// Typed digits (number keys and the number pad of a keyboard) arrive through "textinput"; a letter key is also a controller button (A, S, D...), which must not press the pad.
 	const bool typed = (mTextInputThisFrame || mTextInputLastFrame);
@@ -1290,11 +1306,25 @@ void LobbyMenu::update(float timeElapsed)
 		const float before = mRelayWaitSeconds;
 		mRelayWaitSeconds += timeElapsed;
 		if (before <= 10.0f && mRelayWaitSeconds > 10.0f)
-			RMX_LOG_INFO("Lobby: cannot reach the relay server (the lobby screen says so)");
+			RMX_LOG_INFO("Lobby: the relay server has not registered this lobby after 10 seconds (the lobby screen says what is going on, and the connection keeps being retried)");
 	}
 	else
 	{
 		mRelayWaitSeconds = 0.0f;
+	}
+
+	// Browser build: the lobby server does not answer yet (it may be asleep): the screens say so, and the requests wait and retry
+	{
+		const bool waking = (manager.getLobbyServerState() == NetplayManager::LobbyServerState::WAKING);
+		if (waking && !mWasWaking)
+		{
+			RMX_LOG_INFO("Lobby: waking the server (retrying for up to " << (int)NetplayManager::SERVER_WAKE_SECONDS << " seconds)");
+		}
+		else if (!waking && mWasWaking)
+		{
+			RMX_LOG_INFO("Lobby: the server is no longer waking (" << ((manager.getLobbyServerState() == NetplayManager::LobbyServerState::READY) ? "it answered" : "it did not answer in time") << ")");
+		}
+		mWasWaking = waking;
 	}
 
 	// The network may have changed behind our back (connection lost, joined through F9, ...)
@@ -1448,6 +1478,7 @@ void LobbyMenu::update(float timeElapsed)
 					mListFooterSelected = index - rows;
 			}
 			mShownList = directory.getList();
+			RMX_LOG_INFO("Lobby: the list shows " << mShownList.size() << ((mShownList.size() == 1) ? " public lobby" : " public lobbies"));		// (the automated checks read this)
 			rebuildEntries();
 		}
 		mLastListAge = directory.getListAgeSeconds();
@@ -1860,7 +1891,7 @@ std::string LobbyMenu::getServerStatusLine(uint32& outColorKind) const
 	{
 		case NetplayManager::LobbyServerState::NOT_SET:
 			outColorKind = 2;
-			return "No lobby server is set. LAN and long codes still work.";
+			return NetplayManager::isBrowserBuild() ? "No server is set. Choose SETTINGS, then RELAY SERVER." : "No lobby server is set. LAN and long codes still work.";
 		case NetplayManager::LobbyServerState::BAD_ADDRESS:
 			outColorKind = 3;
 			return "The lobby server address is not usable. Check SETTINGS.";
@@ -1877,6 +1908,12 @@ std::string LobbyMenu::getServerStatusLine(uint32& outColorKind) const
 			line += "  -  " + std::to_string(directory.getListedLobbyCount()) + (directory.getListedLobbyCount() == 1 ? " public lobby" : " public lobbies");
 			return line;
 		}
+		case NetplayManager::LobbyServerState::WAKING:
+			outColorKind = 2;
+			return "Waking the server up, retrying (" + std::to_string((int)manager.getLobbyDirectory().getSecondsNotReady()) + " s)...";
+		case NetplayManager::LobbyServerState::NO_LIST:
+			outColorKind = 2;
+			return "The server " + name + " has no lobby list (an older version?).";
 		case NetplayManager::LobbyServerState::UNREACHABLE:
 			outColorKind = 3;
 			return "The lobby server " + name + " does not answer.";
@@ -1981,7 +2018,7 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 			else
 			{
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Without a lobby server the lobby is not listed: it is private.", 5, orange);
-				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), "Friends join with the long code (the matchmaking server, or LAN).", 5, grey);
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py + 10), NetplayManager::isBrowserBuild() ? "Online play needs a server: choose SETTINGS, then RELAY SERVER." : "Friends join with the long code (the matchmaking server, or LAN).", 5, grey);
 			}
 			py += 32;
 			drawEntries(py, 16, false);
@@ -2027,7 +2064,13 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 			else
 				what = "Looking up the lobby code";
 			drawer.printText(global::mOxyfontRegular, Vec2i(anchorX - 80, py), what + dotText, 4, white);
-			py += 30;
+			const bool waking = (manager.getLobbyServerState() == NetplayManager::LobbyServerState::WAKING);
+			if (waking)
+			{
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX - 80, py + 14), "The server was asleep and is being woken up.", 4, orange);
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX - 80, py + 24), "This can take up to a minute. Please wait.", 4, orange);
+			}
+			py += waking ? 46 : 30;
 			drawEntries(py, 16, false);
 			break;
 		}
@@ -2049,7 +2092,7 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 			else
 				drawer.printText(global::mSonicFontB, Vec2i(anchorX, py), shown, 5, yellow);
 			py += 20;
-			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), mJoinLanOnly ? "13 digits. Your friend can copy it from their lobby screen." : "6 digits: a lobby code.  13 digits: a long code (LAN, no server).", 5, grey);
+			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), mJoinLanOnly ? "13 digits. Your friend can copy it from their lobby screen." : (NetplayManager::isBrowserBuild() ? "6 digits: a lobby code.  13 digits: a long code." : "6 digits: a lobby code.  13 digits: a long code (LAN, no server)."), 5, grey);
 			py += 14;
 			renderCodeKeypad(drawer, anchorX, alpha, py);
 			// BACK under the pad
@@ -2084,7 +2127,19 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 				if (serverState == NetplayManager::LobbyServerState::NOT_SET)
 				{
 					line1 = "No lobby server is set, so there are no public lobbies.";
-					line2 = "Add one in SETTINGS, or use LAN GAME and long codes.";
+					line2 = NetplayManager::isBrowserBuild() ? "Choose SETTINGS, then RELAY SERVER, to add one." : "Add one in SETTINGS, or use LAN GAME and long codes.";
+					color = orange;
+				}
+				else if (serverState == NetplayManager::LobbyServerState::WAKING)
+				{
+					line1 = "The server is asleep and is being woken up. Retrying...";
+					line2 = "This can take up to a minute. The list shows by itself.";
+					color = orange;
+				}
+				else if (serverState == NetplayManager::LobbyServerState::NO_LIST)
+				{
+					line1 = "This server cannot list lobbies (it may be an older version).";
+					line2 = "You can still join with a long code of 13 digits.";
 					color = orange;
 				}
 				else if (serverState == NetplayManager::LobbyServerState::BAD_ADDRESS || serverState == NetplayManager::LobbyServerState::UNREACHABLE || directory.getListState() == LobbyDirectory::RequestState::FAILED)
@@ -2174,6 +2229,11 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 		{
 			mLastDrawnStatus = "message: " + mMessage;
 			RMX_LOG_INFO("Lobby: on screen: message " << mMessage.substr(0, mMessage.find('\n')));
+			{
+				std::string flat = mMessage;
+				std::replace(flat.begin(), flat.end(), '\n', '|');
+				RMX_LOG_INFO("Lobby: whole message: " << flat);		// (the automated checks read this)
+			}
 		}
 	}
 	else if (mScreen == Screen::LIST || mScreen == Screen::HOME)
@@ -2255,8 +2315,12 @@ void LobbyMenu::render()
 		else if (onLobbyServer && lobbyCode.empty())
 		{
 			const NetplayManager::LobbyServerState serverState = manager.getLobbyServerState();
-			if (serverState == NetplayManager::LobbyServerState::UNREACHABLE || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
-				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "The lobby server does not answer. Use the long code, or LAN.", 5, red);
+			if (serverState == NetplayManager::LobbyServerState::WAKING)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Waking the server up, retrying (" + std::to_string((int)manager.getLobbyDirectory().getSecondsNotReady()) + " s). Please wait...", 5, orange);
+			else if (serverState == NetplayManager::LobbyServerState::NO_LIST)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "This server has no lobby list. Friends join with the long code.", 5, orange);
+			else if (serverState == NetplayManager::LobbyServerState::UNREACHABLE || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), NetplayManager::isBrowserBuild() ? "The server does not answer. Still trying in the background." : "The lobby server does not answer. Use the long code, or LAN.", 5, red);
 			else
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Asking the lobby server for a lobby code...", 5, orange);
 		}

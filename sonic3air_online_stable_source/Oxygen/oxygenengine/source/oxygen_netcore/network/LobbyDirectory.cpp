@@ -47,6 +47,8 @@ void LobbyDirectory::start(const SocketAddress& serverAddress)
 	mHelloTries = 0;
 	mSecondsStarted = 0.0f;
 	mSlowHelloTimer = 0.0f;
+	mSecondsNotReady = 0.0f;
+	mTransportWasOpen = false;
 	mPingMs = -1;
 }
 
@@ -173,7 +175,21 @@ void LobbyDirectory::update(float deltaSeconds)
 
 	mSocket.updateRelay();		// (browser build: reconnects the WebSocket)
 	mSecondsStarted += deltaSeconds;
+	mSecondsNotReady = (mStatus == Status::READY) ? 0.0f : (mSecondsNotReady + deltaSeconds);
 	mCookieAge += deltaSeconds;
+
+	// A connection that came up (or came back, in the browser build) is a new chance for the server to answer: ask at once, and give it its full number of tries again
+	{
+		const bool open = mSocket.isTransportOpen();
+		if (open && !mTransportWasOpen)
+		{
+			mHelloTimer = 0.0f;
+			mHelloTries = 0;
+			if (mStatus == Status::UNREACHABLE)
+				mStatus = Status::CONNECTING;
+		}
+		mTransportWasOpen = open;
+	}
 	mListAge += deltaSeconds;
 	mSecondsSincePublishReply += deltaSeconds;
 
@@ -212,7 +228,8 @@ void LobbyDirectory::update(float deltaSeconds)
 	}
 
 	// A request cannot work while the server is unreachable: it fails at once, so that the menu can say so
-	if (mStatus == Status::UNREACHABLE)
+	// (with patience, a request waits for a server that may be asleep, and is sent by itself when the server answers)
+	if (mStatus == Status::UNREACHABLE && !isWaitingForServer())
 	{
 		if (mListState == RequestState::PENDING)
 			mListState = RequestState::FAILED;
