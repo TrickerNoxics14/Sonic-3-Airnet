@@ -60,14 +60,18 @@ public:
 	// The browser build sets it: a free web host puts a server to sleep when nobody uses it and needs up to a minute to wake it, so the connection is retried
 	// (the WebSocket backs off by itself) and a request waits, instead of failing at once.
 	inline void setPatienceSeconds(float seconds)  { mPatienceSeconds = seconds; }
-	inline float getSecondsNotReady() const  { return mSecondsNotReady; }	// Seconds since the server last answered (since the start), 0 while it is ready
+	inline float getSecondsNotReady() const  { return mSecondsNotReady; }	// Seconds without an answer: counted from the last answer, the start, or the last request that the player made (restartPatience), 0 while ready
+	// A request that the player makes while the server is not answering gets its own full patience: the clock is not the age of the connection, but the wait of this request.
+	// (Counted from the start of the directory it ran out once, and every later request then failed at once.)
+	inline void restartPatience()  { if (mStatus != Status::READY) mSecondsNotReady = 0.0f; }
 	// Only with patience: the server does not answer, and the connection to it is not up (or is only just being made): it may be asleep. The seconds run out after the patience.
 	inline bool isWaitingForServer() const  { return mPatienceSeconds > 0.0f && mStarted && mStatus != Status::READY && !isServerWithoutDirectory() && mSecondsNotReady < mPatienceSeconds; }
 	// Only with patience: the connection to the server is up and it relays, but it never answers the directory (a server older than the lobby list)
 	inline bool isServerWithoutDirectory() const  { return mPatienceSeconds > 0.0f && mStarted && mStatus == Status::UNREACHABLE && mSocket.isTransportOpen(); }
 
 	// The list of public lobbies (best first, as the server sorts them). The previous list stays until the new one is complete.
-	void requestList(bool compatibleOnly, const std::string& compat);
+	// "userRequest" false is for the menu's own regular refresh of a list that is on screen: it must not restart the patience (a server that stays down would never be given up on)
+	void requestList(bool compatibleOnly, const std::string& compat, bool userRequest = true);
 	inline RequestState getListState() const  { return mListState; }
 	inline const std::vector<DirectoryProtocol::ListEntry>& getList() const  { return mList; }
 	inline int getListTotal() const  { return mListTotal; }

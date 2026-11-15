@@ -1935,6 +1935,15 @@ namespace
 			report("directory client: with patience, a silent server behind an open connection is 'no lobby list' (not waking), and the request fails at once", unreachable && patient.isServerWithoutDirectory() && !patient.isWaitingForServer() && patient.getListState() == LobbyDirectory::RequestState::FAILED);
 			report("directory client: without patience those states never happen", !impatient.isServerWithoutDirectory() && !impatient.isWaitingForServer());
 			report("directory client: the seconds without an answer are counted, and are 0 once the server answers", patient.getSecondsNotReady() > 2.0f);
+			// The patience counts from the request of the player, not from the start of the directory (it used to run out once, and every later request then failed at once)
+			patient.requestResolve("123456");
+			report("directory client: a request of the player restarts the patience clock (the seconds without an answer start again at 0)", patient.getSecondsNotReady() == 0.0f);
+			patient.update(3.0f);
+			patient.requestList(false, "x", false);
+			report("directory client: the menu's own regular list refresh does not restart it (a server that stays down is given up on)", patient.getSecondsNotReady() >= 3.0f);
+			patient.requestList(false, "x");
+			report("directory client: a list that the player asks for restarts it", patient.getSecondsNotReady() == 0.0f);
+
 			silent.mAnswer = true;
 			bool back = false;
 			for (int i = 0; i < 60 && !back; ++i)

@@ -107,7 +107,7 @@ private:
 	void updateTestHooks(float timeElapsed);
 	void updateBrowserInput();
 	void updateJoinScreenInput(const InputManager::ControllerScheme& keys);
-	void refreshList();
+	void refreshList(bool userRequest = true);
 	std::string getPlayerNameOfSlot(int slot) const;
 	int getPingOfSlot(int slot) const;
 	int findKickTarget(int startSlot, int step) const;

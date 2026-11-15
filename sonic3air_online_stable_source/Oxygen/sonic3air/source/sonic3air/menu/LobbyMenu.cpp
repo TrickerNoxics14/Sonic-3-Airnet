@@ -812,13 +812,13 @@ void LobbyMenu::joinListEntry(int index)
 	beginResolve(entry.mCode, entry.mName);
 }
 
-void LobbyMenu::refreshList()
+void LobbyMenu::refreshList(bool userRequest)
 {
 	NetplayManager& manager = netplay();
 	manager.setLobbyDirectoryInUse(true);
 	if (!manager.isLobbyServerConfigured())
 		return;
-	manager.getLobbyDirectory().requestList(mListCompatibleOnly, manager.getCompatibilityKey());
+	manager.getLobbyDirectory().requestList(mListCompatibleOnly, manager.getCompatibilityKey(), userRequest);
 	mListRefreshTimer = LIST_REFRESH_SECONDS;
 }
 
@@ -1484,7 +1484,7 @@ void LobbyMenu::update(float timeElapsed)
 		mLastListAge = directory.getListAgeSeconds();
 		mListRefreshTimer -= timeElapsed;
 		if (mListRefreshTimer <= 0.0f && directory.getListState() != LobbyDirectory::RequestState::PENDING)
-			refreshList();
+			refreshList(false);		// (the regular refresh: not a request of the player, see LobbyDirectory::requestList)
 	}
 
 	// A ready check that ended: the host goes on to pick the game, without the players who were left out

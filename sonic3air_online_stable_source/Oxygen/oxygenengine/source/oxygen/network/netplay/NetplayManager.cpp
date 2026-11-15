@@ -363,6 +363,7 @@ std::string NetplayManager::getCompatibilityKey()
 void NetplayManager::startPublishingLobby(bool isPublic, const std::string& lobbyName)
 {
 	mPublishWanted = true;
+	mLobbyDirectory.restartPatience();		// (a lobby that the player opens while the server does not answer gets its own waiting time)
 	mPublishIsPublic = isPublic;
 	mPublishName = lobbyName;
 	mPublishInfoTimer = 0.0f;
@@ -791,14 +792,16 @@ void NetplayManager::clearFailure()
 void NetplayManager::closeConnections()
 {
 	stopPublishingLobby();
+	// The host and the client say goodbye to the other side when they are destroyed (so that a friend can tell the player right away that the host left, instead of waiting for a timeout):
+	// that datagram needs the relay connection, so they go first and the relay is stopped afterwards (the other way round the goodbye was lost: a friend found out after 70 seconds)
+	SAFE_DELETE(mNetplayHost);
+	SAFE_DELETE(mNetplayClient);
 	mUDPSocket.clearLan();
 	clearSessionCharacters();
 	mHostCharacterPick = NetplayLobby::CHARACTER_MENU;
 	mUDPSocket.stopRelay();
 	mRelaySessionKnown = false;
 	mRelayReadyLogged = false;
-	SAFE_DELETE(mNetplayHost);
-	SAFE_DELETE(mNetplayClient);
 	mExternalAddressQuery.reset();
 	mUDPSocket.close();
 }

@@ -112,8 +112,10 @@ void LobbyDirectory::sendPublish()
 	send(data);
 }
 
-void LobbyDirectory::requestList(bool compatibleOnly, const std::string& compat)
+void LobbyDirectory::requestList(bool compatibleOnly, const std::string& compat, bool userRequest)
 {
+	if (userRequest)
+		restartPatience();
 	mListCompatibleOnly = compatibleOnly;
 	mListCompat = compat;
 	mListBuilding.clear();
@@ -125,6 +127,7 @@ void LobbyDirectory::requestList(bool compatibleOnly, const std::string& compat)
 
 void LobbyDirectory::requestResolve(const std::string& code)
 {
+	restartPatience();
 	mResolveCode = code;
 	mResolveTries = 0;
 	mResolveTimer = 0.0f;
@@ -134,6 +137,7 @@ void LobbyDirectory::requestResolve(const std::string& code)
 
 void LobbyDirectory::startPublishing(const DirectoryProtocol::PublishInfo& info)
 {
+	restartPatience();
 	mPublishInfo = info;
 	mPublishing = true;
 	mPublishedOk = false;
