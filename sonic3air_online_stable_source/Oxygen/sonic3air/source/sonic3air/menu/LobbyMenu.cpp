@@ -520,7 +520,8 @@ void LobbyMenu::createLobby(bool viaServer, bool isPublic, int maxPlayers, const
 	const bool onLobbyServer = !lanOnly && manager.isLobbyServerConfigured();
 	if (manager.setupAsHost(viaServer && !onLobbyServer && !lanOnly, NetplayManager::DEFAULT_HOST_PORT, false, !lanOnly))
 	{
-		if (nullptr != manager.getNetplayHost())
+		// (The developer test switch S3AIR_NETPLAY_MAXCLIENTS, read by the host itself, wins over the menu: the checks of a full lobby rely on it)
+		if (nullptr != manager.getNetplayHost() && nullptr == TestHooks::getEnv("S3AIR_NETPLAY_MAXCLIENTS"))
 			manager.getNetplayHost()->setMaxPlayers(maxPlayers);
 		if (onLobbyServer)
 			manager.startPublishingLobby(isPublic, cleanLobbyName(lobbyName));

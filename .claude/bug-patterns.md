@@ -586,3 +586,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -n "bindToPort" checks/stable_online_core_tests.cpp`
 - Guard: every stand-in server takes the next free port from a counter
 - Note: the game's own host socket behaves the same (two games hosting on one PC bind UDP 28840 silently); not changed
+
+## 2026-11-15 · menu-overrides-host-setting · cpp
+- Seed: LobbyMenu::createLobby called NetplayHost::setMaxPlayers(4) right after the host constructor had applied S3AIR_NETPLAY_MAXCLIENTS, so a lobby meant to hold one friend took two (stage X6/X7 of the backend suite failed: second friend got slot 3, not "lobby full")
+- Broken assumption: nothing else sets the player limit after the host object reads its own settings
+- Search: `grep -rn "setMaxPlayers\|mMaxClients" sonic3air_online_stable_source/Oxygen`
+- Siblings: none (only the menu calls setMaxPlayers)
+- Guard: stage X6/X7 (full lobby, retry) in run_online_backend_checks.ps1

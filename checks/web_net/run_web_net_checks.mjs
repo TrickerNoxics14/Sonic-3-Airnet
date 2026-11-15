@@ -74,7 +74,7 @@ async function shot(inst, name) { try { await inst.shot(path.join(logDir, `web_n
 async function hostAndJoin(host, friends, relayURLforPage, code) {
 	await host.toLobby();
 	host.forgetLogs();
-	await host.key('Return');   // CREATE LOBBY
+	await host.createLobby();
 	const hosted = await host.waitLog(/Lobby: screen HOSTING/, 10000);
 	const known = await host.waitLog(/the relay server knows this lobby/, 15000);
 	await sleep(1000);
@@ -82,7 +82,7 @@ async function hostAndJoin(host, friends, relayURLforPage, code) {
 	for (const friend of friends) {
 		await friend.toLobby();
 		friend.forgetLogs();
-		await friend.keys(['Down', 'Return'], 600);   // JOIN WITH CODE
+		await friend.openJoin();
 		await friend.waitLog(/Lobby: screen JOIN/, 10000);
 		await friend.type(code);
 		await friend.key('Return');
@@ -225,7 +225,7 @@ async function sessionC(relay) {
 		await b.toMainMenu();
 		await b.toLobby();
 		b.forgetLogs();
-		await b.key('Return');   // CREATE LOBBY
+		await b.createLobby();
 		const refused = await b.waitLog(/Lobby: no relay server set/, 8000);
 		check('C1', 'without a relay address CREATE LOBBY does not open a lobby and says that a relay server is needed', refused && !b.hasLog(/registering this lobby/));
 		await shot(b, 'C1_norelay');
@@ -236,9 +236,9 @@ async function sessionC(relay) {
 		await b.toMainMenu();
 		await b.toLobby();
 		b.forgetLogs();
-		await b.keys(['Down', 'Return'], 600);
+		await b.openJoin();
 		await b.waitLog(/Lobby: screen JOIN/, 8000);
-		await b.type('ZZZZ' + 'Z' + 'Z' + 'Z' + 'Z');   // not a valid code (check character)
+		await b.type('1234-5678-90124');   // not a valid long code (check digit)
 		await b.key('Return');
 		const typo = await b.waitLog(/WRONG_CODE/, 8000);
 		check('C2', 'a mistyped code (wrong check character) is refused at once with a plain message, nothing is sent to the relay', typo && relay.relay.core.stats.received === 0 || (typo && !b.hasLog(/asking the relay server to let us in/)));
@@ -248,7 +248,7 @@ async function sessionC(relay) {
 		await b.toMainMenu();
 		await b.toLobby();
 		b.forgetLogs();
-		await b.keys(['Down', 'Return'], 600);
+		await b.openJoin();
 		await b.waitLog(/Lobby: screen JOIN/, 8000);
 		await b.type(codeForSeed(0x77));   // a valid code that no host registered
 		await b.key('Return');
@@ -262,7 +262,7 @@ async function sessionC(relay) {
 		await b.toMainMenu();
 		await b.toLobby();
 		b.forgetLogs();
-		await b.key('Return');   // CREATE LOBBY
+		await b.createLobby();
 		const unreachable = await b.waitLog(/Lobby: cannot reach the relay server/, 25000);
 		check('C4', 'a relay that cannot be reached: the host lobby says so after 10 s, and the game keeps trying to connect', unreachable && b.hasLog(/connecting to the relay server/));
 		await shot(b, 'C4_unreachable');
@@ -323,7 +323,7 @@ async function sessionN(relay) {
 				await b.toMainMenu();
 				await b.toLobby();
 				b.forgetLogs();
-				await b.keys(['Down', 'Return'], 600);
+				await b.openJoin();
 				await b.waitLog(/Lobby: screen JOIN/, 8000);
 				await b.type(code);
 				await b.key('Return');
@@ -359,7 +359,7 @@ async function sessionN(relay) {
 			await b.toMainMenu();
 			await b.toLobby();
 			b.forgetLogs();
-			await b.key('Return');
+			await b.createLobby();
 			await b.waitLog(/the relay server knows this lobby/, 20000);
 			await withNativeGame({ S3AIR_RELAY: relayAddress, S3AIR_NETPLAY: `joinintro:${code2}:9`, S3AIR_LOBBY_AUTOREADY: '1', S3AIR_PLAYER_NAME: 'Windows', S3AIR_NO_SERVER: '1' }, '_native2', async (native) => {
 				const joined = await b.waitLog(/a friend proved the code and is player 2/, 90000);
