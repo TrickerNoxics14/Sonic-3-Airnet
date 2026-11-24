@@ -159,6 +159,18 @@ export class Instance {
 		}
 	}
 
+	/** A mouse click at page coordinates (x, y), 'left' or 'right' (the right button opens the game's own context menu). The pointer moves there first, as a real mouse does. */
+	async click(x, y, button = 'left') {
+		const mask = button === 'right' ? 2 : 1;
+		const event = (type, extra = {}) => this.send('Input.dispatchMouseEvent', { type, x, y, button: 'none', buttons: 0, ...extra });
+		await event('mouseMoved');
+		await sleep(120);
+		await event('mousePressed', { button, buttons: mask, clickCount: 1 });
+		await sleep(80);
+		await event('mouseReleased', { button, buttons: 0, clickCount: 1 });
+		await sleep(400);
+	}
+
 	/** Makes the page area this big (a phone, a small window); without arguments it goes back to the window's own size. */
 	async resize(width, height) {
 		if (width) await this.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });

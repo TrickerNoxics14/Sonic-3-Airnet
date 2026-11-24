@@ -56,6 +56,7 @@ public:
 	static std::wstring openFileSelectionDialog(const std::wstring& title, const std::wstring& defaultFilename, const wchar_t* filter);
 
 	static void openFileExternal(const std::wstring& path);
+	static bool canOpenDirectoryExternal();		// False where openDirectoryExternal does nothing (web, Android, iOS): callers must not offer a button for it there
 	static void openDirectoryExternal(const std::wstring& path);
 	static void openURLExternal(const std::string& url);
 	static bool openApplicationExternal(const std::wstring& path, const std::wstring& arguments, const std::wstring& directory = L"");

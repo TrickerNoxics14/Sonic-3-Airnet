@@ -550,6 +550,9 @@ try
 	# Static guard: one animation-frame loop, worker ticks for a hidden tab, no focus pause of an online game, the away packet only in the browser build
 	$hiddenTabOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_hidden_tab_guard.ps1") 2>&1 | ForEach-Object { "$_" })
 	Add-Result "B6" "Hidden-tab rules of the browser build hold (lint_hidden_tab_guard.ps1)" ($LASTEXITCODE -eq 0) (($hiddenTabOut | Select-Object -Last 1) -join "")
+	# Static guard: a button that opens a folder works on every platform that shows it (file manager, or the game's own file browser, or no button)
+	$openFolderOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_open_folder_guard.ps1") 2>&1 | ForEach-Object { "$_" })
+	Add-Result "B7" "Open-folder buttons are never dead on a platform without a file manager (lint_open_folder_guard.ps1)" ($LASTEXITCODE -eq 0) (($openFolderOut | Select-Object -Last 1) -join "")
 	# The private memory areas of the mod (speed caps and scratch space of players 2, 3 and 4) must not overlap: two characters that share them would corrupt each other
 	$modSource = (@($modScripts | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n")
 	$constants = @{}

@@ -2,6 +2,7 @@
 // Automated checks of online play in the browser build (needs: a web build in ../../web_build, Chrome, the player's own ROM in %APPDATA%\Sonic3AIR, Node 22+).
 //   node checks/web_net/run_web_net_checks.mjs                 all sessions
 //   node checks/web_net/run_web_net_checks.mjs --only A,C      only these sessions
+//   node checks/web_net/run_web_net_checks.mjs --web-dir DIR   test another web build than ../../web_build (e.g. an older one, to see a check fail on it)
 //   node checks/web_net/run_web_net_checks.mjs --native        also the sessions with a Windows game (needs the Windows build; one game window at a time, uses a scratch savedata folder, never your own %APPDATA%)
 // Sessions:  A two browsers through the relay (join, play in sync, relay drop and reconnect, host drop)
 //            B two browsers through a line with delay, jitter and stalls (TCP lag proxy)
@@ -11,6 +12,7 @@
 //              P5 the path is blocked at the start and again in the middle of the game, and the game returns to the channel each time it opens up (relay idle again)
 //            L the public lobby in the browser menus: L1 list + quick join + play in sync, L2 6 digit number (keyboard and number pad) and private lobby, L3 wrong codes and lockout,
 //              L4 server asleep (waking message, retries) , L5 server down, L6 old page vs new page (reload message), L7 a server without a lobby list, L8 the host leaves / closes the tab / freezes
+//            M the game's right-click menu in the browser (Open saved data folder / Open mods folder): each entry opens the game's own file browser, in the right folder (a browser has no file manager to start)
 //            N a Windows game and a browser in one lobby (both ways round)
 // Everything it starts (relay, web server, browsers, game) is stopped at the end; the ROM is only served from where the game keeps it, to 127.0.0.1.
 import fs from 'node:fs';
@@ -27,9 +29,9 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,N').split(',');
 const withNative = args.includes('--native');
-const webDir = path.join(root, 'web_build');
+const webDir = args.includes('--web-dir') ? path.resolve(args[args.indexOf('--web-dir') + 1]) : path.join(root, 'web_build');
 
 const results = [];
 function check(id, text, ok, detail = '') {
@@ -1512,6 +1514,67 @@ async function sessionT6(relay) {
 	} finally { await h.close(); }
 }
 
+// ---- session M: the right-click menu of the game ("Open saved data folder", "Open mods folder") in the browser ----
+// A browser cannot start a file manager, so the entries open the game's own file browser (before: they did nothing, and a player could not find the place to put a mod).
+// The menu opens where the right mouse button is pressed; its two entries sit 36 and 58 pixels below that point (measured on the page at 1280x720).
+async function sessionM() {
+	console.log('--- session M: the right-click menu in the browser build');
+	// [id, entry, offset of the entry below the click point, what the game must show: the folder the file browser really starts in]
+	const entries = [['M1', 'Open saved data folder', 36, /File browser: showing the saved data folder/, 'saved data'], ['M2', 'Open mods folder', 58, /File browser: showing the mods folder/, 'mods']];
+	for (const [id, name, offsetY, effect, folder] of entries) {
+		// a fresh browser for each entry (the file browser stays open on the screen once it is there, and a used browser profile already holds the ROM)
+		const h = await startHarness({ webDir, instances: 1, seeds: [0x4d], basePort: 9500 });
+		try {
+			const [b] = h.instances;
+			await b.openGame(h.baseURL, '');
+			await b.waitLog(/Ready to go/, 90000);
+			await sleep(5000);
+			await b.toMainMenu();
+			b.forgetLogs();
+			// the menu opens where the right button goes down; one retry, because a click right after the menu screen came up can be dropped
+			let menuOpened = null;
+			for (let attempt = 0; attempt < 2 && !menuOpened; ++attempt) {
+				await b.click(300, 200, 'right');
+				menuOpened = await b.waitLog(/Menu: right-click menu opened/, 3000);
+			}
+			await sleep(300);
+			await shot(b, `${id}_menu`);
+			const before = b.hasLog(/file browser opened|File browser: showing/);
+			await b.click(360, 200 + offsetY, 'left');
+			const requested = await b.waitLog(/Menu: file browser opened in the/, 5000);
+			const showing = await b.waitLog(effect, 5000);
+			await sleep(1500);
+			await shot(b, `${id}_after_click`);
+			const errors = b.takeLogs().filter((line) => /^EXC /.test(line));
+			const detail = !menuOpened ? 'the right-click menu did not open' : (!showing ? (requested ? 'the file browser was asked for but shows another folder' : 'the menu opened, the click on the entry did nothing') : 'file browser shows the right folder');
+			check(id, `"${name}" in the right-click menu opens the game's own file browser in the ${folder} folder (a browser has no file manager to start)`, menuOpened && !before && requested && showing && errors.length === 0, `${detail}${errors.length ? `; errors: ${errors[0].slice(0, 120)}` : ''}`);
+		} finally { await h.close(); }
+	}
+	// M3: over a running level the menu is not offered (the full-screen file browser would cover a game that keeps playing, and an online match would go on without this player)
+	const h = await startHarness({ webDir, instances: 1, seeds: [0x4d], basePort: 9500 });
+	try {
+		const [b] = h.instances;
+		await b.openGame(h.baseURL, '');
+		await b.waitLog(/Ready to go/, 90000);
+		await sleep(5000);
+		await b.toMainMenu();
+		b.forgetLogs();
+		// control: in the main menu the right click opens the menu (a second right click closes it again)
+		let controlOpened = null;
+		for (let attempt = 0; attempt < 2 && !controlOpened; ++attempt) { await b.click(300, 200, 'right'); controlOpened = await b.waitLog(/Menu: right-click menu opened/, 3000); }
+		await b.click(300, 200, 'right');
+		const opensBefore = b.allLogs.filter((line) => /Menu: right-click menu opened/.test(line)).length;
+		// NORMAL GAME: the first start shows the intro, the second one is the level itself (the timer runs)
+		await b.key('Return'); await sleep(2500); await b.key('Return'); await sleep(4000);
+		await b.click(300, 200, 'right');
+		await sleep(1500);
+		await shot(b, 'M3_level');
+		const opensAfter = b.allLogs.filter((line) => /Menu: right-click menu opened/.test(line)).length;
+		const errors = b.takeLogs().filter((line) => /^EXC /.test(line));
+		check('M3', 'while the game runs (intro or level) the right-click menu is not offered in the browser (it would open a full-screen file browser over a game that keeps playing)', controlOpened && opensBefore === 1 && opensAfter === 1 && errors.length === 0, `menu opened in the main menu: ${!!controlOpened}; right clicks that opened it in the level: ${opensAfter - opensBefore}${errors.length ? `; errors: ${errors[0].slice(0, 120)}` : ''}`);
+	} finally { await h.close(); }
+}
+
 let exitCode = 0;
 const relay ={ relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
@@ -1533,6 +1596,7 @@ try {
 	if (only.includes('T') || only.includes('T4')) await sessionT4(relay);
 	if (only.includes('T') || only.includes('T5')) await sessionT5(relay);
 	if (only.includes('T') || only.includes('T6')) await sessionT6(relay);
+	if (only.includes('M')) await sessionM();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}
@@ -1545,7 +1609,7 @@ try {
 	const lines = results.map((r) => `${r.ok ? 'PASS' : 'FAIL'}  ${r.id}  ${r.text}${r.detail ? `  [${r.detail}]` : ''}`);
 	lines.push('', `${results.length - failed.length} of ${results.length} checks passed`);
 	// The committed report comes only from a run of the whole standard set (everything but the native session N); a run of some sessions writes its own file in last_logs
-	const standardSet = ['A', 'B', 'C', 'P', 'L', 'T'].every((id) => only.includes(id));
+	const standardSet = ['A', 'B', 'C', 'P', 'L', 'T', 'M'].every((id) => only.includes(id));
 	const reportFile = standardSet ? path.join(root, 'checks', 'web_net_report.txt') : path.join(logDir, `web_net_report_${only.join('_')}.txt`);
 	fs.writeFileSync(reportFile, lines.join('\n') + '\n');
 	console.log(`report: ${standardSet ? 'checks/web_net_report.txt' : `checks/last_logs/${path.basename(reportFile)} (some of the sessions only: the committed report is left alone)`}`);

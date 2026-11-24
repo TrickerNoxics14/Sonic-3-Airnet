@@ -5,6 +5,7 @@
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
 #include "oxygen/network/netplay/NetplayPackets.h"
 #include "oxygen/network/netplay/NetplayStallLogic.h"
+#include "oxygen/platform/DirectoryOpenLogic.h"
 #include "oxygen_netcore/network/Sockets.h"
 #include "oxygen_netcore/network/ConnectionListener.h"
 #include "oxygen_netcore/network/ConnectionManager.h"
@@ -583,6 +584,25 @@ namespace
 
 }
 
+
+// ---------------------------------------------------------------------------------------------------------------
+// A button like "Open mods folder": it must do something on every platform that offers it (the browser build had a menu whose buttons did nothing)
+namespace
+{
+	void runDirectoryOpenTests()
+	{
+		report("open folder: a computer with a file manager starts it (Windows, Mac, Linux), also when the game has its own file browser",
+			chooseDirectoryOpenAction(true, false) == DirectoryOpenAction::EXTERNAL && chooseDirectoryOpenAction(true, true) == DirectoryOpenAction::EXTERNAL);
+		report("open folder: without a file manager (browser, phone) the game's own file browser is used, so the button is never dead",
+			chooseDirectoryOpenAction(false, true) == DirectoryOpenAction::FILE_BROWSER);
+		report("open folder: with neither, the button is not offered at all (a button that does nothing is worse than none)",
+			chooseDirectoryOpenAction(false, false) == DirectoryOpenAction::NONE);
+		report("open folder: the game's own file browser is not offered over a running level (it would cover a game that plays on, an online match would go on without this player), a file manager is offered at any time",
+			isDirectoryOpenAllowedNow(DirectoryOpenAction::FILE_BROWSER, false) && !isDirectoryOpenAllowedNow(DirectoryOpenAction::FILE_BROWSER, true)
+			&& isDirectoryOpenAllowedNow(DirectoryOpenAction::EXTERNAL, false) && isDirectoryOpenAllowedNow(DirectoryOpenAction::EXTERNAL, true)
+			&& !isDirectoryOpenAllowedNow(DirectoryOpenAction::NONE, false) && !isDirectoryOpenAllowedNow(DirectoryOpenAction::NONE, true));
+	}
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // A player whose tab is in the background (browser build): who is waited for, what the screen says, when a silent friend is dropped, the "away" message
@@ -2152,6 +2172,7 @@ int main()
 	runPacketLimitTests();
 	runLobbyLogicTests();
 	runStallTests();
+	runDirectoryOpenTests();
 	runCharacterTests();
 	Sockets::startupSockets();
 	runRelayTests();

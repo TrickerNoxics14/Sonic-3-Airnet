@@ -70,7 +70,7 @@ also speaks UDP to Windows games, so browser and Windows players can be in the s
 ## Differences to the Windows version
 - Update check: shows "Updates are not available" (reload the page for a new version). Bundled-mod installer unused.
 - Save data and settings live in the browser (IndexedDB, mounted at /sonic3air/savedata); clearing site data deletes them.
-  The in-game file manager (Options) can export/import files.
+  The in-game file manager (Options) can export/import files. A right click in the game opens a small menu whose "Open saved data folder" and "Open mods folder" entries open the same file manager in that folder (a browser cannot start the computer's own file manager).
 - Remastered music: not included.
 - Sound starts after the first click/key on the page (browser autoplay rules).
 - No mods, and the local split-screen mod is not part of this build. Online play needs a relay (above).

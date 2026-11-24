@@ -34,6 +34,9 @@ public:
 	void buildWindowContent();
 	void refreshFileEntries();
 
+	/** Makes the browser (also one that is already open) show the mods folder or the saved data folder next */
+	void goToStartLocation(bool inModsFolder);
+
 private:
 	void updateFullPath();
 

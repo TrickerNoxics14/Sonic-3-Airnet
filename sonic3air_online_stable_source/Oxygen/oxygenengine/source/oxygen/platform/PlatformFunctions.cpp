@@ -560,6 +560,16 @@ void PlatformFunctions::openFileExternal(const std::wstring& path)
 #endif
 }
 
+bool PlatformFunctions::canOpenDirectoryExternal()
+{
+	// Must list exactly the platforms that openDirectoryExternal below has a branch for
+#if defined(PLATFORM_WINDOWS) || defined(PLATFORM_MAC) || defined(PLATFORM_LINUX)
+	return true;
+#else
+	return false;
+#endif
+}
+
 void PlatformFunctions::openDirectoryExternal(const std::wstring& path)
 {
 #if defined(PLATFORM_WINDOWS)

@@ -352,10 +352,12 @@ bool GameApp::supportsFileBrowser()
 #endif
 }
 
-bool GameApp::openFileBrowser()
+bool GameApp::openFileBrowser(bool startInModsFolder)
 {
 #if defined(SUPPORT_IMGUI)
-	ImGuiManager::instance().getOrAddImGuiContentProvider<ImGuiFileBrowser>(100);
+	ImGuiFileBrowser& fileBrowser = ImGuiManager::instance().getOrAddImGuiContentProvider<ImGuiFileBrowser>(100);
+	fileBrowser.goToStartLocation(startInModsFolder);
+	RMX_LOG_INFO("Menu: file browser opened in the " << (startInModsFolder ? "mods" : "saved data") << " folder");		// (what the automated browser checks wait for)
 	return true;
 #else
 	return false;

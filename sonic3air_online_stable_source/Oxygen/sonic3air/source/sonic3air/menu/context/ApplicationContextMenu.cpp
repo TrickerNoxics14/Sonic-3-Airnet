@@ -8,11 +8,57 @@
 
 #include "sonic3air/pch.h"
 #include "sonic3air/menu/context/ApplicationContextMenu.h"
+#include "sonic3air/Game.h"
+#include "sonic3air/menu/GameApp.h"
 #include "sonic3air/menu/SharedResources.h"
 
+#include "oxygen/application/Application.h"
 #include "oxygen/application/Configuration.h"
 #include "oxygen/application/EngineMain.h"
+#include "oxygen/platform/DirectoryOpenLogic.h"
 #include "oxygen/platform/PlatformFunctions.h"
+#include "oxygen/simulation/Simulation.h"
+
+
+namespace
+{
+	DirectoryOpenAction getDirectoryOpenAction()
+	{
+		// Where no file manager can be started (web, Android, iOS), the game's own file browser stands in for it
+		return chooseDirectoryOpenAction(PlatformFunctions::canOpenDirectoryExternal(), GameApp::instance().supportsFileBrowser());
+	}
+
+	bool isGameplayRunning()
+	{
+		// The same condition as Game::shouldPauseOnFocusLoss without the online exception: a level that plays on (the menu background does not count, nor does a paused game)
+		return Application::instance().getSimulation().isRunning() && Application::instance().getSimulation().getSpeed() > 0.0f && !Game::instance().isInMainMenuMode();
+	}
+
+	bool isOpeningAllowedNow()
+	{
+		return isDirectoryOpenAllowedNow(getDirectoryOpenAction(), isGameplayRunning());
+	}
+
+	void openDirectory(const std::wstring& path, bool isModsDirectory)
+	{
+		if (!isOpeningAllowedNow())
+			return;
+
+		switch (getDirectoryOpenAction())
+		{
+			case DirectoryOpenAction::EXTERNAL:
+				PlatformFunctions::openDirectoryExternal(path);
+				break;
+
+			case DirectoryOpenAction::FILE_BROWSER:
+				GameApp::instance().openFileBrowser(isModsDirectory);
+				break;
+
+			case DirectoryOpenAction::NONE:
+				break;
+		}
+	}
+}
 
 
 ApplicationContextMenu::ApplicationContextMenu()
@@ -27,7 +73,8 @@ void ApplicationContextMenu::initialize()
 {
 	GuiBase::initialize();
 
-	if (mItems.empty())
+	// Without any way to open a folder (neither a file manager nor the game's own file browser) there is nothing to offer, and the menu stays closed
+	if (mItems.empty() && getDirectoryOpenAction() != DirectoryOpenAction::NONE)
 	{
 		mItems.emplace_back(Item { "Open saved data " PLATFORM_DIRECTORY_STRING, Item::Function::OPEN_SAVED_DATA_DIRECTORY });
 		mItems.emplace_back(Item { "Open mods " PLATFORM_DIRECTORY_STRING,		Item::Function::OPEN_MODS_DIRECTORY });
@@ -52,11 +99,13 @@ void ApplicationContextMenu::mouse(const rmx::MouseEvent& ev)
 
 	if (ev.state)
 	{
-		if (ev.button == rmx::MouseButton::Right && !FTX::keyState(SDLK_LALT) && !FTX::keyState(SDLK_RALT))
+		if (ev.button == rmx::MouseButton::Right && !mItems.empty() && isOpeningAllowedNow() && !FTX::keyState(SDLK_LALT) && !FTX::keyState(SDLK_RALT))
 		{
 			mActive = !mActive;
 			if (mActive)
 			{
+				RMX_LOG_INFO("Menu: right-click menu opened");		// (what the automated browser checks wait for)
+
 				// Determine a good position where to show the context menu, so it stays inside the game window
 				mContextMenuPosition = ev.position;
 				if (mContextMenuPosition.x + mBaseOuterSize.x > FTX::screenWidth())
@@ -87,6 +136,10 @@ void ApplicationContextMenu::mouse(const rmx::MouseEvent& ev)
 void ApplicationContextMenu::update(float timeElapsed)
 {
 	GuiBase::update(timeElapsed);
+
+	// A level that starts while the menu is open (only the game's own file browser would be left to open) closes the menu
+	if (mActive && !isOpeningAllowedNow())
+		mActive = false;
 }
 
 void ApplicationContextMenu::render()
@@ -132,11 +185,11 @@ void ApplicationContextMenu::render()
 				switch (clickedItem->mFunction)
 				{
 					case Item::Function::OPEN_SAVED_DATA_DIRECTORY:
-						PlatformFunctions::openDirectoryExternal(Configuration::instance().mAppDataPath);
+						openDirectory(Configuration::instance().mAppDataPath, false);
 						break;
 
 					case Item::Function::OPEN_MODS_DIRECTORY:
-						PlatformFunctions::openDirectoryExternal(Configuration::instance().mAppDataPath + L"mods/");
+						openDirectory(Configuration::instance().mAppDataPath + L"mods/", true);
 						break;
 
 					case Item::Function::OPEN_LOGFILE:

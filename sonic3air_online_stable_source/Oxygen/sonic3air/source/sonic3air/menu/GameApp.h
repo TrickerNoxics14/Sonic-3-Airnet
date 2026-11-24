@@ -54,7 +54,7 @@ public:
 	inline MenuBackground& getMenuBackground() const	{ return *mMenuBackground; }
 
 	bool supportsFileBrowser();
-	bool openFileBrowser();
+	bool openFileBrowser(bool startInModsFolder = true);	// Otherwise it starts in the saved data folder
 
 private:
 	void gotoPhase(int phaseNumber);

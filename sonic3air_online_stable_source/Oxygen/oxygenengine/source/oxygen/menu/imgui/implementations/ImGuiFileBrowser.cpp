@@ -172,6 +172,12 @@ void ImGuiFileBrowser::buildImGuiContent()
 	ImGui::End();
 }
 
+void ImGuiFileBrowser::goToStartLocation(bool inModsFolder)
+{
+	mStartInModsFolder = inModsFolder;
+	mBasePath.clear();		// buildWindowContent sets the location up again on its next call
+}
+
 void ImGuiFileBrowser::buildWindowContent()
 {
 	mUIScale = Configuration::instance().mDevMode.mUIScale;
@@ -188,6 +194,7 @@ void ImGuiFileBrowser::buildWindowContent()
 			mLocalPath.push_back(L"mods");
 		}
 		updateFullPath();
+		RMX_LOG_INFO("File browser: showing the " << (mLocalPath.empty() ? "saved data" : "mods") << " folder");		// (what the automated browser checks wait for; derived from the location the browser really uses)
 	}
 
 	drawFileBrowser();
