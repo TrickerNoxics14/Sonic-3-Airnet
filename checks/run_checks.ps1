@@ -547,6 +547,9 @@ try
 	# Static guard: the browser-only WebRTC bridge (DirectLink.h) must not reach the Windows / Android builds
 	$directLinkOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_directlink_guard.ps1") 2>&1 | ForEach-Object { "$_" })
 	Add-Result "B5" "Browser-only WebRTC code stays behind __EMSCRIPTEN__ (lint_directlink_guard.ps1)" ($LASTEXITCODE -eq 0) (($directLinkOut | Select-Object -Last 1) -join "")
+	# Static guard: one animation-frame loop, worker ticks for a hidden tab, no focus pause of an online game, the away packet only in the browser build
+	$hiddenTabOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_hidden_tab_guard.ps1") 2>&1 | ForEach-Object { "$_" })
+	Add-Result "B6" "Hidden-tab rules of the browser build hold (lint_hidden_tab_guard.ps1)" ($LASTEXITCODE -eq 0) (($hiddenTabOut | Select-Object -Last 1) -join "")
 	# The private memory areas of the mod (speed caps and scratch space of players 2, 3 and 4) must not overlap: two characters that share them would corrupt each other
 	$modSource = (@($modScripts | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n")
 	$constants = @{}
