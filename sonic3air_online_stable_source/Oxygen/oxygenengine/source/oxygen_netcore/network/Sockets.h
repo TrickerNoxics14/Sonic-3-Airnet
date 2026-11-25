@@ -221,6 +221,12 @@ public:
 	// Signalling goes through the relay; as soon as a direct channel works the datagrams to that peer use it, and when it fails they use the relay again.
 	// Set before startRelay(). "iceServers" is a comma separated list of STUN URLs.
 	static void setDirectConnectionConfig(bool enabled, const std::string& iceServers)  { mDirectEnabled = enabled;  mDirectIceServers = iceServers; }
+	static inline bool isDirectConnectionEnabled()  { return mDirectEnabled; }
+	// Direct connections in THIS lobby: switched off in a lobby on the public list, whose players may be strangers (a direct connection shows each player's IP address
+	// to the other one; the relay shows it to nobody but its operator). Switching it off closes the direct channels at once and ignores the other side's signalling;
+	// the switch holds until stopRelay(), so the next lobby starts allowed again.
+	void setDirectAllowedInLobby(bool allowed);
+	inline bool isDirectAllowedInLobby() const  { return mDirectAllowedInLobby; }
 	bool isDirectTo(const SocketAddress& peerAddress) const;		// True while datagrams to this relayed peer go over a direct channel
 	inline bool isDirectActive() const  { return mDirectSupported; }	// The platform can do direct connections and they are switched on
 	inline uint64 getDirectDatagramsIn() const  { return mDirectDatagramsIn; }
@@ -271,6 +277,7 @@ private:
 	uint64 mRelayDatagramsIn = 0;
 	uint64 mRelayDatagramsOut = 0;
 	bool mDirectSupported = false;
+	bool mDirectAllowedInLobby = true;
 	uint64 mDirectDatagramsIn = 0;
 	uint64 mDirectDatagramsOut = 0;
 	uint32 mDirectRejoinSeen = 0;

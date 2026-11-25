@@ -761,7 +761,7 @@ void LobbyMenu::updateFlow()
 					RMX_LOG_INFO("Lobby: the lobby server found the lobby, joining it");
 					mFlow = Flow::NONE;
 					manager.clearFailure();
-					manager.startJoinViaLobbyServer(reply.mSessionID);
+					manager.startJoinViaLobbyServer(reply.mSessionID, reply.isListed());
 					mScreen = Screen::JOINED;
 					rebuildEntries();
 					return;

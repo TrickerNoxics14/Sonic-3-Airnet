@@ -222,11 +222,12 @@ export class Instance {
 		return !!(await this.waitLog(/Lobby: screen START/, 10000));
 	}
 
-	/** From the ONLINE menu's first screen: CREATE LOBBY, then OPEN LOBBY with the defaults. */
-	async createLobby() {
+	/** From the ONLINE menu's first screen: CREATE LOBBY, then OPEN LOBBY with the defaults (public), or as a private lobby (not on the public list: the only kind
+	 *  that makes direct connections). */
+	async createLobby({ privateLobby = false } = {}) {
 		await this.keys(['Down', 'Down', 'Return'], 600);
 		await this.waitLog(/Lobby: screen CREATE/, 8000);
-		await this.keys(['Down', 'Down', 'Down', 'Return'], 600);
+		await this.keys(privateLobby ? ['Down', 'Right', 'Down', 'Down', 'Return'] : ['Down', 'Down', 'Down', 'Return'], 600);		// (LOBBY: public -> private)
 	}
 
 	/** From the ONLINE menu's first screen to the code screen (JOIN WITH CODE). */

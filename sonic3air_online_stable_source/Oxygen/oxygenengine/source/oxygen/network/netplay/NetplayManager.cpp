@@ -431,6 +431,18 @@ void NetplayManager::startPublishingLobby(bool isPublic, const std::string& lobb
 	mPublishInfoTimer = 0.0f;
 	mLobbyDirectory.stopPublishing(false);
 	RMX_LOG_INFO("Netplay: this lobby is to be " << (isPublic ? "listed publicly" : "kept private (code only)") << " at the lobby server");
+	if (isPublic)
+		forbidDirectConnectionsInLobby("this lobby is on the public list");
+}
+
+void NetplayManager::forbidDirectConnectionsInLobby(const char* why)
+{
+	// Anybody can join a lobby on the public list, and a direct connection shows each player's IP address to the other one: there everything goes through the relay
+	if (!mUDPSocket.isDirectAllowedInLobby())
+		return;
+	mUDPSocket.setDirectAllowedInLobby(false);
+	if (isBrowserBuild() && UDPSocket::isDirectConnectionEnabled())
+		RMX_LOG_INFO("Netplay: no direct connections in this lobby (" << why << "): everything goes through the relay server, no player sees another one's IP address");
 }
 
 void NetplayManager::stopPublishingLobby()
@@ -445,11 +457,14 @@ std::string NetplayManager::getPublishedLobbyCode() const
 	return mLobbyDirectory.isPublished() ? mLobbyDirectory.getPublishedCode() : std::string();
 }
 
-void NetplayManager::startJoinViaLobbyServer(uint64 sessionID)
+void NetplayManager::startJoinViaLobbyServer(uint64 sessionID, bool listed)
 {
 	// A lobby that the lobby server knows is also known to its relay, which is the way in: the game server of the matchmaking service is not asked
 	mSessionID = sessionID;
 	startJoinViaRelayOnly();
+	// (Right after the start, before the first update: a direct connection is only ever offered from an update)
+	if (listed)
+		forbidDirectConnectionsInLobby("the lobby is on the public list");
 }
 
 void NetplayManager::updateLobbyDirectory(float deltaSeconds)

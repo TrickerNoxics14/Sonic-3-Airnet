@@ -1904,6 +1904,11 @@ namespace
 			const std::vector<uint8_t> throttledBytes = fromHex("5333524c0218010300f0");
 			report("directory: RESOLVE_REPLY is read (session ID, retry time)", parseResolveReply(okBytes.data(), okBytes.size(), resolved) && resolved.mStatus == RESOLVE_OK && resolved.mSessionID == 123456789012ull && resolved.mPlayers == 2 && resolved.mMaxPlayers == 4
 				&& parseResolveReply(throttledBytes.data(), throttledBytes.size(), throttled) && throttled.mStatus == RESOLVE_THROTTLED && throttled.mRetryAfterSeconds == 240);
+			// The LISTED flag (8) says that the lobby is on the public list: its players may be strangers, so the browser build makes no direct connection there
+			ResolveReply listedReply;
+			const std::vector<uint8_t> listedBytes = fromHex("5333524c021801000000001cbe991a14020408");
+			report("directory: RESOLVE_REPLY says whether the lobby is on the public list (flag 8; a private lobby has it clear)", !resolved.isListed()
+				&& parseResolveReply(listedBytes.data(), listedBytes.size(), listedReply) && listedReply.mStatus == RESOLVE_OK && listedReply.isListed() && !listedReply.isInGame() && !listedReply.isFull() && ENTRY_LISTED == 8);
 			PublishReply published;
 			const std::vector<uint8_t> publishedBytes = fromHex("5333524c0213010006313233343536");
 			report("directory: PUBLISH_REPLY is read (the code)", parsePublishReply(publishedBytes.data(), publishedBytes.size(), published) && published.mStatus == PUBLISH_OK && published.mCode == "123456");
@@ -2108,6 +2113,16 @@ int main()
 	bool lanFound = false;
 	bool lanMismatchRejected = false;
 	Sockets::startupSockets();
+	{
+		// Direct (peer to peer) connections per lobby: a lobby on the public list switches them off (its players may be strangers, a direct connection shows each one's
+		// IP address to the others); the switch belongs to that lobby only, the next one (after stopRelay, which every closed connection goes through) starts allowed again
+		UDPSocket socket;
+		const bool fresh = socket.isDirectAllowedInLobby();
+		socket.setDirectAllowedInLobby(false);
+		const bool off = !socket.isDirectAllowedInLobby() && !socket.isDirectActive();
+		socket.stopRelay();
+		report("direct connections: switched off for a listed lobby, allowed again for the next lobby", fresh && off && socket.isDirectAllowedInLobby());
+	}
 	{
 		UDPSocket host;
 		UDPSocket friendSocket;

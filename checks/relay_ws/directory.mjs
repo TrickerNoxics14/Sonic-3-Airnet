@@ -271,7 +271,7 @@ export class Directory {
 			return reply(P.ResolveStatus.NOT_FOUND);
 		}
 		++this.stats.resolved;
-		const f = (entry.inGame ? P.EntryFlags.IN_GAME : 0) | (entry.players >= entry.max ? P.EntryFlags.FULL : 0);
+		const f = (entry.inGame ? P.EntryFlags.IN_GAME : 0) | (entry.players >= entry.max ? P.EntryFlags.FULL : 0) | (entry.isPublic ? P.EntryFlags.LISTED : 0);
 		reply(0, new P.Writer().u8(P.DIR_VERSION).u8(P.ResolveStatus.OK).u64(entry.sessionID).u8(entry.players).u8(entry.max).u8(f));
 	}
 

@@ -10,6 +10,7 @@
 //            P direct (WebRTC) connections between two browsers: P1 works (traffic on the data channel, relay idle), P2 blocked (relay carries the game),
 //              P3 the host cannot do it (old client / Windows game), P4 the channel dies during the game (closed, silent, one-way, long)
 //              P5 the path is blocked at the start and again in the middle of the game, and the game returns to the channel each time it opens up (relay idle again)
+//              P1-P6 use a PRIVATE lobby; P7 a lobby on the public list makes no direct connection at all (no RTCPeerConnection, no signalling), P8 a private lobby joined with its 6 digit code does
 //            L the public lobby in the browser menus: L1 list + quick join + play in sync, L2 6 digit number (keyboard and number pad) and private lobby, L3 wrong codes and lockout,
 //              L4 server asleep (waking message, retries) , L5 server down, L6 old page vs new page (reload message), L7 a server without a lobby list, L8 the host leaves / closes the tab / freezes
 //            M the game's right-click menu in the browser (Open saved data folder / Open mods folder): each entry opens the game's own file browser, in the right folder (a browser has no file manager to start)
@@ -78,10 +79,10 @@ async function waitFor(fn, timeout, step = 500) {
 async function shot(inst, name) { try { await inst.shot(path.join(logDir, `web_net_${name}.png`)); } catch { /* browser gone */ } }
 
 /** Host creates a lobby, friend(s) join, everybody is ready, the host starts a new game. Returns once every browser runs the game. */
-async function hostAndJoin(host, friends, relayURLforPage, code) {
+async function hostAndJoin(host, friends, relayURLforPage, code, { privateLobby = false } = {}) {
 	await host.toLobby();
 	host.forgetLogs();
-	await host.createLobby();
+	await host.createLobby({ privateLobby });
 	const hosted = await host.waitLog(/Lobby: screen HOSTING/, 10000);
 	const known = await host.waitLog(/the relay server knows this lobby/, 15000);
 	await sleep(1000);
@@ -456,7 +457,7 @@ async function sessionP1(relay) {
 	console.log('--- session P1: two browsers, direct channel works');
 	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x71, friendSeed: 0x52, basePort: 9380, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
 	try {
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		check('P1a', 'two browsers join through the relay as before (lobby code, code proof both ways)', r.hosted && r.known && r.joined[0]);
 		const fDirect = await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
 		const hDirect = await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
@@ -488,7 +489,7 @@ async function sessionP2(relay) {
 	console.log('--- session P2: the direct path is blocked: the relay carries the game');
 	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x75, friendSeed: 0x53, basePort: 9384, hostScript: RTC_BLOCK, friendScript: RTC_BLOCK });
 	try {
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		check('P2a', 'the lobby works through the relay although a direct connection is tried', r.hosted && r.known && r.joined[0]);
 		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
 		check('P2b', 'the friend gives the direct attempt up after 8 s and says it uses the relay (nobody sees an error)', failed, failed ?? friend.allLogs.filter((l) => /direct/i.test(l)).join(' | '));
@@ -508,7 +509,7 @@ async function sessionP3(relay) {
 	console.log('--- session P3: the host cannot do direct connections (like the Windows game): the friend stays on the relay');
 	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x82, friendSeed: 0x54, basePort: 9388, hostScript: RTC_NONE, friendScript: RTC_TRACK });
 	try {
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		check('P3a', 'a friend that can do direct connections joins a host that cannot', r.hosted && r.known && r.joined[0]);
 		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
 		check('P3b', 'the friend\'s offer finds no answer: it gives up after 8 s, stays on the relay, and the host (no WebRTC at all) logs nothing wrong', failed && !host.hasLog(/EXC|error/i), failed ?? '');
@@ -523,7 +524,7 @@ async function sessionP4(relay) {
 	console.log('--- session P4: the direct channel dies during the game (closed, silent, one-way): fall back without desync');
 	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x74, friendSeed: 0x55, basePort: 9392, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
 	try {
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
 		await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
 		await startNormalGame(host, [friend]);
@@ -613,7 +614,7 @@ async function sessionP5(relay) {
 	try {
 		const frameOf = async (inst) => parseOnlineLog(await inst.onlineLog()).pop();
 		const idle = (a, b) => b.forwardedBytes - a.forwardedBytes;
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
 		check('P5a', 'the direct path is blocked from the start: the lobby works and the friend gives the direct attempt up after 8 s', r.hosted && r.known && r.joined[0] && failed, failed ?? '');
 		await startNormalGame(host, [friend]);
@@ -666,7 +667,7 @@ async function sessionP6(relay) {
 	const { h, host, friend, code, query } = await p2pSetup(relay, { hostSeed: 0x62, friendSeed: 0x57, basePort: 9400, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
 	try {
 		const frameOf = async (inst) => parseOnlineLog(await inst.onlineLog()).pop();
-		const r = await hostAndJoin(host, [friend], query, code);
+		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
 		await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
 		await startNormalGame(host, [friend]);
@@ -700,6 +701,60 @@ async function sessionP6(relay) {
 }
 
 // =====================================================================================================================
+// Sessions P7 and P8: direct connections only in a lobby that is NOT on the public list. A direct connection shows each player's IP address to the other one, and
+// anybody can join a listed lobby, so there everything goes through the relay; a private lobby (its code passed on by the host) keeps the shortcut.
+async function sessionP7() {
+	console.log('--- session P7: a lobby on the public list never makes a direct connection (its players may be strangers)');
+	const R = await startLobbyRelay();
+	const { h, host, friend } = await p2pSetup(R, { hostSeed: 0x63, friendSeed: 0x58, basePort: 9404, hostScript: RTC_TRACK, friendScript: RTC_TRACK });
+	try {
+		const entry = await openAndQuickJoin(host, friend, R);
+		check('P7a', 'with direct connections switched on (stun=none, like session P), the host opens a PUBLIC lobby and the friend joins it with QUICK JOIN', !!entry, JSON.stringify(openAndQuickJoin.last));
+		const hostSays = host.allLogs.find((l) => /no direct connections in this lobby (this lobby is on the public list)/.test(l));
+		const friendSays = friend.allLogs.find((l) => /no direct connections in this lobby (the lobby is on the public list)/.test(l));
+		check('P7b', 'both games say that this lobby makes no direct connections because it is on the public list (the friend learns it from the lobby server: the code lookup marks the lobby LISTED)', hostSays && friendSays, `host: ${hostSays ?? 'nothing'} | friend: ${friendSays ?? 'nothing'}`);
+		const triedEarly = friend.hasLog(/trying a direct connection/) || host.hasLog(/direct connection to .* is in use/);
+		await sleep(3000);
+		const loaded = await startNormalGame(host, [friend]);
+		const play = await playAndMeasure(host, [friend], 15, 'P7');
+		const lines = await p2pLines(host, friend);
+		const pcs = [await host.eval('window.__pcs ? window.__pcs.length : -1'), await friend.eval('window.__pcs ? window.__pcs.length : -1')];
+		const tried = triedEarly || friend.hasLog(/trying a direct connection/) || host.hasLog(/direct connection to .* is in use/) || friend.hasLog(/direct connection to the host is in use/);
+		check('P7c', 'no RTCPeerConnection was ever created on either page (so no address was gathered, let alone sent), the relay passed no signalling message during the whole session, and neither game tried a direct connection', pcs[0] === 0 && pcs[1] === 0 && R.core.stats.signals === 0 && !tried, `peer connections host ${pcs[0]}, friend ${pcs[1]}; relay signals ${R.core.stats.signals}; tried ${tried}`);
+		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
+		check('P7d', 'the game runs over the relay in sync for 15 s (transport relay on both sides, repairs 0)', loaded[0] && hs.ok && fs_.ok && lines.host?.transport === 'relay' && lines.friend?.transport === 'relay', `${JSON.stringify(lines)}; host: ${hs.why}; friend: ${fs_.why}`);
+		dumpConsole('P7', host, friend);
+	} finally { await h.close(); await R.stop(); }
+}
+
+async function sessionP8() {
+	console.log('--- session P8: a private lobby joined with its 6 digit code keeps the direct connection');
+	const R = await startLobbyRelay();
+	const { h, host, friend } = await p2pSetup(R, { hostSeed: 0x64, friendSeed: 0x59, basePort: 9408 });
+	try {
+		await host.toLobby();
+		host.forgetLogs();
+		await host.createLobby({ privateLobby: true });
+		const hosted = await host.waitLog(/Lobby: screen HOSTING/, 10000);
+		const entry = await waitFor(() => R.entries().find((e) => e.code && !e.isPublic), 20000);
+		const hostSaysNo = host.allLogs.find((l) => /no direct connections in this lobby/.test(l));
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.openJoin();
+		await friend.waitLog(/Lobby: screen JOIN/, 10000);
+		await friend.type(entry ? entry.code : '000000');
+		await friend.key('Return');
+		const resolved = await friend.waitLog(/Lobby: the lobby server found the lobby, joining it/, 20000);
+		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+		check('P8a', 'the host opens a PRIVATE lobby (not on the public list) and the friend joins it with its 6 digit code through the lobby server', hosted && entry && resolved && proved, `${entry ? 'code issued, private' : 'no private entry'} | ${resolved ?? 'not resolved'} | ${proved ?? 'not joined'}`);
+		const fDirect = await friend.waitLog(/direct connection to the host is in use (p2p)/, 30000);
+		const hDirect = await host.waitLog(/direct connection to friend 1 is in use (p2p)/, 30000);
+		const friendSaysNo = friend.allLogs.find((l) => /no direct connections in this lobby/.test(l));
+		check('P8b', 'in the private lobby both games set up the direct connection, and neither says "no direct connections" (the code lookup did not mark the lobby as listed)', fDirect && hDirect && !hostSaysNo && !friendSaysNo, `${fDirect ?? 'friend: none'} | ${hDirect ?? 'host: none'} | ${hostSaysNo ?? ''} ${friendSaysNo ?? ''}`);
+		dumpConsole('P8', host, friend);
+	} finally { await h.close(); await R.stop(); }
+}
+
 // Session L: the public lobby in the browser menus (list, quick join, number codes, wrong codes and lockout, a server that is asleep or down, an old page)
 // Every part uses its own lobby server on 127.0.0.1 (WebSocket only, no UDP), so its counters, listings and the lockout of an address start from nothing.
 async function startLobbyRelay({ port = 0, limits = {} } = {}) {
@@ -1334,7 +1389,7 @@ async function tSetup(relay, { seed, basePort, extra = '', p2p = false }) {
 		await Promise.all([host.waitLog(/Ready to go/, 90000), friend.waitLog(/Ready to go/, 90000)]);
 		await sleep(2000);
 		await Promise.all([host.toMainMenu(), friend.toMainMenu()]);
-		const r = await hostAndJoin(host, [friend], query, codeForSeed(seed));
+		const r = await hostAndJoin(host, [friend], query, codeForSeed(seed), { privateLobby: p2p });
 		const loaded = await startNormalGame(host, [friend]);
 		await drive(host, [friend], 6);
 		return { h, host, friend, ok: !!(r.hosted && r.known && r.joined[0] && loaded[0]), detail: `hosted=${!!r.hosted} known=${!!r.known} joined=${!!r.joined[0]} friendLoadedState=${!!loaded[0]}` };
@@ -1588,6 +1643,8 @@ try {
 	if (only.includes('P') || only.includes('P4')) await sessionP4(relay);
 	if (only.includes('P') || only.includes('P5')) await sessionP5(relay);
 	if (only.includes('P') || only.includes('P6')) await sessionP6(relay);
+	if (only.includes('P') || only.includes('P7')) await sessionP7();
+	if (only.includes('P') || only.includes('P8')) await sessionP8();
 	for (const [id, fn] of [['L1', sessionL1], ['L2', sessionL2], ['L3', sessionL3], ['L4', sessionL4], ['L5', sessionL5], ['L6', sessionL6], ['L7', sessionL7], ['L8', sessionL8]]) if (only.includes('L') || only.includes(id)) await fn();
 	if (only.includes('L8R')) await sessionL8R();
 	if (only.includes('T') || only.includes('T1')) await sessionT1(relay);

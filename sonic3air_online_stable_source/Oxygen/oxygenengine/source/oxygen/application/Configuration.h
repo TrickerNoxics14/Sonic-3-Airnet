@@ -247,6 +247,7 @@ public:
 	bool mOnlineListCompatibleOnly = false;		// The list of public lobbies hides the ones this game cannot join
 	// Online play, browser build: direct (peer to peer, WebRTC) connections between the players as a shortcut around the relay server, which stays the fallback.
 	// A direct connection shows each player's IP address to the other one (the relay only shows it to the relay's operator): switch it off here, or with ?p2p=off in the page link.
+	// Only in a lobby that is NOT on the public list (anybody can join a listed one): there the game always plays through the relay, see NetplayManager::forbidDirectConnectionsInLobby.
 	// "StunServers" is a comma separated list of public STUN servers that tell a browser its own public address; empty = none (then only players in the same network can connect directly).
 	bool mOnlineDirectConnection = true;
 	std::string mOnlineStunServers = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302";

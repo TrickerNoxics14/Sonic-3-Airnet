@@ -119,7 +119,8 @@ export const DirType = Object.freeze({
 
 export const PublishFlags = Object.freeze({ PUBLIC: 1, IN_GAME: 2 });
 export const ListFlags = Object.freeze({ COMPATIBLE_ONLY: 1 });
-export const EntryFlags = Object.freeze({ IN_GAME: 1, COMPATIBLE: 2, FULL: 4 });
+// LISTED (resolve replies only): the lobby is on the public list, so its players may be strangers (the browser build then makes no direct connections)
+export const EntryFlags = Object.freeze({ IN_GAME: 1, COMPATIBLE: 2, FULL: 4, LISTED: 8 });
 export const PublishStatus = Object.freeze({ OK: 0, NOT_REGISTERED: 1, LIMIT: 2, BAD_REQUEST: 3, CLOSED: 4 });
 export const ListStatus = Object.freeze({ OK: 0, BAD_COOKIE: 1 });
 export const ResolveStatus = Object.freeze({ OK: 0, NOT_FOUND: 1, BAD_COOKIE: 2, THROTTLED: 3 });

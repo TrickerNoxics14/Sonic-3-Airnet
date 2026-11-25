@@ -46,7 +46,8 @@ namespace DirectoryProtocol
 
 	enum PublishFlags : uint8_t { PUBLISH_PUBLIC = 1, PUBLISH_IN_GAME = 2 };
 	enum ListFlags : uint8_t { LIST_COMPATIBLE_ONLY = 1 };
-	enum EntryFlags : uint8_t { ENTRY_IN_GAME = 1, ENTRY_COMPATIBLE = 2, ENTRY_FULL = 4 };
+	// ENTRY_LISTED (resolve replies only): the lobby is on the public list, so its players may be strangers (the browser build then makes no direct connections there)
+	enum EntryFlags : uint8_t { ENTRY_IN_GAME = 1, ENTRY_COMPATIBLE = 2, ENTRY_FULL = 4, ENTRY_LISTED = 8 };
 	enum PublishStatus : uint8_t { PUBLISH_OK = 0, PUBLISH_NOT_REGISTERED = 1, PUBLISH_LIMIT = 2, PUBLISH_BAD_REQUEST = 3, PUBLISH_CLOSED = 4 };
 	enum ListStatus : uint8_t { LIST_OK = 0, LIST_BAD_COOKIE = 1 };
 	enum ResolveStatus : uint8_t { RESOLVE_OK = 0, RESOLVE_NOT_FOUND = 1, RESOLVE_BAD_COOKIE = 2, RESOLVE_THROTTLED = 3 };
@@ -249,6 +250,7 @@ namespace DirectoryProtocol
 		uint16_t mRetryAfterSeconds = 0;
 		inline bool isInGame() const  { return (mFlags & ENTRY_IN_GAME) != 0; }
 		inline bool isFull() const	  { return (mFlags & ENTRY_FULL) != 0; }
+		inline bool isListed() const  { return (mFlags & ENTRY_LISTED) != 0; }	// (a server older than the flag never sets it)
 	};
 
 	inline bool parseResolveReply(const uint8_t* data, size_t size, ResolveReply& out)

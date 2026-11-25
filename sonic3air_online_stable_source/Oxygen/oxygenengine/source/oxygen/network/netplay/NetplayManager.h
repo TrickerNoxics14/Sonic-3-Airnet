@@ -107,7 +107,9 @@ public:
 	void stopPublishingLobby();
 	inline bool isPublishingLobby() const  { return mPublishWanted; }
 	std::string getPublishedLobbyCode() const;			// 6 digits, empty until the server confirmed the listing
-	void startJoinViaLobbyServer(uint64 sessionID);		// A lobby from the list, or a lobby code that the server resolved: through the relay of the lobby server
+	void startJoinViaLobbyServer(uint64 sessionID, bool listed);		// A lobby from the list, or a lobby code that the server resolved: through the relay of the lobby server
+	// No direct (peer to peer) connections in this lobby, only the relay: for a lobby on the public list, whose players may be strangers (holds until the connection closes)
+	void forbidDirectConnectionsInLobby(const char* why);
 	inline bool canUseRelayAsClient() const  { return mRelaySessionKnown && isRelayConfigured(); }
 	bool beginRelayAsClient();										// Starts talking to the relay; false if there is none or its name does not resolve
 	inline bool isRelayJoined() const  { return mUDPSocket.getRelayRole() == UDPSocket::RelayRole::CLIENT && mUDPSocket.isRelayReady(); }

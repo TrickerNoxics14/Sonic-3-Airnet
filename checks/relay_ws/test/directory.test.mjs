@@ -157,6 +157,11 @@ test('private lobbies are not listed but their code resolves; public ones do bot
 	assert.equal(ro.sessionID, 0xbbbbbbbbbbn);
 	assert.equal(ro.players, 1);
 	assert.equal(ro.max, 4);
+	// The joining game must know whether the lobby is on the public list: in a listed lobby the players may be strangers, so the browser build makes no direct
+	// (peer to peer) connection there, which would show each player's IP address to the others
+	assert.equal(rp.flags & P.EntryFlags.LISTED, 0, 'a private lobby is not marked as listed');
+	assert.equal(ro.flags & P.EntryFlags.LISTED, P.EntryFlags.LISTED, 'a public lobby is marked as listed');
+	assert.equal(P.EntryFlags.LISTED, 8, 'the flag the game reads (DirectoryProtocol.h ENTRY_LISTED)');
 });
 
 test('no answer contains an address of a host', async (t) => {
