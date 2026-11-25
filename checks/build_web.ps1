@@ -26,6 +26,7 @@ if (-not (Test-Path $PackExe)) { throw "Windows build for packing not found: $Pa
 
 # Clean start: nothing from an earlier build is reused
 foreach ($d in @($work, $OutDir)) { if (Test-Path $d) { Remove-Item $d -Recurse -Force } }
+if (Test-Path "$OutDir.stamp") { Remove-Item "$OutDir.stamp" -Force }		# the note about the last build (see the end of this script) belongs to the folder that was just deleted
 New-Item -ItemType Directory -Force (Join-Path $work "cmake"), $OutDir | Out-Null
 
 $env:EMSDK_QUIET = "1"
@@ -81,16 +82,21 @@ Pop-Location
 Copy-Item (Join-Path $cmakeSrc "dist\*") $OutDir -Force
 Remove-Item -Recurse -Force $work
 
-# guard: the output must never contain a ROM
-$rom = Get-ChildItem $OutDir -Recurse -File | Where-Object { $_.Length -eq 4194304 }
-if ($rom) { throw "A 4 MB file (ROM?) is in the output: $($rom.FullName)" }
-# guard: the output must never contain the builder's folders or Windows user name (the output is published on a public page)
-$needles = @($root, $root.Replace('\','/'), $env:USERNAME) | Where-Object { $_ }
-foreach ($f in Get-ChildItem $OutDir -Recurse -File)
+# guard: the output goes to a public page. checks\web_leak_guard.ps1 reads EVERY file of it in full (text and binary, .wasm and .data too) and fails the build when it finds the
+# Windows user name or computer name, a folder of this machine (the workspace, the profile, AppData, Temp, the emsdk), a <drive>:\Users path, an e-mail address, a token, a ROM
+# (a 4 MiB or 2 MiB file, or a Mega Drive header) or a save data / storage / ROM name. It prints one "guard passed: ..." line when the output is clean.
+$guardOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "web_leak_guard.ps1") -Dir $OutDir -ExtraFolder $EmsdkDir 2>&1 | ForEach-Object { "$_" })
+$guardExit = $LASTEXITCODE
+$guardOut | ForEach-Object { Write-Host $_ }
+if ($guardExit -ne 0) { Remove-Item -Recurse -Force $OutDir; throw "The leak guard failed: the output folder was deleted so that nothing can be published by mistake (see the lines above)" }
+# a note NEXT to the output (not inside it: the folder is published as it is) so that publish_pages.ps1 can tell whether the page was built from the source tree it is about to go with
+$stamp = "$OutDir.stamp"
+$sourceTree = (& git -C $root rev-parse "HEAD:sonic3air_online_stable_source" 2>$null)
+if ($LASTEXITCODE -eq 0 -and $sourceTree)
 {
-	$bytes = [IO.File]::ReadAllBytes($f.FullName)
-	$text = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
-	foreach ($n in $needles) { if ($text.Contains($n)) { throw "Build output $($f.Name) contains a local path or the user name" } }
+	$dirty = @(& git -C $root status --porcelain -- sonic3air_online_stable_source 2>$null).Count -gt 0
+	Set-Content -Path $stamp -Encoding ASCII -Value @("sourceTree=$sourceTree", "dirty=$([int]$dirty)", "builtUtc=$([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))", "guard=passed")
 }
+else { Remove-Item -Force $stamp -ErrorAction SilentlyContinue }
 "Web build done in $([int]$sw.Elapsed.TotalSeconds) s -> $OutDir"
 Get-ChildItem $OutDir -File | Select-Object Name, Length | Format-Table -AutoSize
