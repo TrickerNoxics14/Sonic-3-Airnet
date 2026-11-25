@@ -100,7 +100,12 @@ also speaks UDP to Windows games, so browser and Windows players can be in the s
   again at once (both paths stay open for receiving; the game's protocol already handles lost, repeated and reordered datagrams). A friend
   whose attempt never worked asks again after 12 s, 24 s, ... (at most every 96 s); one that worked and died asks again after 12 s.
   **Privacy:** a direct connection shows each player's IP address to the other player (WebRTC), which a relay-only game does not.
-  Switch it off with `?p2p=off` in the page link, `"Online": { "DirectConnection": false }` in the browser's settings.json, or
+  So it is only used in a lobby that is NOT on the public list (a private lobby, whose code the host passes on). A lobby on the public list,
+  which anybody can join, always plays through the relay: its host switches direct connections off when it publishes the lobby, and a friend
+  learns it from the lobby server (the code lookup marks the lobby LISTED), whether it came from the list, QUICK JOIN or a typed 6 digit
+  code; no RTCPeerConnection is made, so no address is even gathered (web_net P7; P8 = a private lobby joined with its code still goes
+  direct). A lobby joined with the long 13 digit code skips the lobby server: the friend offers, and the host of a listed lobby ignores it.
+  The info page says this. Switch direct connections off completely with `?p2p=off` in the page link, `"Online": { "DirectConnection": false }` in the browser's settings.json, or
   `window.S3AIR_P2P = false` in `relay_config.js`. STUN servers (they tell a browser its public address; they never see game data):
   default two public Google STUN servers; change with `?stun=stun:host:port,...` (`?stun=none` = none, then only players in the same
   network connect directly), `"Online": { "StunServers": "..." }`, or `window.S3AIR_STUN_SERVERS` in `relay_config.js`. **No TURN
@@ -114,7 +119,7 @@ also speaks UDP to Windows games, so browser and Windows players can be in the s
   keep the tab visible there.
 - Tested: see the handoff (headless Chrome, relay on 127.0.0.1, direct connections between two Chrome instances on this PC with STUN off). Not tested:
   a real internet relay, real NATs / STUN / TURN-needing networks, a real GPU, Firefox, Safari, phones.
-- Automated check: `node checks/web_net/run_web_net_checks.mjs` (browser sessions A, B, C, P = direct connections, L = lobby, T = tab in the background, M = right-click menu), `--native` adds the Windows game sessions.
+- Automated check: `node checks/web_net/run_web_net_checks.mjs` (browser sessions A, B, C, P = direct connections (P7: none in a listed lobby, P8: a private lobby joined with its code), L = lobby, T = tab in the background, M = right-click menu), `--native` adds the Windows game sessions.
   `--web-dir <folder>` checks another build folder than `web_build\`.
 - Netplay, relay and Blue Sphere multi-runner code are the same as in the Windows version; the Blue Sphere multi-runner was not tried in the browser.
 
