@@ -66,8 +66,8 @@ export function parseConfiguredOrigin(entry) {
  * as long as the number is right. With 0 the header is ignored. The address of the connection itself (the platform's edge: everybody behind it is pooled,
  * which /health shows as websocketAddresses, but nobody can invent an address) is used when the header has fewer entries than there are proxies, or
  * when the entry is no IP address (invented text, an address with a port).
- * A number that is HIGHER than the real number of proxies cannot be made safe here: the entry that is counted is then one the player wrote (a player who
- * knows the number just adds entries in front). proxy_check.mjs finds that case.
+ * A number that is HIGHER than the real number of proxies cannot be made safe here: the entry that is counted is then one the player wrote (any player
+ * can add made-up entries in front, no knowledge of the number is needed). proxy_check.mjs finds that case.
  */
 export function playerAddress(socketAddress, forwardedFor, trustedProxies) {
 	const direct = cleanIP(socketAddress);
