@@ -368,11 +368,22 @@ namespace rmx
 		stream.close();
 
 		#if defined(PLATFORM_WEB)
+			// Write the file to the browser's storage (IndexedDB). One sync at a time: a save while one runs (the settings are several files written one after the
+			// other) asks for exactly one more sync after it, which then also carries this file, so the last write always reaches the storage
 			EM_ASM({
-				FS.syncfs(false, function(err)
+				var state = Module.__rmxSyncState || (Module.__rmxSyncState = { running: false, again: false });
+				var run = function()
 				{
-					if (err) console.error('FS.syncfs failed:', err);
-				});
+					state.running = true;
+					state.again = false;
+					FS.syncfs(false, function(err)
+					{
+						if (err) console.error('FS.syncfs failed:', err);
+						state.running = false;
+						if (state.again) run();
+					});
+				};
+				if (state.running) state.again = true; else run();
 			});
 		#endif
 		return true;

@@ -512,7 +512,7 @@ async function sessionP3(relay) {
 		const r = await hostAndJoin(host, [friend], query, code, { privateLobby: true });
 		check('P3a', 'a friend that can do direct connections joins a host that cannot', r.hosted && r.known && r.joined[0]);
 		const failed = await friend.waitLog(/direct connection to peer 0 did not work/, 25000);
-		check('P3b', 'the friend\'s offer finds no answer: it gives up after 8 s, stays on the relay, and the host (no WebRTC at all) logs nothing wrong', failed && !host.hasLog(/EXC|error/i), failed ?? '');
+		check('P3b', 'the friend\'s offer finds no answer: it gives up after 8 s, stays on the relay, and the host (no WebRTC at all) logs nothing wrong', failed && !host.hasLog(/EXC|error/i), `${failed ?? 'friend did not give up'} | host: ${host.allLogs.find((l) => /EXC|error/i.test(l)) ?? 'nothing wrong'}`);
 		await startNormalGame(host, [friend]);
 		const play = await playAndMeasure(host, [friend], 15, 'P3');
 		const hs = syncOk(play.hostRows, 'host'), fs_ = syncOk(play.friendRows[0], 'friend');
@@ -710,8 +710,8 @@ async function sessionP7() {
 	try {
 		const entry = await openAndQuickJoin(host, friend, R);
 		check('P7a', 'with direct connections switched on (stun=none, like session P), the host opens a PUBLIC lobby and the friend joins it with QUICK JOIN', !!entry, JSON.stringify(openAndQuickJoin.last));
-		const hostSays = host.allLogs.find((l) => /no direct connections in this lobby (this lobby is on the public list)/.test(l));
-		const friendSays = friend.allLogs.find((l) => /no direct connections in this lobby (the lobby is on the public list)/.test(l));
+		const hostSays = host.allLogs.find((l) => /no direct connections in this lobby \(this lobby is on the public list\)/.test(l));
+		const friendSays = friend.allLogs.find((l) => /no direct connections in this lobby \(the lobby is on the public list\)/.test(l));
 		check('P7b', 'both games say that this lobby makes no direct connections because it is on the public list (the friend learns it from the lobby server: the code lookup marks the lobby LISTED)', hostSays && friendSays, `host: ${hostSays ?? 'nothing'} | friend: ${friendSays ?? 'nothing'}`);
 		const triedEarly = friend.hasLog(/trying a direct connection/) || host.hasLog(/direct connection to .* is in use/);
 		await sleep(3000);
@@ -738,6 +738,9 @@ async function sessionP8() {
 		const hosted = await host.waitLog(/Lobby: screen HOSTING/, 10000);
 		const entry = await waitFor(() => R.entries().find((e) => e.code && !e.isPublic), 20000);
 		const hostSaysNo = host.allLogs.find((l) => /no direct connections in this lobby/.test(l));
+		// (switching LOBBY to private saves the settings: each file write used to start its own storage sync, and two of them ran at once)
+		const syncOverlap = host.allLogs.find((l) => /FS\.syncfs operations in flight/.test(l));
+		check('P8c', 'saving the settings (LOBBY switched to private) never runs two storage syncs (FS.syncfs) at once', !syncOverlap, syncOverlap ?? 'none');
 		await friend.toLobby();
 		friend.forgetLogs();
 		await friend.openJoin();
@@ -747,8 +750,8 @@ async function sessionP8() {
 		const resolved = await friend.waitLog(/Lobby: the lobby server found the lobby, joining it/, 20000);
 		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
 		check('P8a', 'the host opens a PRIVATE lobby (not on the public list) and the friend joins it with its 6 digit code through the lobby server', hosted && entry && resolved && proved, `${entry ? 'code issued, private' : 'no private entry'} | ${resolved ?? 'not resolved'} | ${proved ?? 'not joined'}`);
-		const fDirect = await friend.waitLog(/direct connection to the host is in use (p2p)/, 30000);
-		const hDirect = await host.waitLog(/direct connection to friend 1 is in use (p2p)/, 30000);
+		const fDirect = await friend.waitLog(/direct connection to the host is in use \(p2p\)/, 30000);
+		const hDirect = await host.waitLog(/direct connection to friend 1 is in use \(p2p\)/, 30000);
 		const friendSaysNo = friend.allLogs.find((l) => /no direct connections in this lobby/.test(l));
 		check('P8b', 'in the private lobby both games set up the direct connection, and neither says "no direct connections" (the code lookup did not mark the lobby as listed)', fDirect && hDirect && !hostSaysNo && !friendSaysNo, `${fDirect ?? 'friend: none'} | ${hDirect ?? 'host: none'} | ${hostSaysNo ?? ''} ${friendSaysNo ?? ''}`);
 		dumpConsole('P8', host, friend);
