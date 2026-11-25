@@ -2,10 +2,11 @@
 #   docker build -t s3air-relay .
 #   docker run -d --restart unless-stopped -p 28842:28842/tcp -p 28842:28842/udp s3air-relay
 # On a platform that only offers HTTP(S) (most free web hosts), run it with UDP off: the platform sets PORT itself,
-#   -e UDP_PORT=0 -e TRUST_PROXY=1   (browsers can still join; native Windows games need UDP, see README.md)
+#   -e UDP_PORT=0 -e TRUST_PROXY=1   (browsers can still join; native Windows games need UDP, see README.md and HOSTING.md)
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json protocol.mjs relay_core.mjs ws.mjs server.mjs ./
+# every .mjs next to server.mjs (it imports relay_core, directory, ws and protocol; a list of names went stale once and the image could not start)
+COPY package.json *.mjs ./
 ENV PORT=28842 UDP_PORT=28842 BIND=0.0.0.0 NODE_ENV=production
 EXPOSE 28842/tcp 28842/udp
 USER node

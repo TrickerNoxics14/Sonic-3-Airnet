@@ -8,8 +8,11 @@
 //   PORT=28842            TCP port for WebSocket + the /health page (hosting platforms set this themselves)
 //   UDP_PORT=28842        UDP port for native games; UDP_PORT=0 turns UDP off (for hosts that only offer HTTP)
 //   BIND=0.0.0.0          address to listen on
-//   TRUST_PROXY=0         1 = the server is behind a reverse proxy / platform router that sets X-Forwarded-For: use it as the player's address
-//   ALLOWED_ORIGINS=      comma separated list of web page origins that may connect (empty = every page); native games send no Origin
+//   TRUST_PROXY=0         number of proxies / platform routers in front of the server that each add the address they saw to X-Forwarded-For
+//                         (0 = none: the header is ignored; 1 = one proxy: the LAST entry is the player; 2 = the second from the end, ...).
+//                         The last entry is the one a proxy of yours wrote; the ones before it came from the player and can be faked.
+//   ALLOWED_ORIGINS=      comma separated list of web page origins that may connect, e.g. https://name.github.io (empty = every page);
+//                         native games send no Origin. Capital letters, a trailing slash or a page path are ignored; text that is no origin stops the program.
 //   MAX_LOBBIES=512       lobbies at the same time
 //   MAX_LOBBIES_PER_IP=4  relay lobbies per player address; MAX_LISTINGS_PER_IP=2  public list entries per address (raise both when many people share one address, or for tests)
 //   DIRECTORY=0           turn the public lobby directory off (the relay then works as before 1.3)
@@ -17,6 +20,7 @@
 //   STATS_SECONDS=60      print a counter line this often (0 = never). Only counters are printed, never addresses, codes or payloads.
 import http from 'node:http';
 import dgram from 'node:dgram';
+import net from 'node:net';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { RelayCore } from './relay_core.mjs';
@@ -26,11 +30,41 @@ import { DEFAULT_PORT, MAX_DATAGRAM_SIZE } from './protocol.mjs';
 const nowSeconds = () => performance.now() / 1000;
 const cleanIP = (ip) => (ip ?? '').replace(/^::ffff:/, '');
 
+/** "https://Name.github.io/page/" -> "https://name.github.io" (what a browser sends as Origin); null if it is no web page origin. */
+export function normalizeOrigin(text) {
+	try {
+		const url = new URL(String(text).trim());
+		return (url.protocol === 'https:' || url.protocol === 'http:') && url.hostname ? url.origin : null;
+	} catch { return null; }
+}
+
+/**
+ * The address of a player, which the rate limits and blocks are kept by. `trustedProxies` is how many proxies of the host's own sit in front
+ * of the program; each one appends the address it saw to X-Forwarded-For, so the entry that the nearest proxy wrote is the LAST one, and every
+ * entry before it came from the player (or from something before the player) and may be invented. With 0 the header is ignored. An entry that
+ * is no IP address (invented text, an address with a port) is never used as an identity: the address of the connection itself is used instead.
+ */
+export function playerAddress(socketAddress, forwardedFor, trustedProxies) {
+	const direct = cleanIP(socketAddress);
+	if (!(trustedProxies > 0) || !forwardedFor) return direct;
+	const entries = String(forwardedFor).split(',').map((entry) => cleanIP(entry.trim()));
+	const chosen = entries[Math.max(0, entries.length - trustedProxies)];
+	return net.isIP(chosen) ? chosen : direct;
+}
+
 export function createRelayServer(options = {}) {
 	const {
-		port = DEFAULT_PORT, udpPort = port, bind = '0.0.0.0', trustProxy = false, allowedOrigins = [],
+		port = DEFAULT_PORT, udpPort = port, bind = '0.0.0.0', trustProxy = 0, allowedOrigins = [],
 		maxConnectionsPerIP = 32, pingSeconds = 20, statsSeconds = 0, quiet = true, limits = {},
 	} = options;
+	const trustedProxies = (trustProxy === true) ? 1 : (Number(trustProxy) || 0);   // true (older callers) = one proxy
+	// A page's origin is compared in the form a browser sends it. An entry that is no origin throws: it could never match, and an
+	// empty list would let every page in, so it must not be dropped silently.
+	const origins = allowedOrigins.map((entry) => {
+		const origin = normalizeOrigin(entry);
+		if (!origin) throw new Error(`ALLOWED_ORIGINS entry "${entry}" is not a web page origin (write it like https://name.github.io)`);
+		return origin;
+	});
 
 	const wsConnections = new Map();      // endpoint key -> WsConnection
 	const connectionsPerIP = new Map();
@@ -52,7 +86,7 @@ export function createRelayServer(options = {}) {
 		if (request.url === '/health' || request.url?.startsWith('/health?')) {
 			const s = core.stats;
 			response.writeHead(200, { 'Content-Type': 'application/json' });
-			response.end(JSON.stringify({ ok: true, protocol: 2, lobbies: s.lobbies, listed: core.directory.listedCount, friends: s.pipes, websocketClients: wsConnections.size, forwarded: s.forwarded, signals: s.signals }));
+			response.end(JSON.stringify({ ok: true, protocol: 2, lobbies: s.lobbies, listed: core.directory.listedCount, friends: s.pipes, websocketClients: wsConnections.size, websocketAddresses: connectionsPerIP.size, forwarded: s.forwarded, signals: s.signals }));
 			return;
 		}
 		response.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -61,13 +95,9 @@ export function createRelayServer(options = {}) {
 
 	server.on('upgrade', (request, socket) => {
 		socket.on('error', () => {});
-		const origin = request.headers.origin;
-		if (allowedOrigins.length && origin && !allowedOrigins.includes(origin)) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
-		let ip = cleanIP(socket.remoteAddress);
-		if (trustProxy) {
-			const forwarded = String(request.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-			if (forwarded) ip = cleanIP(forwarded);
-		}
+		const origin = request.headers.origin;   // none from a native game (it is no web page); a script can send any text, so this keeps other web pages out, it is not a login
+		if (origins.length && origin !== undefined && !origins.includes(normalizeOrigin(origin))) { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
+		const ip = playerAddress(socket.remoteAddress, request.headers['x-forwarded-for'], trustedProxies);
 		if ((connectionsPerIP.get(ip) ?? 0) >= maxConnectionsPerIP) { socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
 		const connection = acceptUpgrade(request, socket, MAX_DATAGRAM_SIZE);
 		if (!connection) return;
@@ -143,23 +173,31 @@ if (isMain) {
 	}
 	const port = Number(env.PORT ?? DEFAULT_PORT);
 	const udpEnv = env.UDP_PORT === undefined ? port : Number(env.UDP_PORT);
-	const relay = createRelayServer({
-		port,
-		udp: udpEnv !== 0,
-		udpPort: udpEnv || port,
-		bind: env.BIND ?? '0.0.0.0',
-		trustProxy: env.TRUST_PROXY === '1',
-		allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
-		maxConnectionsPerIP: Number(env.MAX_CONNECTIONS_PER_IP ?? 32),
-		statsSeconds: Number(env.STATS_SECONDS ?? 60),
-		quiet: false,
-		limits: {
-			...(env.MAX_LOBBIES ? { maxLobbies: Number(env.MAX_LOBBIES) } : {}),
-			...(env.MAX_LOBBIES_PER_IP ? { maxLobbiesPerIP: Number(env.MAX_LOBBIES_PER_IP) } : {}),
-			...(env.MAX_LISTINGS_PER_IP ? { maxListingsPerIP: Number(env.MAX_LISTINGS_PER_IP) } : {}),
-			...(env.DIRECTORY === '0' ? { directoryEnabled: false } : {}),
-		},
-	});
+	const trustProxy = String(env.TRUST_PROXY ?? '').trim() || '0';
+	if (!/^\d{1,2}$/.test(trustProxy) || Number(trustProxy) > 10) {
+		console.error(`s3air_relay: could not start: TRUST_PROXY must be the number of proxies in front of the program (0 to 10), not "${trustProxy}"`);
+		process.exit(1);
+	}
+	let relay;
+	try {
+		relay = createRelayServer({
+			port,
+			udp: udpEnv !== 0,
+			udpPort: udpEnv || port,
+			bind: env.BIND ?? '0.0.0.0',
+			trustProxy: Number(trustProxy),
+			allowedOrigins: (env.ALLOWED_ORIGINS ?? '').split(',').map((x) => x.trim()).filter(Boolean),
+			maxConnectionsPerIP: Number(env.MAX_CONNECTIONS_PER_IP ?? 32),
+			statsSeconds: Number(env.STATS_SECONDS ?? 60),
+			quiet: false,
+			limits: {
+				...(env.MAX_LOBBIES ? { maxLobbies: Number(env.MAX_LOBBIES) } : {}),
+				...(env.MAX_LOBBIES_PER_IP ? { maxLobbiesPerIP: Number(env.MAX_LOBBIES_PER_IP) } : {}),
+				...(env.MAX_LISTINGS_PER_IP ? { maxListingsPerIP: Number(env.MAX_LISTINGS_PER_IP) } : {}),
+				...(env.DIRECTORY === '0' ? { directoryEnabled: false } : {}),
+			},
+		});
+	} catch (error) { console.error(`s3air_relay: could not start: ${error.message}`); process.exit(1); }
 	relay.start().then(({ port: p, udpPort: u }) => {
 		console.log(`s3air_relay: WebSocket/HTTP on TCP ${p}${u ? `, UDP on ${u}` : ', UDP off'} (no addresses or player data are logged)`);
 	}).catch((error) => { console.error(`s3air_relay: could not start: ${error.message}`); process.exit(1); });
