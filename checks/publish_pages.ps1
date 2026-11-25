@@ -19,7 +19,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $allowedBranches = @("browser-multiplayer", "main")
 $identityName = "TrickerNoxics14"
 $identityMail = "96994462+TrickerNoxics14@users.noreply.github.com"		# the public GitHub noreply address of the owner (it is in every commit of the repository)
-$coAuthor = "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+$coAuthor = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 $remoteRegex = '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+?(\.git)?$'
 $guardScript = Join-Path $PSScriptRoot "web_leak_guard.ps1"
 
@@ -165,6 +165,17 @@ function Invoke-Publish([string]$Source, [bool]$DefaultSource, [bool]$DoPush, [b
 		$total = [int64]0
 		foreach ($rel in ($entries.Keys | Sort-Object)) { Write-Host ("  {0,12:N0}  {1}" -f $entries[$rel].Size, $rel); $total += $entries[$rel].Size }
 		Write-Host ("  {0,12:N0}  in total" -f $total)
+		# what the published page will use as relay (the one thing in the folder the owner has to decide on)
+		$relayFile = Join-Path $Source "relay_config.js"
+		if (Test-Path -LiteralPath $relayFile)
+		{
+			$relayLine = @(Get-Content -LiteralPath $relayFile | Where-Object { $_ -match '^\s*window\.S3AIR_RELAY_DEFAULT\s*=' })
+			$relayValue = $(if ($relayLine.Count -eq 1 -and $relayLine[0] -match "=\s*'([^']*)'") { $Matches[1] } else { $null })
+			if ($null -eq $relayValue) { Write-Host "relay address in relay_config.js: not readable (look at the file)" -ForegroundColor Yellow }
+			elseif ($relayValue -eq "") { Write-Host "relay address in relay_config.js: EMPTY (the page plays offline; online play is off until a player enters a relay address)" }
+			elseif ($relayValue -notmatch '^wss://') { Write-Host ("relay address in relay_config.js: " + $relayValue + "  (a page on https only accepts wss:// addresses)") -ForegroundColor Yellow }
+			else { Write-Host ("relay address in relay_config.js: " + $relayValue) }
+		}
 		Write-Host ""
 
 		$blockers = @(Get-PushBlockers $state)
