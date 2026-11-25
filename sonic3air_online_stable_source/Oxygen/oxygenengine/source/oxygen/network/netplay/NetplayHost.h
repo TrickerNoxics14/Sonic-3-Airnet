@@ -246,6 +246,9 @@ private:
 	uint32 mLastSeenFrameNumber = 0;
 	int mResyncCount = 0;				// How often a client got sent a fresh game state because its game drifted away
 	uint32 mStallStartTicks = 0;		// While waiting for a client that lags behind
+#ifdef PLATFORM_WEB
+	uint32 mStallLastCheckTicks = 0;	// When canBeginNextFrame last looked: a wait that is not looked at any more (a menu, a new game) does not count as a stall
+#endif
 
 	// Joining a game that is already running
 	JoinPhase mJoinPhase = JoinPhase::NONE;

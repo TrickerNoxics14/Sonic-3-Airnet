@@ -106,11 +106,7 @@ void NetplayClient::updateConnection(float deltaSeconds)
 {
 #ifdef PLATFORM_WEB
 	// How long no new frame came from the host (what a player who waits for a stalled host sees)
-	if (mState == State::GAME_RUNNING && !mReceivingJoinState && mNextFrameNumber != mStarvationLastFrame)
-		mStarvationSeconds = 0.0f;
-	else
-		mStarvationSeconds += deltaSeconds;
-	mStarvationLastFrame = mNextFrameNumber;
+	mStarvation.update(mState == State::GAME_RUNNING && !mReceivingJoinState, mNextFrameNumber, deltaSeconds);
 #endif
 
 	EngineServerClient& engineServerClient = EngineServerClient::instance();
@@ -432,32 +428,32 @@ void NetplayClient::collectStalledPlayers(std::vector<NetplayStall::Waiting>& ou
 	if (mState != State::GAME_RUNNING || mReceivingJoinState || mHostConnection.getState() != NetConnection::State::CONNECTED)
 		return;
 
-	// The game stands still because no new frame comes: either the host itself is silent, or the host waits for another player (it keeps answering pings then, but plays no frames)
+	// The game stands still because no new frame comes. Two causes are told apart: the host waits for another player that said its tab is hidden (the host keeps answering pings then,
+	// but plays no frames), or the host itself is silent. A host that answers but plays no frames is not blamed: it may be in a menu or paused.
 	const float silentSeconds = getHostSilentSeconds();
-	const float stallSeconds = std::max(silentSeconds, mStarvationSeconds);
+	const float starvedSeconds = mStarvation.mSeconds;
 	const bool hostAway = mNetplayManager.isPeerAway(0, silentSeconds);
-	if (!NetplayStall::isStalled(hostAway, stallSeconds))
-		return;
 
 	bool blamedOther = false;
 	for (int slot = 1; slot < MAX_PLAYERS; ++slot)
 	{
-		if (slot != mLobbyYourSlot && mNetplayManager.isPeerAway(slot, stallSeconds))
+		if (slot != mLobbyYourSlot && NetplayStall::isStalled(true, starvedSeconds) && mNetplayManager.isPeerAway(slot, starvedSeconds))
 		{
 			NetplayStall::Waiting waiting;
 			waiting.mName = mNetplayManager.getPlayerName(slot);
 			waiting.mAway = true;
-			waiting.mSilentSeconds = (int)stallSeconds;
+			waiting.mSilentSeconds = (int)starvedSeconds;
 			outWaiting.push_back(waiting);
 			blamedOther = true;
 		}
 	}
-	if (!blamedOther)
+	// (a host that has not produced a frame of this game yet is loading or picking the game, not stalling: silence only counts once the game really runs here)
+	if (!blamedOther && mStarvation.mStarted && NetplayStall::isStalled(hostAway, silentSeconds))
 	{
 		NetplayStall::Waiting waiting;
 		waiting.mName = mNetplayManager.getPlayerName(0);
 		waiting.mAway = hostAway;
-		waiting.mSilentSeconds = (int)stallSeconds;
+		waiting.mSilentSeconds = (int)silentSeconds;
 		outWaiting.push_back(waiting);
 	}
 }

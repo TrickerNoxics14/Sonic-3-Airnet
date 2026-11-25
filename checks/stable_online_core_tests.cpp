@@ -615,6 +615,32 @@ namespace
 		ok = ok && !tracker.isAway(100.0f);
 		report("stall: the away memory follows the messages, goes stale for a player who answers again, and can be reset", ok);
 
+		// The starvation timer: only a running game counts, and only after its first frame
+		{
+			StarvationTimer timer;
+			for (int k = 0; k < 900; ++k)
+				timer.update(false, 0, 0.1f);						// 90 s in the lobby
+			timer.update(true, 0, 0.016f);							// the game starts
+			bool starved = (timer.mSeconds == 0.0f);
+			for (int k = 0; k < 300; ++k)
+				timer.update(true, 0, 0.1f);						// the host is still picking the game in its menu: 30 s without a frame
+			starved = starved && (timer.mSeconds == 0.0f) && !timer.mStarted;
+			timer.update(true, 1, 0.016f);						// first frame
+			starved = starved && timer.mStarted && timer.mSeconds == 0.0f;
+			for (int k = 0; k < 30; ++k)
+				timer.update(true, 1, 0.1f);						// frames stop: 3 s
+			starved = starved && timer.mSeconds > 2.9f && timer.mSeconds < 3.1f;
+			timer.update(true, 2, 0.016f);						// a frame comes
+			starved = starved && timer.mSeconds == 0.0f;
+			for (int k = 0; k < 30; ++k)
+				timer.update(true, 2, 0.1f);
+			timer.update(false, 2, 0.1f);							// the connection breaks / the game state is loading: not a running game
+			starved = starved && timer.mSeconds == 0.0f && !timer.mStarted;
+			timer.update(true, 2, 0.1f);							// running again with the same frame number: nothing carried over
+			starved = starved && timer.mSeconds == 0.0f;
+			report("stall: the starvation timer ignores the lobby and the host's menu (no frame yet), counts frames that stop, and every non-running state resets it", starved);
+		}
+
 		// The text
 		std::vector<Waiting> list;
 		report("stall: nobody waits, no text", describeWaiting(list).empty());

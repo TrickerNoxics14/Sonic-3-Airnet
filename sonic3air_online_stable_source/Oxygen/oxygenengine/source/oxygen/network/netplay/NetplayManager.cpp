@@ -39,6 +39,7 @@
 #include "oxygen_netcore/serverclient/Packets.h"
 #include "oxygen_netcore/serverclient/ProtocolVersion.h"
 
+#include <algorithm>
 #include <future>
 
 
@@ -1128,6 +1129,12 @@ void NetplayManager::updateTabState(float deltaSeconds)
 		banner = mDropBanner;
 	if (banner.empty() && nullptr != mNetplayClient && mNetplayClient->isReconnectingToGame())
 		banner = "Connection lost. Reconnecting to your game...";
+	if (banner.empty() && nullptr != mNetplayClient && mNetplayClient->hasFailed() && !mLastErrorMessage.empty() && Application::instance().getSimulation().isRunning())
+	{
+		// The game ended for this player (the host's tab stayed away for a minute, the connection could not be restored): the message stays on the screen of the stopped game
+		banner = mLastErrorMessage;
+		std::replace(banner.begin(), banner.end(), '\n', ' ');
+	}
 
 	// One log line when the notice changes (the text without its running seconds)
 	const size_t cut = banner.rfind(" (");

@@ -692,6 +692,9 @@ bool NetplayHost::canBeginNextFrame(uint32 frameNumber)
 			break;
 	}
 
+#ifdef PLATFORM_WEB
+	mStallLastCheckTicks = SDL_GetTicks();
+#endif
 	// Don't run too far ahead of a client that lags behind: the game would drift apart if the client misses too many frames
 	const uint32 MAX_LEAD = 22;	// Must stay below the 30 input frames that each packet carries
 	bool mustWait = false;
@@ -1630,7 +1633,7 @@ void NetplayHost::collectStalledPlayers(std::vector<NetplayStall::Waiting>& outW
 		return;
 
 	// The host's own wait for a friend that lags behind (canBeginNextFrame): how long it lasts
-	const float waitSeconds = (mStallStartTicks != 0) ? (float)(SDL_GetTicks() - mStallStartTicks) * 0.001f : 0.0f;
+	const float waitSeconds = (mStallStartTicks != 0 && SDL_GetTicks() - mStallLastCheckTicks < 500) ? (float)(SDL_GetTicks() - mStallStartTicks) * 0.001f : 0.0f;
 
 	const auto connections = mPlayerConnections;
 	for (PlayerConnection* connection : connections)

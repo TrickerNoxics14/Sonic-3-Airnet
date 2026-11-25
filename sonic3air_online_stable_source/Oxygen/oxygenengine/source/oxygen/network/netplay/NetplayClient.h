@@ -112,6 +112,7 @@ public:
 	void collectStalledPlayers(std::vector<NetplayStall::Waiting>& outWaiting);
 	void sendAwayState(bool away);
 	float getHostSilentSeconds() const;		// 0 unless a game runs and the host is connected
+	inline bool hasFailed() const  { return mState == State::FAILED; }
 	inline bool isReconnectingToGame() const  { return mResumeSession && mState != State::GAME_RUNNING && mState != State::FAILED; }		// The connection of a running game broke and is being restored
 #endif
 
@@ -166,8 +167,7 @@ private:
 	uint32 mNextFrameNumber = 0;
 	int mCurrentLatency = 0;
 #ifdef PLATFORM_WEB
-	uint32 mStarvationLastFrame = 0;		// mNextFrameNumber at the last update: no news from the host means no progress
-	float mStarvationSeconds = 0.0f;		// How long no new frame came from the host while the game runs
+	NetplayStall::StarvationTimer mStarvation;		// How long no new frame came from the host while the game runs (see NetplayStallLogic.h)
 #endif
 
 	uint32 mInputChecksum = 0;

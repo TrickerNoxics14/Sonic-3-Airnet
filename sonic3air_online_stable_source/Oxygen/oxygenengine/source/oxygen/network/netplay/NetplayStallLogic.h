@@ -42,6 +42,35 @@ namespace NetplayStall
 		inline bool isAway(float silentSeconds) const  { return mAway && (silentSeconds >= AWAY_NOTICE_AFTER_SECONDS || mSecondsSinceMessage < AWAY_EXPIRE_SECONDS); }
 	};
 
+	// How long no new frame came from the host while a game runs on this friend. It only counts while a game really runs here (not in the lobby, not while the game
+	// state is loading), and only after the first frame of this game arrived: until then the host may still be picking the game in its menu. Any state that is not a running game
+	// resets it, so nothing counted before the game started can show up as a stall.
+	struct StarvationTimer
+	{
+		uint32 mLastFrame = 0;
+		float mSeconds = 0.0f;
+		bool mStarted = false;
+
+		inline void update(bool gameRunning, uint32 nextFrameNumber, float deltaSeconds)
+		{
+			if (!gameRunning)
+			{
+				mStarted = false;
+				mSeconds = 0.0f;
+			}
+			else if (nextFrameNumber != mLastFrame)
+			{
+				mStarted = (nextFrameNumber != 0);
+				mSeconds = 0.0f;
+			}
+			else if (mStarted)
+			{
+				mSeconds += deltaSeconds;
+			}
+			mLastFrame = nextFrameNumber;
+		}
+	};
+
 	inline bool isStalled(bool away, float silentSeconds)
 	{
 		return silentSeconds >= (away ? AWAY_NOTICE_AFTER_SECONDS : NOTICE_AFTER_SECONDS);
