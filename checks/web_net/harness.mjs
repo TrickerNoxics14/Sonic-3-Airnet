@@ -66,7 +66,7 @@ export class Instance {
 		this.debugPort = debugPort;
 		this.profileDir = profileDir;
 		this.process = spawn(chrome, ['--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profileDir}`, '--window-size=1280,720', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
-			'--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', ...(throttled ? [] : ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows']),
+			'--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required', ...(throttled ? ['--disable-backgrounding-occluded-windows'] : ['--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows']),
 			'--disable-features=WebRtcHideLocalIpsWithMdns', '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore' });
 		let list;
 		for (let i = 0; i < 100 && !list; ++i) {
@@ -87,7 +87,7 @@ export class Instance {
 	/**
 	 * Puts this tab in the background the way a player does: a second tab opens in the same browser window and takes the front, so the browser itself makes the game tab hidden
 	 * (document.visibilityState 'hidden', no animation frames, timers about once a second). Only real if the browser was started with `throttled: true` (without the flags
-	 * that switch background throttling off). Returns once the page reports 'hidden'.
+	 * that switch background throttling off; only the occlusion flag stays, because two overlapping browser windows on one screen made one of them 'hidden' by occlusion in a run, which a tab switch is not). Returns once the page reports 'hidden'.
 	 */
 	async hide() {
 		const r = await fetch(`http://127.0.0.1:${this.debugPort}/json/new?about:blank`, { method: 'PUT' });

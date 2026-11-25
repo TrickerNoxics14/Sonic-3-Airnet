@@ -1440,9 +1440,13 @@ async function sessionT3(relay) {
 		check('T3b', 'the host is not frozen and the stalled friend is dropped after a timeout (within 45 s), with a banner that says so ("NAME dropped: tab in the background")', dropped !== null && dropped <= 45 && tStall(oh) <= 10, `banner after ${dropped} s: "${oh.find((x) => /dropped|removed|left the game/i.test(x.banner))?.banner ?? ''}"; longest stall ${tStall(oh).toFixed(1)} s; banners: ${[...new Set(oh.map((x) => x.banner))].join(' | ')}`);
 		await shot(host, 'T3_host_dropped');
 		await friend.show();
-		const msg = await waitFor(async () => { const b = (await tState(friend))?.banner ?? ''; return /reconnect|dropped|away|background|too long/i.test(b) ? b : null; }, 15000, 250);
+		const msg = await waitFor(async () => { const b = (await tState(friend))?.banner ?? ''; return /Reconnecting to your game/.test(b) ? b : null; }, 15000, 250);
 		check('T3c', 'the returning friend is told on its screen (banner) that the connection was lost and it is reconnecting, within 15 s', !!msg, `banner "${(await tState(friend))?.banner}"; ${friend.allLogs.filter((l) => /Netplay client/.test(l)).slice(-4).join(' | ')}`);
 		await shot(friend, 'T3_friend_back');
+		const restored = await friend.waitLog(/reconnected and restored the existing session/, 40000);
+		const afterRejoin = await tObserve([host, friend], 12, (sec) => drive(host, [friend], sec));
+		const syncRejoin = await tSync(host, friend);
+		check('T3d', 'the dropped friend comes back into its slot (the game logs that the session was restored), both games run again (more than 300 frames in 12 s each, banners gone) and are in sync with repairs 0', !!restored && afterRejoin[0].at(-1).frame - afterRejoin[0][0].frame > 300 && afterRejoin[1].at(-1).frame - afterRejoin[1][0].frame > 300 && afterRejoin[0].at(-1).banner === '' && afterRejoin[1].at(-1).banner === '' && syncRejoin.ok, `${restored ?? 'no restore line'}; host ${tRate(afterRejoin[0]).toFixed(1)}, friend ${tRate(afterRejoin[1]).toFixed(1)} frames/s; ${syncRejoin.why}`);
 		fs.writeFileSync(path.join(logDir, 'web_net_T3_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\n`);
 	} finally { await h.close(); }
 }
@@ -1457,8 +1461,8 @@ async function sessionT4(relay) {
 		const [, ff] = await tObserve([host, friend], 70, tPlay(friend));
 		const first = tFirst(ff, /waiting for/i);
 		const lobbyMsg = friend.allLogs.filter((l) => /Netplay failure: HOST_CLOSED .The host.s tab stayed in the background/.test(l));
-		const told = tFirst(ff, /background|too long|gave up|did not come back|closed|lost/i);
-		check('T4b', 'the friend is not frozen forever: it sees a "waiting for NAME" notice at once (within 4 s) and is told clearly within 70 s of the host going hidden (the failure message of the game names the background tab; the host tab is still hidden)', first !== null && first <= 4 && lobbyMsg.length > 0, `waiting after ${first} s; clear message after ${told} s: "${ff.find((x) => /background|too long|gave up|did not come back|closed|lost/i.test(x.banner))?.banner ?? ''}"; ${lobbyMsg.slice(-3).join(' | ')}`);
+		const screenMsg = ff.at(-1)?.banner ?? '';
+		check('T4b', 'the friend is not frozen forever: it sees a "waiting for NAME" notice within 4 s, and within 70 s of the host going hidden the game ends for it with a message ON ITS SCREEN (the banner of the stopped game, read from the page state, not just a console line) that names the background tab; the host tab is still hidden', first !== null && first <= 4 && lobbyMsg.length > 0 && /host's tab stayed in the background for more than a minute/.test(screenMsg), `waiting after ${first} s; screen banner at the end: "${screenMsg}"; ${lobbyMsg.slice(-1).join(' | ')}`);
 		await shot(friend, 'T4_friend_told');
 		await host.show();
 		fs.writeFileSync(path.join(logDir, 'web_net_T4_console.txt'), `HOST\n${host.allLogs.filter((l) => /Netplay|tab|EXC/i.test(l)).join('\n')}\nFRIEND\n${friend.allLogs.filter((l) => /Netplay|Lobby|tab|EXC/i.test(l)).join('\n')}\n`);
@@ -1486,6 +1490,28 @@ async function sessionT5(relay) {
 	} finally { await h.close(); }
 }
 
+// ---- T6: a friend that waited in the lobby for a long time must not see a "waiting" banner when the game starts (the stall counters belong to a running game only) ----
+async function sessionT6(relay) {
+	console.log('--- session T6: no waiting banner at the start of a game after a long wait in the lobby');
+	const seed = 0x67;
+	const h = await startHarness({ webDir, instances: 2, seeds: [seed, 0x52], basePort: 9490, throttled: true });
+	try {
+		const [host, friend] = h.instances;
+		const query = `?relay=ws://127.0.0.1:${relay.ports.port}&p2p=off`;
+		await Promise.all([host.openGame(h.baseURL, query), friend.openGame(h.baseURL, query)]);
+		await Promise.all([host.waitLog(/Ready to go/, 90000), friend.waitLog(/Ready to go/, 90000)]);
+		await sleep(2000);
+		await Promise.all([host.toMainMenu(), friend.toMainMenu()]);
+		const r = await hostAndJoin(host, [friend], query, codeForSeed(seed));
+		await sleep(20000);		// the friend sits in the lobby (more than the 2.5 s that make a notice)
+		const obs = await tObserve([host, friend], 30, async () => { await startNormalGame(host, [friend]); await drive(host, [friend], 6); });
+		const waitingFriend = obs[1].filter((x) => /waiting for/i.test(x.banner)), waitingHost = obs[0].filter((x) => /waiting for/i.test(x.banner));
+		check('T6a', 'the lobby and the game start work (the friend runs the game: its frame counter advances)', !!(r.hosted && r.known && r.joined[0]) && obs[1].at(-1).frame > 300, `frame ${obs[1].at(-1).frame}`);
+		check('T6b', 'after 20 s in the lobby, neither the friend nor the host shows a "Waiting for" banner at any time while the game starts and loads', waitingFriend.length === 0 && waitingHost.length === 0, `friend: ${waitingFriend.length} samples, first "${waitingFriend[0]?.banner ?? ''}" at ${waitingFriend[0]?.t ?? '-'} s; host: ${waitingHost.length} samples${waitingHost[0] ? ', first "' + waitingHost[0].banner + '"' : ''}; hidden pages seen: host ${obs[0].filter((x) => x.hidden).length}, friend ${obs[1].filter((x) => x.hidden).length}; away lines: ${[...friend.allLogs, ...host.allLogs].filter((l) => /tab (of player|is hidden|is visible)/.test(l)).join(' | ')}`);
+		check('T6c', 'and no "notice:" line in either console', !friend.hasLog(/Netplay: notice:/) && !host.hasLog(/Netplay: notice:/), `${friend.allLogs.filter((l) => /Netplay: notice:/.test(l)).slice(0, 2).join(' | ')}`);
+	} finally { await h.close(); }
+}
+
 let exitCode = 0;
 const relay ={ relay: createRelayServer({ port: 0, udpPort: 28842, bind: '127.0.0.1', statsSeconds: 0 }) };
 try {
@@ -1506,6 +1532,7 @@ try {
 	if (only.includes('T') || only.includes('T3')) await sessionT3(relay);
 	if (only.includes('T') || only.includes('T4')) await sessionT4(relay);
 	if (only.includes('T') || only.includes('T5')) await sessionT5(relay);
+	if (only.includes('T') || only.includes('T6')) await sessionT6(relay);
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}
