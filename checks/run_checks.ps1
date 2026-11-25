@@ -553,6 +553,11 @@ try
 	# Static guard: a button that opens a folder works on every platform that shows it (file manager, or the game's own file browser, or no button)
 	$openFolderOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "lint_open_folder_guard.ps1") 2>&1 | ForEach-Object { "$_" })
 	Add-Result "B7" "Open-folder buttons are never dead on a platform without a file manager (lint_open_folder_guard.ps1)" ($LASTEXITCODE -eq 0) (($openFolderOut | Select-Object -Last 1) -join "")
+	# The publish tooling for the public page: the leak guard must catch every kind of leak (made-up names, text and binary files) and the publish script must refuse what it has to refuse (neither pushes anything)
+	$leakGuardOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "web_leak_guard.ps1") -SelfTest 2>&1 | ForEach-Object { "$_" })
+	Add-Result "B8" "The leak guard for the published web build catches user name, folders, e-mail, token, ROM and save data in text and binary files (web_leak_guard.ps1 -SelfTest)" ($LASTEXITCODE -eq 0) (($leakGuardOut | Select-Object -Last 1) -join "")
+	$publishOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $checksDir "publish_pages.ps1") -SelfTest 2>&1 | ForEach-Object { "$_" })
+	Add-Result "B9" "The Pages publish script refuses a leaking tree, a wrong branch, a dirty tree or a stale build, and its dry run pushes nothing (publish_pages.ps1 -SelfTest)" ($LASTEXITCODE -eq 0) (($publishOut | Select-Object -Last 1) -join "")
 	# The private memory areas of the mod (speed caps and scratch space of players 2, 3 and 4) must not overlap: two characters that share them would corrupt each other
 	$modSource = (@($modScripts | ForEach-Object { Get-Content -Raw $_.FullName }) -join "`n")
 	$constants = @{}
