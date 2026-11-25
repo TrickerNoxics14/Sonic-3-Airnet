@@ -15,15 +15,15 @@ and pays for the traffic (roughly 100 to 300 kilobytes per second per playing pe
     node server.mjs                      # WebSocket + health page on TCP 28842, UDP on 28842
     docker build -t s3air-relay . && docker run -d --restart unless-stopped -p 28842:28842/tcp -p 28842:28842/udp s3air-relay
 
-Check it: open `http://localhost:28842/health` (it answers `{"ok":true,...}` with counters only).
+Check it: open `http://localhost:28842/health` (it answers `{"ok":true,...}` with counters only). On a deployed relay, `node proxy_check.mjs wss://your-relay.example.org` checks that `TRUST_PROXY` suits the host (a player cannot make up an address).
 
 | setting (environment variable) | default | meaning |
 | --- | --- | --- |
 | `PORT` | 28842 | TCP port for WebSocket and `/health`. Hosting platforms set this themselves. |
 | `UDP_PORT` | same as `PORT` | UDP port for Windows games; `0` turns UDP off (for hosts that only offer HTTP). |
 | `BIND` | 0.0.0.0 | address to listen on |
-| `TRUST_PROXY` | 0 | `1` when a reverse proxy or the platform's router is in front: the player's address is then read from `X-Forwarded-For` (rate limits are per player, not per proxy). Never set it when players connect directly: they could fake their address. |
-| `ALLOWED_ORIGINS` | (any) | comma separated web page origins that may use the relay, e.g. `https://your-name.github.io`. Windows games send no origin and are not affected. |
+| `TRUST_PROXY` | 0 | how many proxies of your host sit in front of the program (`1` for a platform's router or Caddy, `2` for two in a row; `0` = none). Each proxy adds the address it saw to the end of `X-Forwarded-For`, and the player's address is the entry that many places from the end, so that rate limits and blocks are per player, not per proxy. Whatever stands before it came from the player and is never used. Never set it when players connect directly (they could fake any address). Only whole numbers 0 to 10 are accepted; anything else stops the program. If the platform shows every player with the same address (the guide HOSTING.md says how to notice), raise `MAX_CONNECTIONS_PER_IP` and `MAX_LISTINGS_PER_IP`. |
+| `ALLOWED_ORIGINS` | (any) | comma separated web page origins that may use the relay, e.g. `https://your-name.github.io` (scheme and host; capital letters, a trailing slash or the page path are ignored; text that is no origin stops the program, so that a typo cannot open or lock the relay silently). Empty = every page. A browser always sends its page's origin, so this keeps other web sites from using your relay; Windows games and scripts send none (or any text they like), so it is not a login. |
 | `MAX_LOBBIES` | 512 | lobbies at the same time (4 per address, 6 friends per lobby; built-in limits) |
 | `MAX_CONNECTIONS_PER_IP` | 32 | WebSocket connections from one player address |
 | `STATS_SECONDS` | 60 | counter line interval (0 = never) |
@@ -73,18 +73,18 @@ The web checks (checks/web_net, session P) prove this on one PC only: headless C
 
 ## Where to host it
 
-* **Cheapest way to run the full thing (browsers and Windows players):** a small always-free virtual machine, for example
-  an *Always Free* VM of Oracle Cloud (open TCP and UDP 28842 in the cloud firewall and in the VM's own firewall, run
-  `node server.mjs` as a systemd service). For `wss://` put a TLS front in front of the TCP port, e.g. Caddy with a free
-  DuckDNS name (`reverse_proxy 127.0.0.1:28842`, then run the relay with `TRUST_PROXY=1`), or a free Cloudflare Tunnel.
-* **Zero-setup way for browser players only:** any free web host that runs a Docker image or Node program and supports
-  WebSockets (Render, Koyeb, Fly.io and similar): connect the repository, use this folder as the root, command
-  `node server.mjs`, set `UDP_PORT=0` and `TRUST_PROXY=1`. They give you the `https://`/`wss://` address. Free instances
-  usually go to sleep when unused, so the first player may wait up to a minute while the relay wakes up. The browser build waits for that: its menus say "Waking the server up, retrying" and retry for 60 seconds before they give up (see session L4 and L5 in checks/web_net).
-  These hosts have no UDP, so Windows players cannot use that relay.
-* Do not run it on the PC you play on, and do not leave it open on a home connection.
+Step by step, with the free plans and limits as read from the providers' own pages (and what could not be verified): **[HOSTING.md](HOSTING.md)**.
+In short:
 
-Plans and limits of these hosts change: check their current terms. None of them was used to test this program.
+* **Browser players only, no UDP:** a free web service that runs Node and sleeps when idle (HOSTING.md covers Render). Start command `node server.mjs`, settings
+  `UDP_PORT=0 TRUST_PROXY=1 ALLOWED_ORIGINS=https://your-name.github.io`. The platform gives the `https://` address; the relay address is the same name with `wss://`.
+  The first player after a quiet time waits while it wakes up: the browser build's menus say "Waking the server up, retrying" and retry for 60 seconds.
+  These hosts have no UDP, so Windows and Android players cannot use that relay.
+* **Browsers and Windows players, always on:** a small always-free virtual machine (HOSTING.md covers Oracle Cloud Always Free) with TCP and UDP open, Caddy in front of the TCP port for `wss://`.
+* Do not run it on the PC you play on, and do not leave it open on a home connection.
+* Docker: `docker build` in this folder (the image copies every `.mjs` file here; a test checks that it holds everything `server.mjs` imports). Nobody has built the image on a real Docker host for this project.
+
+Plans and limits of these hosts change: HOSTING.md says on which day each was read. Nothing has been deployed by the people who wrote this.
 
 ## What it protects against (and what it does not)
 
@@ -136,7 +136,13 @@ what the game sends to it (lobby names, session IDs) and could join any lobby: r
 
 ## Tests
 
-    node --test test/relay.test.mjs test/directory.test.mjs   # Node 22 or newer (built-in WebSocket client)
+    node --test test/relay.test.mjs test/directory.test.mjs test/hosting.test.mjs   # Node 22 or newer (built-in WebSocket client); npm test does the same
+    node test/browser_origin_check.mjs                                              # by hand: a real headless Chrome as the player (needs Chrome; openssl for the exact GitHub Pages origin)
+
+`test/hosting.test.mjs` (14 tests) starts the real program as a free host would (`UDP_PORT=0 TRUST_PROXY=1 ALLOWED_ORIGINS=https://trickernoxics14.github.io`, bound to 127.0.0.1) and checks:
+no UDP socket exists, the allowed page origin can list, publish, resolve, join, signal and send data, other origins and look-alikes get 403, a client without origin is let in, `/health` shows counters only,
+the player's address behind one or two proxies (a faked first entry does not help; `websocketAddresses` in `/health` shows how many distinct addresses the connections have), `proxy_check.mjs`, settings that are typed wrongly stop the program, and the Docker image's file list holds everything `server.mjs` imports.
+`test/browser_origin_check.mjs` does the same from a real browser page on another origin (https://trickernoxics14.github.io on this PC through a throw-away certificate), with a control relay that has no list.
 
 (34 relay tests: 24 for the relay itself and 10 for the signalling messages: all four UDP/WebSocket host and friend combinations in both directions, payload sizes up to the cap, not counted as game traffic, forged tokens / wrong host token / unknown friend / stranger / oversize dropped, rate limit that does not hold back game data, no crash from signals of a client that never joined, two lobbies never hear each other's signalling, a friend that moved lobby cannot signal into the old one, no datagram contains an address and outsiders get no reply; plus 27 directory tests.)
 They start the real server on loopback and check the protocol (garbage, versions, sizes), joining and forwarding for all
