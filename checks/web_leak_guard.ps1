@@ -12,6 +12,10 @@
 #   R7  names: a file or folder called savedata / saves / states / storage / persistent / idbfs / roms / userdata / .git, settings.json / config.json, a ROM or save file extension
 #       (.bin .gen .smd .md .32x .sms .rom .srm .sav .sram .state*), a name that says Knuckles / S3K / Sonic 3
 #   R8  nothing to scan (a missing or empty folder passes no test, so it fails)
+#   R9  a compressed part that cannot be read. Some parts hide a name from the raw bytes: the compiled scripts (data/scripts.bin, packed into sonic3air.data) are a zlib
+#       stream behind an "LMD|" header, and the metadata of a PNG picture (zTXt text, compressed iTXt XMP, the iCCP colour profile) is zlib too, its EXIF can be hex text.
+#       Every such part is inflated / decoded and its content searched for R1-R5 like a file; one that cannot be read fails (a part nobody read is not clean)
+#   (each R1-R4 value is looked for as UTF-8, UTF-16, UTF-32 and UTF-16 big endian, the form of the names in an ICC profile)
 # The values it looks for are NEVER written into this file: they are read from the environment of the machine that runs it ($env:USERNAME, $env:COMPUTERNAME, the workspace
 # path, the profile folders, `git config user.email`). On a failure it prints the file, the rule and where in the file, never the value that was found.
 #
@@ -24,7 +28,9 @@ $latin1 = [Text.Encoding]::GetEncoding(28591)
 $ruleText = @{
 	R1 = "Windows user name or computer name"; R2 = "a folder of the builder's machine"; R3 = "a Windows user folder path (<drive>:\Users\...)"; R4 = "an e-mail address"
 	R5 = "an access token or private key"; R6 = "a ROM (size or Mega Drive header)"; R7 = "a name that belongs to save data, storage, a ROM or source control"; R8 = "nothing to scan"
+	R9 = "a compressed part that cannot be read (compiled scripts, picture metadata)"
 }
+$moduleCap = 64MB
 $romSizes = @(4194304, 2097152)
 $mailAllowed = '(^|\.)(users\.noreply\.github\.com|example\.(com|org|net)|localhost)$'
 $mailPublicHosts = '(^|\.)(users\.noreply\.github\.com|github\.com|example\.(com|org|net)|localhost)$'
@@ -44,6 +50,7 @@ function Get-Variants($needles)
 		[void]$list.Add([pscustomobject]@{ Rule = $n.Rule; Label = $n.Label; Encoding = "text"; Text = $latin1.GetString([Text.Encoding]::UTF8.GetBytes($n.Value)) })
 		[void]$list.Add([pscustomobject]@{ Rule = $n.Rule; Label = $n.Label; Encoding = "UTF-16"; Text = $latin1.GetString([Text.Encoding]::Unicode.GetBytes($n.Value)) })
 		[void]$list.Add([pscustomobject]@{ Rule = $n.Rule; Label = $n.Label; Encoding = "UTF-32"; Text = $latin1.GetString([Text.Encoding]::UTF32.GetBytes($n.Value)) })
+		[void]$list.Add([pscustomobject]@{ Rule = $n.Rule; Label = $n.Label; Encoding = "UTF-16BE"; Text = $latin1.GetString([Text.Encoding]::BigEndianUnicode.GetBytes($n.Value)) })		# ICC colour profiles in pictures
 	}
 	return ,$list
 }
@@ -150,6 +157,126 @@ function Find-Tokens([string]$text, $found)
 	}
 }
 
+# Inflates the zlib stream (2 byte header, then deflate data) in $bytes[$start..$end-1], at most $moduleCap; returns the content as Latin-1 text, or why it could not be read
+function Expand-Zlib([byte[]]$bytes, [int]$start, [int]$end)
+{
+	$r = [pscustomobject]@{ Text = $null; Problem = $null }
+	if ($end - $start -lt 3 -or ($bytes[$start] -band 0x0F) -ne 8 -or (($bytes[$start] * 256 + $bytes[$start + 1]) % 31) -ne 0) { $r.Problem = "the zlib header is broken"; return $r }
+	try
+	{
+		$src = New-Object IO.MemoryStream($bytes, ($start + 2), ($end - $start - 2), $false)
+		$ds = New-Object IO.Compression.DeflateStream($src, [IO.Compression.CompressionMode]::Decompress)
+		$dst = New-Object IO.MemoryStream
+		$buf = New-Object byte[] 65536
+		try
+		{
+			while (($n = $ds.Read($buf, 0, $buf.Length)) -gt 0)
+			{
+				$dst.Write($buf, 0, $n)
+				if ($dst.Length -gt $moduleCap) { $r.Problem = "more than " + ($moduleCap / 1MB) + " MB when inflated"; break }
+			}
+		}
+		finally { $ds.Dispose() }
+		if (-not $r.Problem) { $r.Text = $latin1.GetString($dst.ToArray()) }
+	}
+	catch { $r.Problem = "the zlib stream is broken" }
+	return $r
+}
+
+# ImageMagick and GIMP keep EXIF / IPTC / XMP in a PNG text chunk as hex ("Raw profile type exif": a line with the type, a line with the length, the bytes in hex);
+# returns the decoded bytes as Latin-1 text, or $null when the text does not have that shape
+function ConvertFrom-RawProfile([string]$text)
+{
+	$m = [Text.RegularExpressions.Regex]::Match($text, '^\s*[A-Za-z0-9_-]+[ \t]*\r?\n\s*\d+[ \t]*\r?\n(?<hex>[0-9A-Fa-f\s]+)$')
+	if (-not $m.Success) { return $null }
+	$hex = $m.Groups['hex'].Value -replace '\s', ''
+	$sb = New-Object Text.StringBuilder ($hex.Length / 2)
+	for ($i = 0; $i + 1 -lt $hex.Length; $i += 2) { [void]$sb.Append([char][Convert]::ToByte($hex.Substring($i, 2), 16)) }
+	return $sb.ToString()
+}
+
+# The compressed (or encoded) parts inside a file, which the plain search cannot read: each one with its offset, what it is, and its content as Latin-1 text, or why it
+# could not be read.
+#  - compiled script modules (ModuleSerializer.cpp): "LMD|", u16 version, u32 dependency hash, u32 app version, then a zlib stream
+#  - PNG pictures (alone or packed into gamedata.bin / enginedata.bin / sonic3air.data): the zTXt text, compressed iTXt text (XMP) and the iCCP colour profile chunks are
+#    zlib streams; a "Raw profile" text (tEXt, zTXt, iTXt) holds EXIF/IPTC/XMP as hex. The picture data (IDAT) is pixels, not text, and is not inflated.
+$pngSignature = [string][char]0x89 + "PNG`r`n" + [char]0x1A + "`n"
+function Get-CompressedParts([byte[]]$bytes, [string]$text)
+{
+	$list = New-Object System.Collections.ArrayList
+	$at = $text.IndexOf('LMD|', [StringComparison]::Ordinal)
+	while ($at -ge 0)
+	{
+		if ($at + 17 -le $bytes.Length -and $bytes[$at + 5] -eq 0 -and $bytes[$at + 4] -ge 0x10 -and $bytes[$at + 14] -eq 0x78 -and (($bytes[$at + 14] * 256 + $bytes[$at + 15]) % 31) -eq 0)
+		{
+			$z = Expand-Zlib $bytes ($at + 14) $bytes.Length
+			[void]$list.Add([pscustomobject]@{ Offset = $at; Kind = "compiled scripts"; Text = $z.Text; Problem = $z.Problem })
+		}
+		$at = $text.IndexOf('LMD|', $at + 1, [StringComparison]::Ordinal)
+	}
+	$png = $text.IndexOf($pngSignature, [StringComparison]::Ordinal)
+	while ($png -ge 0)
+	{
+		$p = $png + 8
+		while ($p + 12 -le $bytes.Length)
+		{
+			$len = ([int64]$bytes[$p] -shl 24) + ([int64]$bytes[$p + 1] -shl 16) + ([int64]$bytes[$p + 2] -shl 8) + [int64]$bytes[$p + 3]
+			$type = $text.Substring($p + 4, 4)
+			if ($type -cnotmatch '^[A-Za-z]{4}$' -or $p + 12 + $len -gt $bytes.Length) { break }		# not a chunk (any more): the end of this picture
+			$start = $p + 8; $end = [int]($start + $len)
+			$kind = "$type chunk of the PNG picture at byte offset $png"
+			if ($type -ceq 'zTXt' -or $type -ceq 'iCCP' -or $type -ceq 'iTXt' -or $type -ceq 'tEXt')
+			{
+				$nul = [Array]::IndexOf($bytes, [byte]0, $start, $len)
+				if ($nul -lt 0) { $nul = $end }
+				$content = $null; $problem = $null
+				if ($type -ceq 'zTXt' -or $type -ceq 'iCCP')
+				{
+					if ($nul + 2 -gt $end -or $bytes[$nul + 1] -ne 0) { $problem = "an unknown compression method" } else { $z = Expand-Zlib $bytes ($nul + 2) $end; $content = $z.Text; $problem = $z.Problem }
+				}
+				elseif ($type -ceq 'iTXt')
+				{
+					# keyword NUL, compressed flag, method, language NUL, translated keyword NUL, text
+					$q = $nul + 3
+					if ($q -le $end) { $q2 = [Array]::IndexOf($bytes, [byte]0, $q, $end - $q); if ($q2 -ge 0) { $q = [Array]::IndexOf($bytes, [byte]0, $q2 + 1, $end - $q2 - 1) } else { $q = -1 } } else { $q = -1 }
+					if ($q -lt 0) { $problem = "a broken iTXt chunk" }
+					elseif ($bytes[$nul + 1] -eq 1) { if ($bytes[$nul + 2] -ne 0) { $problem = "an unknown compression method" } else { $z = Expand-Zlib $bytes ($q + 1) $end; $content = $z.Text; $problem = $z.Problem } }
+					else { $content = $text.Substring($q + 1, $end - $q - 1) }		# plain text: the file search reads it as it is, only a hex profile in it needs decoding
+				}
+				else { $content = $text.Substring([Math]::Min($nul + 1, $end), $end - [Math]::Min($nul + 1, $end)) }
+				$compressed = ($type -ceq 'zTXt' -or $type -ceq 'iCCP' -or ($type -ceq 'iTXt' -and $bytes[$nul + 1] -eq 1))
+				if ($problem) { [void]$list.Add([pscustomobject]@{ Offset = $start; Kind = $kind; Text = $null; Problem = $problem }) }
+				else
+				{
+					if ($compressed) { [void]$list.Add([pscustomobject]@{ Offset = $start; Kind = $kind; Text = $content; Problem = $null }) }
+					$decoded = ConvertFrom-RawProfile $content
+					if ($null -ne $decoded) { [void]$list.Add([pscustomobject]@{ Offset = $start; Kind = "hex profile in the $kind"; Text = $decoded; Problem = $null }) }
+				}
+			}
+			$p = $end + 4
+			if ($type -ceq 'IEND') { break }
+		}
+		$png = $text.IndexOf($pngSignature, $png + 8, [StringComparison]::Ordinal)
+	}
+	return ,$list
+}
+
+# R1-R5 on one piece of content (a file, or the inflated content of a compressed part); $label names it in the findings
+function Add-ContentFindings($findings, [string]$label, [string]$text, $variants)
+{
+	foreach ($v in $variants)
+	{
+		$at = $text.IndexOf($v.Text, [StringComparison]::OrdinalIgnoreCase)
+		if ($at -ge 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = $v.Rule; What = "$($v.Label) ($($v.Encoding)) at byte offset $at" }) }
+	}
+	$mails = New-Object System.Collections.ArrayList
+	Find-Emails $text $mails
+	if ($mails.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = "R4"; What = "an e-mail address ($($mails.Count) time(s), first at byte offset $($mails[0]))" }) }
+	$tokens = New-Object System.Collections.ArrayList
+	Find-Tokens $text $tokens
+	if ($tokens.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = "R5"; What = "an access token or private key ($($tokens.Count) time(s), first at byte offset $($tokens[0]))" }) }
+}
+
 function Test-RomHeader([string]$text)
 {
 	foreach ($offset in @(0x100, 0x300)) { if ($text.Length -ge $offset + 12 -and $text.Substring($offset, 4) -ceq 'SEGA') { return $offset } }
@@ -160,7 +287,7 @@ function Test-RomHeader([string]$text)
 function Invoke-LeakScan([string]$Folder, $Needles)
 {
 	$findings = New-Object System.Collections.ArrayList
-	$result = [pscustomobject]@{ Findings = $findings; Files = 0; Bytes = [int64]0 }
+	$result = [pscustomobject]@{ Findings = $findings; Files = 0; Bytes = [int64]0; Parts = 0; PartBytes = [int64]0 }
 	if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { [void]$findings.Add([pscustomobject]@{ File = $Folder; Rule = "R8"; What = "the folder does not exist" }); return $result }
 	# every file and folder below $Folder (hidden ones too), with its path relative to $Folder built from the names on the way (not by cutting a prefix: a path may be given in its 8.3 short form)
 	$items = New-Object System.Collections.ArrayList
@@ -205,17 +332,14 @@ function Invoke-LeakScan([string]$Folder, $Needles)
 		$text = $latin1.GetString($bytes)
 		$header = Test-RomHeader $text
 		if ($header -ge 0) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = "R6"; What = "a Mega Drive ROM header at byte offset $header" }) }
-		foreach ($v in $variants)
+		Add-ContentFindings $findings $rel $text $variants
+		foreach ($part in (Get-CompressedParts $bytes $text))
 		{
-			$at = $text.IndexOf($v.Text, [StringComparison]::OrdinalIgnoreCase)
-			if ($at -ge 0) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = $v.Rule; What = "$($v.Label) ($($v.Encoding)) at byte offset $at" }) }
+			$result.Parts++
+			if ($part.Problem) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = "R9"; What = "$($part.Kind) at byte offset $($part.Offset): $($part.Problem), so its content was not checked" }); continue }
+			$result.PartBytes += $part.Text.Length
+			Add-ContentFindings $findings ("$rel ($($part.Kind) at byte offset $($part.Offset), decoded)") $part.Text $variants
 		}
-		$mails = New-Object System.Collections.ArrayList
-		Find-Emails $text $mails
-		if ($mails.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = "R4"; What = "an e-mail address ($($mails.Count) time(s), first at byte offset $($mails[0]))" }) }
-		$tokens = New-Object System.Collections.ArrayList
-		Find-Tokens $text $tokens
-		if ($tokens.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = "R5"; What = "an access token or private key ($($tokens.Count) time(s), first at byte offset $($tokens[0]))" }) }
 	}
 	return $result
 }
@@ -240,10 +364,41 @@ if ($SelfTest)
 		[IO.File]::WriteAllText((Join-Path $path "licence.txt"), "Copyright (C) 2003 Maxim Stepin ( maxst@hiend3d.com ) and Hyllian - SERGIOGDB@gmail.com")
 		[IO.File]::WriteAllText((Join-Path $path "app.js"), "/** @type {IDBDatabase} */ var u='https://github.com/ocornut/imgui'; var v='pkg@1.2.3';")
 		[IO.File]::WriteAllBytes((Join-Path $path "app.wasm"), $wasm)
-		[IO.File]::WriteAllBytes((Join-Path $path "app.data"), $data)
+		[IO.File]::WriteAllBytes((Join-Path $path "app.data"), (Join-Bytes $data[0..29999] $cleanModule $data[30000..59999]))		# a data package with compiled scripts inside, like sonic3air.data
 		[IO.File]::WriteAllBytes((Join-Path $path "img\icon.png"), (New-Random 3000))
+		[IO.File]::WriteAllBytes((Join-Path $path "img\logo.png"), $pngClean)		# a picture with harmless compressed metadata (inflated and read, nothing found)
 	}
 	function Get-Bytes([string]$s, [string]$enc) { if ($enc -eq "utf16") { [Text.Encoding]::Unicode.GetBytes($s) } elseif ($enc -eq "utf32") { [Text.Encoding]::UTF32.GetBytes($s) } else { [Text.Encoding]::UTF8.GetBytes($s) } }
+	# A compiled script module the way the game writes data/scripts.bin (ModuleSerializer.cpp): "LMD|", version 0x16, two 4 byte hashes, a zlib stream, its checksum
+	function New-ScriptModule([string]$content)
+	{
+		$ms = New-Object IO.MemoryStream
+		$ds = New-Object IO.Compression.DeflateStream($ms, [IO.Compression.CompressionMode]::Compress, $true)
+		$plain = [Text.Encoding]::UTF8.GetBytes($content); $ds.Write($plain, 0, $plain.Length); $ds.Dispose()
+		return ,[byte[]]([byte[]](0x4C, 0x4D, 0x44, 0x7C, 0x16, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0x78, 0x5E) + $ms.ToArray() + [byte[]](0, 0, 0, 0))
+	}
+	$cleanModule = New-ScriptModule ((1..200 | ForEach-Object { "main.lemon all_includes.lemon defines_character.lemon level/act$_.lemon " }) -join "")
+	$leakText = ((1..200 | ForEach-Object { "main.lemon level/act$_.lemon " }) -join "") + "mods/" + $fakeUser + "/scripts/main.lemon"
+	$leakModule = New-ScriptModule $leakText
+	$brokenModule = [byte[]]([byte[]](0x4C, 0x4D, 0x44, 0x7C, 0x16, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0x78, 0x5E) + [byte[]](@(0xFF) * 200))
+	# PNG pictures with metadata chunks (the game's pictures in gamedata.bin carry tEXt, zTXt, iTXt and iCCP chunks written by the image editor); the CRC is not checked
+	function New-Zlib([byte[]]$plain)
+	{
+		$ms = New-Object IO.MemoryStream
+		$ds = New-Object IO.Compression.DeflateStream($ms, [IO.Compression.CompressionMode]::Compress, $true); $ds.Write($plain, 0, $plain.Length); $ds.Dispose()
+		return ,[byte[]]([byte[]](0x78, 0x9C) + $ms.ToArray() + [byte[]](0, 0, 0, 0))
+	}
+	function New-PngChunk([string]$type, [byte[]]$content) { $len = [BitConverter]::GetBytes([uint32]$content.Length); [Array]::Reverse($len); return ,[byte[]]($len + [Text.Encoding]::ASCII.GetBytes($type) + $content + [byte[]](0, 0, 0, 0)) }
+	function New-Png([byte[]]$chunk) { return ,[byte[]]([byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) + (New-PngChunk "IHDR" (New-Random 13)) + (New-PngChunk "IDAT" (New-Random 500)) + $chunk + (New-PngChunk "IEND" ([byte[]]@()))) }
+	$kw = { param($s) [byte[]]([Text.Encoding]::ASCII.GetBytes($s) + [byte[]](0)) }
+	$leakNote = "made with an editor on the machine of " + $fakeUser + ", saved as Q:/x.png"
+	$pngZtxt = New-Png (New-PngChunk "zTXt" ((& $kw "Comment") + [byte[]](0) + (New-Zlib (Get-Bytes $leakNote "utf8"))))
+	$pngItxt = New-Png (New-PngChunk "iTXt" ((& $kw "XML:com.adobe.xmp") + [byte[]](1, 0, 0, 0) + (New-Zlib (Get-Bytes ("<x:xmpmeta><dc:creator>" + $fakeUser + "</dc:creator></x:xmpmeta>") "utf8"))))
+	$pngIccp = New-Png (New-PngChunk "iCCP" ((& $kw "ICC profile") + [byte[]](0) + (New-Zlib ((New-Random 128) + [Text.Encoding]::BigEndianUnicode.GetBytes("profile of " + $fakeUser) + (New-Random 64)))))
+	$exifHex = (-join ((Get-Bytes ("Exif`0`0II*`0Artist`0" + $fakeUser + "`0") "utf8") | ForEach-Object { $_.ToString("x2") }))
+	$pngExif = New-Png (New-PngChunk "tEXt" ((& $kw "Raw profile type exif") + (Get-Bytes ("`nexif`n     " + ($exifHex.Length / 2) + "`n" + $exifHex + "`n") "utf8")))
+	$pngBroken = New-Png (New-PngChunk "zTXt" ((& $kw "Comment") + [byte[]](0, 0x78, 0x9C) + [byte[]](@(0xFF) * 100)))
+	$pngClean = New-Png ((New-PngChunk "zTXt" ((& $kw "Comment") + [byte[]](0) + (New-Zlib (Get-Bytes "Created with GIMP" "utf8")))) + (New-PngChunk "iCCP" ((& $kw "ICC profile") + [byte[]](0) + (New-Zlib ([Text.Encoding]::BigEndianUnicode.GetBytes("GIMP built-in sRGB"))))))
 	$ok = $true
 	function Check([string]$name, [bool]$good, [string]$detail) { if (-not $good) { Write-Host "FAIL web_leak_guard self test: $name $detail" -ForegroundColor Red; $script:ok = $false } }
 	try
@@ -251,7 +406,8 @@ if ($SelfTest)
 		# clean tree passes, with no finding at all
 		$cleanDir = Join-Path $tmp "clean"; New-CleanTree $cleanDir
 		$clean = Invoke-LeakScan $cleanDir $fakeNeedles
-		Check "clean tree" ($clean.Findings.Count -eq 0 -and $clean.Files -eq 6) ("(findings: " + (($clean.Findings | ForEach-Object { $_.File + ":" + $_.Rule + " " + $_.What }) -join "; ") + ", files read: " + $clean.Files + ")")
+		Check "clean tree" ($clean.Findings.Count -eq 0 -and $clean.Files -eq 7) ("(findings: " + (($clean.Findings | ForEach-Object { $_.File + ":" + $_.Rule + " " + $_.What }) -join "; ") + ", files read: " + $clean.Files + ")")
+		Check "the compressed parts of the clean tree are inflated and read (the compiled scripts and two picture chunks)" ($clean.Parts -eq 3 -and $clean.PartBytes -gt 10000) ("(parts: " + $clean.Parts + ", inflated bytes: " + $clean.PartBytes + ")")
 		# the same tree must also be clean under the real patterns of this machine (the real output is built here)
 		$cleanReal = Invoke-LeakScan $cleanDir (Get-RealNeedles @())
 		Check "clean tree, real patterns" ($cleanReal.Findings.Count -eq 0) ("(findings: " + (($cleanReal.Findings | ForEach-Object { $_.File + ":" + $_.Rule }) -join "; ") + ")")
@@ -292,8 +448,22 @@ if ($SelfTest)
 			@("R7", "a settings file", { param($d) [IO.File]::WriteAllText((Join-Path $d "settings.json"), "{}") }),
 			@("R7", "a save file", { param($d) [IO.File]::WriteAllText((Join-Path $d "game.srm"), "x") }),
 			@("R7", "a ROM extension that is also a Markdown file", { param($d) [IO.File]::WriteAllText((Join-Path $d "README.md"), "x") }),
-			@("R7", "a git folder", { param($d) New-Item -ItemType Directory -Force (Join-Path $d ".git") | Out-Null; [IO.File]::WriteAllText((Join-Path $d ".git\config"), "x") })
+			@("R7", "a git folder", { param($d) New-Item -ItemType Directory -Force (Join-Path $d ".git") | Out-Null; [IO.File]::WriteAllText((Join-Path $d ".git\config"), "x") }),
+			@("R1", "user name inside compressed compiled scripts in the data package", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "app.data"), (Join-Bytes $data[0..999] $leakModule $data[1000..59999])) }),
+			@("R9", "compiled scripts that cannot be inflated", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "img\x.dat"), (Join-Bytes (New-Random 100) $brokenModule (New-Random 100))) }),
+			@("R1", "user name in a compressed text chunk (zTXt) of a picture", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "img\icon.png"), $pngZtxt) }),
+			@("R1", "user name in compressed XMP (iTXt) of a picture inside the data package", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "app.data"), (Join-Bytes $data[0..999] $pngItxt $data[1000..59999])) }),
+			@("R1", "user name as UTF-16 big endian in a compressed colour profile (iCCP)", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "img\icon.png"), $pngIccp) }),
+			@("R1", "user name in hex-encoded EXIF (Raw profile type exif) of a picture", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "img\icon.png"), $pngExif) }),
+			@("R9", "a picture text chunk that cannot be inflated", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "img\icon.png"), $pngBroken) })
 		)
+		# (the compressed fixture only proves something if the name cannot be found in it as it is)
+		foreach ($hidden in @(@("compiled scripts", $leakModule), @("zTXt", $pngZtxt), @("iTXt", $pngItxt), @("iCCP", $pngIccp), @("EXIF", $pngExif)))
+		{
+			$plainText = $latin1.GetString($hidden[1])
+			$visible = @(@("utf8", "utf16", "utf32") | Where-Object { $plainText.IndexOf($latin1.GetString((Get-Bytes $fakeUser $_)), [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+			Check ("the user name is not readable as it is in the " + $hidden[0] + " fixture") ($visible.Count -eq 0) ""
+		}
 		$caught = 0
 		foreach ($c in $cases)
 		{
@@ -331,7 +501,7 @@ if ($SelfTest)
 		Check "every one of the leak fixtures was caught" ($caught -eq $cases.Count) ("($caught of " + $cases.Count + ")")
 	}
 	finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
-	if ($ok) { Write-Host ("PASS web_leak_guard self test (" + $cases.Count + " leaking fixtures caught by the rule they belong to, the clean tree passes, an empty or missing folder fails, the patterns come from the environment)"); exit 0 }
+	if ($ok) { Write-Host ("PASS web_leak_guard self test (" + $cases.Count + " leaking fixtures caught by the rule they belong to, compressed compiled scripts and picture metadata included, the clean tree passes, an empty or missing folder fails, the patterns come from the environment)"); exit 0 }
 	Write-Host "FAIL web_leak_guard self test" -ForegroundColor Red; exit 1
 }
 
@@ -344,5 +514,5 @@ if ($res.Findings.Count -gt 0)
 	Write-Host ("guard FAILED: " + $res.Findings.Count + " finding(s) in " + $Dir + " (" + $res.Files + " files read); nothing may be published from this folder") -ForegroundColor Red
 	exit 1
 }
-Write-Host ("guard passed: " + $Dir + ": " + $res.Files + " files, " + $res.Bytes + " bytes read in full (text and binary, .wasm and .data included); no Windows user name or computer name, no builder folder, no <drive>:\Users path, no e-mail address (but the four licence-header addresses of the upscaler shaders), no token or private key, no ROM-sized or ROM-looking file, no save data / storage / ROM names (" + @($needles).Count + " patterns from this machine's environment, each also as UTF-16 and UTF-32)")
+Write-Host ("guard passed: " + $Dir + ": " + $res.Files + " files, " + $res.Bytes + " bytes read in full (text and binary, .wasm and .data included), " + $res.Parts + " compressed or hex-encoded part(s) (compiled scripts, picture metadata) decoded and read (" + $res.PartBytes + " bytes); no Windows user name or computer name, no builder folder, no <drive>:\Users path, no e-mail address (but the four licence-header addresses of the upscaler shaders), no token or private key, no ROM-sized or ROM-looking file, no save data / storage / ROM names (" + @($needles).Count + " patterns from this machine's environment, each also as UTF-16, UTF-32 and UTF-16 big endian)")
 exit 0
