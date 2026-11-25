@@ -69,8 +69,9 @@ export class WsPeer extends Peer {
 }
 
 /**
- * A WebSocket client written on a raw TCP socket, so that a test chooses the handshake headers itself (Origin, X-Forwarded-For): the
- * built-in WebSocket client of Node cannot send either. `status` is the HTTP status of the handshake (101 = let in, 0 = no answer).
+ * A WebSocket client written on a raw TCP socket, so that a test chooses every byte of the handshake and sees its HTTP status (an empty Origin, the same
+ * header twice, no Origin at all, a 403 or 429). Node's built-in WebSocket client does accept a `headers` option with Origin and X-Forwarded-For (proxy_check.mjs
+ * uses it), but it reports a refused handshake only as an error event, without the status. `status` here is the HTTP status of the handshake (101 = let in, 0 = no answer).
  * `headers` is an object; an array value sends the header once per entry.
  */
 export class RawWsPeer extends Peer {

@@ -25,9 +25,9 @@ page again before you rely on a number. Whatever could not be confirmed is marke
   directly (WebRTC), the relay carries only the lobby list and a few signalling messages. On A the 5 GB budget is about 4.6 to 14 hours of one
   person playing through the relay (5 GB divided by 300 and by 100 KB/s), so A suits groups whose direct connections work. Direct connections were only tried on one
   PC here (README, "Direct connections"), so how many real pairs succeed is unknown.
-* **Not suitable** (same date): Koyeb's pricing page lists no free compute (only a free database); Fly.io gives new accounts $1 of credit without a card and wants a card for
-  more (cheapest always-on machine $2.19 a month plus $0.02 per GB outbound; docs.fly.io/about/pricing); the Google Cloud free e2-micro includes only 1 GB of outbound
-  traffic a month (docs.cloud.google.com/free/docs/free-cloud-features): one evening of play is more.
+* **Looked at and not used** (same date, facts only): Koyeb's pricing page lists no free compute instance (only a free database tier). Fly.io's pricing page says new accounts start with $1 of credit and no card;
+  the smallest always-on machine is listed at $2.19 a month and outbound traffic at $0.02 per GB in North America and Europe (docs.fly.io/about/pricing); a page summary also mentioned $5 of usage a month once a card is added: UNVERIFIED.
+  The Google Cloud free e2-micro includes 1 GB of outbound traffic a month (docs.cloud.google.com/free/docs/free-cloud-features), against the README's 100 to 300 KB/s per person through the relay.
 * Never run the relay on the PC you play on or on a home connection (README).
 
 ## Your page's origin (needed by both)
@@ -36,8 +36,8 @@ page again before you rely on a number. Whatever could not be confirmed is marke
 
 * GitHub Pages site `https://trickernoxics14.github.io/Sonic-3-Airnet/` has the origin **`https://trickernoxics14.github.io`**.
 * Another address (custom domain, another account) has its own origin: scheme and host, e.g. `https://play.example.org`.
-* The server accepts capital letters, a trailing slash or the page path in the setting and cleans them up; text that is no origin (for example `trickernoxics14.github.io` without `https://`) stops the program at start with a message instead of locking everybody out.
-* Windows and Android games send no origin and are let in; so is any script, because a script can write any origin it likes. The list keeps *other web pages* from using your relay; it is not a password.
+* The server accepts capital letters, a trailing slash or the page path in the setting and cleans them up. An entry that no browser could ever send (`trickernoxics14.github.io` without `https://`, a `*` wildcard like `https://*.github.io`, a user name, a query, a bad host or port) stops the program at start with a message instead of locking everybody out. Several origins are separated by commas.
+* Windows and Android games send no origin and are let in; so is any script, because a script can write any origin it likes. The list keeps *other web pages* from using your relay; it is not a password. An `Origin` header that is present but empty (a browser never sends one) or `null` (a sandboxed frame, a local file) is refused with 403 while a list is set.
 
 ## A. Render free web service (browsers only)
 
@@ -50,7 +50,7 @@ Sources: render.com/docs/free, /docs/web-services, /docs/health-checks, /docs/we
   The game waits **60 seconds** per request ("Waking the server up, retrying" in the menus), so the first player after a quiet time may need to press the button once more. How Render answers
   a WebSocket request while the service wakes is not documented on those pages: UNVERIFIED. The program itself listens in well under a second here; the minute is Render's.
   Whether a browser's automatic answer to the relay's 20-second ping counts as traffic is not stated: UNVERIFIED (an open lobby page may keep it awake, which is harmless, see the hours above).
-* Render "might restart a Free web service at any time". Lobbies live in memory only: after a restart games register again by themselves within 5 seconds (README).
+* Render "might restart a Free web service at any time". Lobbies live in the relay's memory only, so a restart empties the lobby list, and a sleeping service has to start first (about a minute, above). What is backed by a test: web_net session A (A6a to A6c, A7) drops every WebSocket of a running relay and both browsers connect, register and join again by themselves; the game also repeats its registration every few seconds (comment in `relay_core.mjs`). A restart that wipes the relay's memory was not tried: UNVERIFIED whether a running game carries on across it.
 * Outbound traffic (WebSocket messages included) counts against the workspace's included **5 GB** (Hobby workspace). Free memory and CPU are not stated on the Free page: UNVERIFIED. The relay needs about 50 MB when idle (measured here, Node 24).
 * No stated maximum number of WebSocket connections and no maximum duration (docs/websocket). The relay's own limits: 32 connections and 4 lobbies per player address, 2 public listings per address, 512 lobbies in all.
 
@@ -71,10 +71,12 @@ Sources: render.com/docs/free, /docs/web-services, /docs/health-checks, /docs/we
 5. Settings, Health Checks, Edit: path **`/health`** (healthy = a 2xx or 3xx within 5 seconds; the relay answers `{"ok":true,...}`; Render restarts an instance that fails for 60 seconds).
 6. Wait for the first deploy. Your address is `https://NAME.onrender.com` (docs/your-first-deploy). The relay address for the game is the same with **`wss://`**: `wss://NAME.onrender.com`.
 
-**Calibrate `TRUST_PROXY`** (Render's docs say nothing about `X-Forwarded-For`; a user's test on Render's feedback board says Render *appends* to what a player sends, which is why the program counts from the end; how many entries Render's own chain adds is UNVERIFIED):
+**Find the right `TRUST_PROXY`.** It is the number of proxies in front of the relay that each add an address to `X-Forwarded-For`. Render's docs say nothing about that header; a user's test on Render's feedback board says Render *appends* to what a player sends; how many entries Render's own chain adds is UNVERIFIED. Two checks tell you:
 
-1. From your PC (Node 22 or newer), in `checks/relay_ws`: `node proxy_check.mjs wss://NAME.onrender.com` (the first call may take a minute: the service wakes up). It must print **OK**. `PROBLEM` means a player can still invent its address: raise the value by one and deploy again.
-2. Then have two people on different networks (for example your PC and a phone on mobile data) open the game's online menu, and look at `https://NAME.onrender.com/health`: `websocketClients` and `websocketAddresses` should both be 2. If `websocketAddresses` stays 1, everybody looks like the platform's own address: raise `TRUST_PROXY` by one and repeat step 1 (it must still say OK). If it still cannot be made to work, set `TRUST_PROXY=0` and `MAX_CONNECTIONS_PER_IP=200 MAX_LISTINGS_PER_IP=20 MAX_LOBBIES_PER_IP=20`: then the limits, the wrong-key blocks and the lobby code guess limit count everybody together, but nobody can fake an address.
+* `node proxy_check.mjs wss://NAME.onrender.com` (on your PC, Node 22 or newer, in `checks/relay_ws`; the first call may take a minute while the service wakes up). **PROBLEM means the number is too HIGH**: the relay would count an address that the player wrote, so anybody could invent addresses. **Lower** it by one (to 0 if nothing in front adds an address), deploy, run it again. If real players connected during its one second it can say PROBLEM wrongly: run it again before you change anything.
+* **OK does not say the number is high enough.** If it is too LOW, every player shows up with the platform's own address: nobody can invent one, but the per-address limits count everybody together (README, "If every player shows up as one address"). To see it, have two people on different networks (for example your PC and a phone on mobile data) open the game's online menu and look at `https://NAME.onrender.com/health`: `websocketClients` 2 and `websocketAddresses` 2 is right; `websocketAddresses` 1 means pooled.
+
+So: start at `1`. PROBLEM: use `0`. OK and `websocketAddresses` shows the players apart: done. OK but pooled: try `2` and run `proxy_check.mjs` again; OK and apart: done; PROBLEM: go back to `1`. A header with fewer entries than the number counts as the address of the connection itself (pooled, never invented), but a player who knows the number can add entries in front, which is why only `proxy_check.mjs` can tell a too high number. Where a number that pools cannot be avoided, raise a limit from the README only if real players are refused.
 
 **When the free plan is not enough**: the traffic budget ends (services stop until the month changes, or the card on file is charged $0.15 per GB, docs/outbound-bandwidth) or you want Windows players: use B, or any small VPS that offers UDP: it is the same program and the same settings as B. Render's paid instance prices are on render.com/pricing (not read: the page did not load as text).
 
@@ -155,7 +157,7 @@ Check with `nslookup your-name.duckdns.org`. Install Caddy from its own package 
 and `sudo systemctl reload caddy`. Caddy gets the certificate itself once the name points at the VM and ports 80 and 443 are open. Its `reverse_proxy` supports WebSocket without extra settings and, by default, ignores an `X-Forwarded-For`
 sent by the player (caddyserver.com docs), so the relay sees exactly one address entry: the player's.
 
-**7. Test and calibrate.** In a browser: `https://your-name.duckdns.org/health` shows the counters with a padlock. On your PC: `node proxy_check.mjs wss://your-name.duckdns.org` must print OK. UDP: start a Windows game with the relay set (below) and create a lobby; if it fails the usual cause is a missing UDP rule in one of the two firewalls.
+**7. Test and calibrate.** In a browser: `https://your-name.duckdns.org/health` shows the counters with a padlock. On your PC: `node proxy_check.mjs wss://your-name.duckdns.org` must print OK (PROBLEM would mean `TRUST_PROXY` is too high: lower it; with Caddy as the one proxy `1` is right and `/health` then shows each player apart). UDP: start a Windows game with the relay set (below) and create a lobby; if it fails the usual cause is a missing UDP rule in one of the two firewalls.
 
 **When the free VM goes away**: create a new one (steps 1 to 6, nothing else to restore), or move to any small VPS with UDP; the settings are the same.
 
@@ -187,7 +189,7 @@ sent by the player (caddyserver.com docs), so the relay sees exactly one address
 ## What was tested, and what was not
 
 Tested on one PC (Windows, Node 24) with the program started exactly as in the table (`UDP_PORT=0 TRUST_PROXY=1 ALLOWED_ORIGINS=https://trickernoxics14.github.io`, bound to 127.0.0.1):
-`test/hosting.test.mjs` (no UDP socket, an allowed page lists, publishes, resolves, joins, signals and sends data, other origins get 403, `/health` shows counters only, the player's address behind proxies, bad settings stop the program, the Docker file list)
+`test/hosting.test.mjs` (no UDP socket, an allowed page lists, publishes, resolves, joins, signals and sends data, other origins and an empty Origin get 403, `/health` shows counters only, the player's address behind proxies including a header shorter than the number, `proxy_check.mjs` through small proxies that append, add nothing, overwrite, or chain two and three at `TRUST_PROXY` 0 to 3, bad settings stop the program, the Docker file list and its guard)
 and `test/browser_origin_check.mjs` (a real headless Chrome on the page origin `https://trickernoxics14.github.io` against the relay on another origin, with a control relay that has no list). Also `Get-NetUDPEndpoint` showed 0 UDP endpoints for the relay process with `UDP_PORT=0`.
 
 **Not tested:** any real host (Render, Oracle, Caddy, DuckDNS: nothing was created or deployed), a real WebSocket wake-up from sleep, Render's actual `X-Forwarded-For` chain, Docker (not installed here; the image's file list is checked, the image was never built), Node 18, UDP from a Windows game to a VM, Oracle's firewall steps, the real traffic of a game through a relay.

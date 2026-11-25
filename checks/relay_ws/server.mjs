@@ -10,9 +10,14 @@
 //   BIND=0.0.0.0          address to listen on
 //   TRUST_PROXY=0         number of proxies / platform routers in front of the server that each add the address they saw to X-Forwarded-For
 //                         (0 = none: the header is ignored; 1 = one proxy: the LAST entry is the player; 2 = the second from the end, ...).
-//                         The last entry is the one a proxy of yours wrote; the ones before it came from the player and can be faked.
+//                         The entries a proxy of yours wrote are at the end; the ones before them came from the player and can be faked.
+//                         A header with FEWER entries than this counts as the address of the connection itself (players behind it are pooled, never faked).
+//                         A number HIGHER than the real number of proxies is the one unsafe value: the entry then counted was written by the player.
+//                         node proxy_check.mjs wss://your-relay finds that; if it says PROBLEM, lower the number.
 //   ALLOWED_ORIGINS=      comma separated list of web page origins that may connect, e.g. https://name.github.io (empty = every page);
-//                         native games send no Origin. Capital letters, a trailing slash or a page path are ignored; text that is no origin stops the program.
+//                         scheme and host (and port), nothing else; capital letters, a trailing slash or a page path are ignored; native games send no Origin.
+//                         An Origin header that is there but empty or not an origin is refused while a list is set. An entry that no browser could ever send
+//                         (a * wildcard, no scheme, a user name, a query, a bad host or port) stops the program.
 //   MAX_LOBBIES=512       lobbies at the same time
 //   MAX_LOBBIES_PER_IP=4  relay lobbies per player address; MAX_LISTINGS_PER_IP=2  public list entries per address (raise both when many people share one address, or for tests)
 //   DIRECTORY=0           turn the public lobby directory off (the relay then works as before 1.3)
@@ -39,17 +44,46 @@ export function normalizeOrigin(text) {
 }
 
 /**
+ * An ALLOWED_ORIGINS entry: scheme, host and perhaps a port (https://name.github.io, http://localhost:8080). Returns the origin the way a browser sends it
+ * (lower case, no default port, no path), or null if no browser could ever send it: a wildcard, no scheme, a user name, a query, a bad host or port.
+ * A trailing slash or a page path is accepted and dropped (it is what people copy from the address bar, and the origin it stands for is clear).
+ */
+export function parseConfiguredOrigin(entry) {
+	const match = /^(https?):\/\/([^/\s\\@*?#]+)(\/[^\s\\@*?#]*)?$/i.exec(String(entry).trim());
+	if (!match) return null;
+	let url;
+	try { url = new URL(`${match[1]}://${match[2]}`); } catch { return null; }
+	const host = url.hostname;
+	const plainName = /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/i.test(host);
+	const ipv6 = host.startsWith('[') && host.endsWith(']') && net.isIPv6(host.slice(1, -1));
+	return (plainName || ipv6) ? url.origin : null;
+}
+
+/**
  * The address of a player, which the rate limits and blocks are kept by. `trustedProxies` is how many proxies of the host's own sit in front
- * of the program; each one appends the address it saw to X-Forwarded-For, so the entry that the nearest proxy wrote is the LAST one, and every
- * entry before it came from the player (or from something before the player) and may be invented. With 0 the header is ignored. An entry that
- * is no IP address (invented text, an address with a port) is never used as an identity: the address of the connection itself is used instead.
+ * of the program; each one appends the address it saw to X-Forwarded-For, so the entries they wrote are the LAST ones and the entry that many places
+ * from the end is the player. Whatever stands before it came from the player (or from something before the player) and may be invented, so it is never used
+ * as long as the number is right. With 0 the header is ignored. The address of the connection itself (the platform's edge: everybody behind it is pooled,
+ * which /health shows as websocketAddresses, but nobody can invent an address) is used when the header has fewer entries than there are proxies, or
+ * when the entry is no IP address (invented text, an address with a port).
+ * A number that is HIGHER than the real number of proxies cannot be made safe here: the entry that is counted is then one the player wrote (a player who
+ * knows the number just adds entries in front). proxy_check.mjs finds that case.
  */
 export function playerAddress(socketAddress, forwardedFor, trustedProxies) {
 	const direct = cleanIP(socketAddress);
 	if (!(trustedProxies > 0) || !forwardedFor) return direct;
 	const entries = String(forwardedFor).split(',').map((entry) => cleanIP(entry.trim()));
-	const chosen = entries[Math.max(0, entries.length - trustedProxies)];
+	if (entries.length < trustedProxies) return direct;
+	const chosen = entries[entries.length - trustedProxies];
 	return net.isIP(chosen) ? chosen : direct;
+}
+
+/** One line for the start of the program's output: what TRUST_PROXY means right now (a changed meaning must be visible in the log of the host). */
+export function describeTrustProxy(trustedProxies) {
+	const tail = 'a header with fewer entries counts as the address of the connection';
+	if (!(trustedProxies > 0)) return 'TRUST_PROXY=0: no proxy trusted, X-Forwarded-For is ignored (every player counts as the address of the connection)';
+	if (trustedProxies === 1) return `TRUST_PROXY=1: one proxy trusted, the last X-Forwarded-For entry is the player's address (${tail})`;
+	return `TRUST_PROXY=${trustedProxies}: ${trustedProxies} proxies trusted, entry number ${trustedProxies} counted from the end of X-Forwarded-For is the player's address (${tail})`;
 }
 
 export function createRelayServer(options = {}) {
@@ -58,11 +92,11 @@ export function createRelayServer(options = {}) {
 		maxConnectionsPerIP = 32, pingSeconds = 20, statsSeconds = 0, quiet = true, limits = {},
 	} = options;
 	const trustedProxies = (trustProxy === true) ? 1 : (Number(trustProxy) || 0);   // true (older callers) = one proxy
-	// A page's origin is compared in the form a browser sends it. An entry that is no origin throws: it could never match, and an
+	// A page's origin is compared in the form a browser sends it. An entry that no browser could send throws: it could never match, and an
 	// empty list would let every page in, so it must not be dropped silently.
 	const origins = allowedOrigins.map((entry) => {
-		const origin = normalizeOrigin(entry);
-		if (!origin) throw new Error(`ALLOWED_ORIGINS entry "${entry}" is not a web page origin (write it like https://name.github.io)`);
+		const origin = parseConfiguredOrigin(entry);
+		if (!origin) throw new Error(`ALLOWED_ORIGINS entry "${entry}" is not a web page origin: write only the scheme and host (and port), like https://name.github.io`);
 		return origin;
 	});
 
@@ -198,6 +232,7 @@ if (isMain) {
 			},
 		});
 	} catch (error) { console.error(`s3air_relay: could not start: ${error.message}`); process.exit(1); }
+	console.log(`s3air_relay: ${describeTrustProxy(Number(trustProxy))}`);
 	relay.start().then(({ port: p, udpPort: u }) => {
 		console.log(`s3air_relay: WebSocket/HTTP on TCP ${p}${u ? `, UDP on ${u}` : ', UDP off'} (no addresses or player data are logged)`);
 	}).catch((error) => { console.error(`s3air_relay: could not start: ${error.message}`); process.exit(1); });
