@@ -14,7 +14,7 @@ page again before you rely on a number. Whatever could not be confirmed is marke
 | Windows / Android games (they speak UDP) | **no** | yes |
 | Sleeps | after 15 minutes without inbound traffic; wakes in about a minute | no, but an idle VM can be reclaimed (see B) |
 | Free outbound traffic | 5 GB a month for the whole workspace; then services stop until next month (no card on file) or cost $0.15 per GB (card on file) | 10 TB a month |
-| Effort | 10 minutes, no server administration | about an hour, you run a Linux server |
+| Effort (my estimate, not tried) | short, no server administration | about an hour, you run a Linux server |
 | Needs | a Render account and the GitHub repository | an Oracle account (card and phone number for verification), a free DuckDNS name |
 
 * **Only browsers play?** Take A. **Windows or Android players must be in the same lobbies as browsers?** Take B: a relay without UDP cannot serve them.
