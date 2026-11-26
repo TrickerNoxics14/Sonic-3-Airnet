@@ -30,8 +30,9 @@
 .rom-box code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; color: #ffe07c; }
 #s3kPromptMessage { display: block; margin: 4px 0 14px; min-height: 0; }
 #s3kPromptMessage.error { padding: 10px 12px; background: #fc0000; color: #ffffff; font-weight: 600; }
-.rom-cast { position: fixed; bottom: 0; right: 6vw; height: 160px; width: auto; image-rendering: pixelated; pointer-events: none; }
-@media (max-width: 600px) { .rom-cast { height: 120px; } .rom-box { padding: 20px 18px; } }
+.rom-cast { position: fixed; bottom: 0; right: 6vw; display: flex; align-items: flex-end; gap: 28px; pointer-events: none; }
+.rom-cast img { height: 160px; width: auto; image-rendering: pixelated; }
+@media (max-width: 600px) { .rom-cast { gap: 12px; } .rom-cast img { height: 80px; } .rom-box { padding: 20px 18px; } }
 .file_upload{
 	position: fixed;
 	top: 50%;
@@ -492,7 +493,7 @@ function fileManagerExportFile(filePath){
 		<input id="fileSelector" class="fileSelector" type="file" onChange="installS3kFile(this);"/>
 		<p class="quiet">Or drop the file anywhere on this page.</p>
 	</div>
-	<img class="rom-cast" src="ui_sonic_tails.png" width="56" height="40" alt="">
+	<div class="rom-cast" aria-hidden="true"><img src="ui_sonic.png" width="40" height="40" alt=""><img src="ui_tails.png" width="40" height="40" alt=""></div>
 </div>
 <div class="file_upload hidden">
 	<div style="margin-bottom: 15px; font-size: 1.2em;">Select a file to import:</div>

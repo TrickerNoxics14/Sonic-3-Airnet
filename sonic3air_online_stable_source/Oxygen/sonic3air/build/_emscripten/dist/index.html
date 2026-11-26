@@ -51,7 +51,7 @@
 	.btn.win .pix { --tint: var(--white); }
 	.btn:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--black); }
 	.btn:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 var(--black); }
-	.cast { position: absolute; right: 40px; bottom: 0; display: flex; align-items: flex-end; gap: 4px; }
+	.cast { position: absolute; right: 40px; bottom: 0; display: flex; align-items: flex-end; gap: 28px; }
 	.cast img { height: 160px; width: auto; }
 	.cast img.knux { height: 160px; }
 
@@ -86,8 +86,8 @@
 		.card-body { padding: 40px 22px 200px; }
 		.zone { --px: 5; }
 		.logo { width: 360px; }
-		.cast { right: 12px; }
-		.cast img, .cast img.knux { height: 120px; }
+		.cast { right: 12px; gap: 10px; }
+		.cast img, .cast img.knux { height: 80px; }
 		.lineup { gap: 10px; }
 		.lineup img { width: 60px; height: 60px; }
 		.install { grid-template-columns: 1fr; }
@@ -113,7 +113,8 @@
 			<a class="btn win" href="https://github.com/TrickerNoxics14/Sonic-3-Airnet/releases/latest"><span class="pix"><span class="label">Windows version</span></span></a>
 		</div>
 		<div class="cast" aria-hidden="true">
-			<img class="px" src="ui_sonic_tails.png" width="56" height="40" alt="">
+			<img class="px" src="ui_sonic.png" width="40" height="40" alt="">
+			<img class="px" src="ui_tails.png" width="40" height="40" alt="">
 			<img class="px knux" src="ui_echidna.png" width="40" height="40" alt="">
 		</div>
 	</div>
