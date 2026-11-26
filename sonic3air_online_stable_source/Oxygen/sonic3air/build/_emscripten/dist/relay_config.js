@@ -2,7 +2,7 @@
 // Whoever hosts this page puts the address of a relay server here ("wss://relay.example.org"). Left empty, online play stays off until a player
 // types an address under RELAY SERVER in the lobby, or opens the page as sonic3air_web.html?relay=wss://relay.example.org (the link wins over this file).
 // How to run a relay: checks/relay_ws/README.md in the source repository.
-window.S3AIR_RELAY_DEFAULT = '';
+window.S3AIR_RELAY_DEFAULT = 'wss://sonic3-airnet-relay.onrender.com';		// the free Render relay (checks/relay_ws/HOSTING.md, A); it sleeps after 15 minutes without players and needs about a minute to wake
 // Direct (peer to peer, WebRTC) connections between browser players, with the relay as fallback. A direct connection shows each player's IP address to the other player.
 // Uncomment to switch them off for everybody who opens this page (a player can still turn them on with ?p2p=on), or to use other STUN servers ("none" = no STUN):
 // window.S3AIR_P2P = false;
