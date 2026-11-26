@@ -71,6 +71,10 @@ public:
 	std::string getRelayServerSetting() const;
 	void setRelayServerSetting(const std::string& text);			// Saved in settings.json (the browser's lobby has an entry for it)
 	std::string getRelayDisplayName() const;						// The relay's host name for the lobby screen, empty if none is set (or it is not usable)
+	static std::string getServerDisplayName(const std::string& setting);
+	// The lobby / relay server is reached by a WebSocket: always in the browser, and in the Windows game when its address is ws://... or wss://... (a free web host;
+	// it may sleep and need a minute to wake up, so the menus wait for it and say so)
+	bool usesWebSocketServer() const;
 	static inline bool isBrowserBuild()
 	{
 	#ifdef PLATFORM_WEB

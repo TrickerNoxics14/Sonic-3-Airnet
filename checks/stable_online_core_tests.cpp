@@ -3,6 +3,7 @@
 #include "oxygen/network/netplay/NetplayAuth.h"
 #include "oxygen/network/netplay/NetplayFailure.h"
 #include "oxygen/network/netplay/NetplayLobbyLogic.h"
+#include "oxygen/network/netplay/NetplayServerDefaults.h"
 #include "oxygen/network/netplay/NetplayPackets.h"
 #include "oxygen/network/netplay/NetplayStallLogic.h"
 #include "oxygen/platform/DirectoryOpenLogic.h"
@@ -425,6 +426,16 @@ namespace
 			report("lobby: a relay address that is not a plain host name (spaces, user names, other schemes, bad ports, markup) is refused",
 				url("") == "(refused)" && url("   ") == "(refused)" && url("a b") == "(refused)" && url("ftp://x.org") == "(refused)" && url("user@host.org") == "(refused)" && url("host:0") == "(refused)" && url("host:99999") == "(refused)"
 				&& url("host:") == "(refused)" && url(".host") == "(refused)" && url("wss://") == "(refused)" && url("<script>") == "(refused)" && url("host:80:90") == "(refused)" && url("x.org/\"q\"") == "(refused)" && url(std::string(300, 'a')) == "(refused)");
+			// Windows game: a server address that starts with ws:// or wss:// is reached by a WebSocket (a relay on a free web host, the same one as the browsers'), anything else by UDP as before
+			report("lobby: only an address that says ws:// or wss:// means a WebSocket server (a plain name, name:port or web address stays UDP)",
+				isWebSocketAddress("wss://sonic3-airnet-relay.onrender.com") && isWebSocketAddress("  WSS://x.org/play ") && isWebSocketAddress("ws://127.0.0.1:9000")
+				&& !isWebSocketAddress("relay.example.org") && !isWebSocketAddress("relay.example.org:28842") && !isWebSocketAddress("https://x.org") && !isWebSocketAddress("") && !isWebSocketAddress("wss://") && !isWebSocketAddress("wss://a b"));
+			// The Windows game's built-in lobby server is the published page's relay: a secure WebSocket address (a typing mistake here would cut every player off)
+			{
+				std::string defaultURL;
+				report("lobby: the built-in lobby server of the Windows game is a usable secure WebSocket address (the same relay as the published page)",
+					isWebSocketAddress(NetplayServerDefaults::DEFAULT_LOBBY_SERVER) && normalizeRelayWebSocketURL(NetplayServerDefaults::DEFAULT_LOBBY_SERVER, defaultURL) && defaultURL.compare(0, 6, "wss://") == 0);
+			}
 		}
 		{
 			// The delay line: every player's input comes out exactly N frames later, all players alike

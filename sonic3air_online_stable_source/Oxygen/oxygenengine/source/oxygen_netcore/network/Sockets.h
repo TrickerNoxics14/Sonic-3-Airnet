@@ -249,11 +249,20 @@ public:
 	#endif
 	}
 
+	// Windows game: a relay server written as ws://... or wss://... (NetplayLobby::isWebSocketAddress; a free web host takes no UDP) is reached by a WebSocket as well,
+	// so that Windows and browser players share its lobbies. startRelay() is then given this made-up relay address, and the URL is the one of setRelayWebSocketURL() at
+	// that moment (each socket keeps its own). LAN discovery and direct UDP connections are not touched.
+	static constexpr const char* WEBSOCKET_RELAY_HOST = "websocket.relay";
+	static bool isNativeWebSocketSupported();
+	inline bool isRelayOverWebSocket() const  { return mRelayOverWebSocket; }
+
 private:
 	static inline std::string mRelayWebSocketURL;
 	static inline bool mDirectEnabled = true;
 	static inline std::string mDirectIceServers;
 	void updateDirect();
+	bool updateNativeWebSocket();		// Windows game, relay over a WebSocket: (re)connects; false while the connection is not open
+	bool receiveFromNativeWebSocket(ReceiveResult& outReceiveResult);
 	bool receiveInternal(ReceiveResult& outReceiveResult);
 	bool handleLanPacket(ReceiveResult& outReceiveResult);
 	bool sendDataNow(const uint8* data, size_t length, const SocketAddress& destinationAddress);
@@ -278,6 +287,11 @@ private:
 	uint64 mRelayDatagramsOut = 0;
 	bool mDirectSupported = false;
 	bool mDirectAllowedInLobby = true;
+	bool mRelayOverWebSocket = false;		// Windows game: the relay of this socket is reached by a WebSocket (see WEBSOCKET_RELAY_HOST)
+	std::string mRelayOverWebSocketURL;
+	double mWebSocketNextConnect = 0.0;
+	double mWebSocketBackoff = 0.5;
+	bool mWebSocketWasStarted = false;
 	uint64 mDirectDatagramsIn = 0;
 	uint64 mDirectDatagramsOut = 0;
 	uint32 mDirectRejoinSeen = 0;

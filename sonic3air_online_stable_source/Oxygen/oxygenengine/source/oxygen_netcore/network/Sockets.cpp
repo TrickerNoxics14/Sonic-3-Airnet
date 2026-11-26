@@ -51,6 +51,10 @@
 	#define SOMAXCONN 4096
 #endif
 
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	#include "oxygen_netcore/network/NativeWebSocket.h"		// (after the Windows socket headers: it brings in winhttp.h)
+#endif
+
 
 namespace
 {
@@ -730,8 +734,20 @@ struct UDPSocket::Internal
 #ifdef __EMSCRIPTEN__
 	WebTransport mWeb;
 #endif
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	NativeWebSocket mNativeWeb;		// Windows game: the relay over a WebSocket (only while mRelayOverWebSocket)
+#endif
 	DirectLink mDirect;
 };
+
+bool UDPSocket::isNativeWebSocketSupported()
+{
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	return true;
+#else
+	return false;
+#endif
+}
 
 
 UDPSocket::~UDPSocket()
@@ -747,6 +763,8 @@ bool UDPSocket::isTransportOpen() const
 {
 #ifdef __EMSCRIPTEN__
 	return isValid() && mInternal->mWeb.mState == WebTransport::State::OPEN;
+#elif defined(_WIN32)
+	return isValid() && (!mRelayOverWebSocket || mInternal->mNativeWeb.getState() == NativeWebSocket::State::OPEN);
 #else
 	return isValid();
 #endif
@@ -921,6 +939,12 @@ bool UDPSocket::sendDataNow(const uint8* data, size_t length, const SocketAddres
 	}
 #endif
 
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	// Windows game with the relay over a WebSocket: what goes to the relay travels in a WebSocket message (everything else, LAN and direct, stays UDP)
+	if (destinationAddress.getIP() == WEBSOCKET_RELAY_HOST)
+		return mRelayOverWebSocket && mInternal->mNativeWeb.send(data, length);
+#endif
+
 	const sockaddr* addr = (const sockaddr*)destinationAddress.getSockAddr();
 	const int addressLength = (addr->sa_family == AF_INET) ? (int)sizeof(sockaddr_in) : (int)sizeof(sockaddr_in6);
 	const int result = ::sendto(mInternal->mSocket, (const char*)data, (int)length, 0, addr, addressLength);
@@ -1019,6 +1043,10 @@ bool UDPSocket::receiveNonBlocking(ReceiveResult& outReceiveResult)
 #endif
 
 #ifdef _WIN32
+	// Windows game with the relay over a WebSocket: its messages first (they look exactly like the relay's UDP datagrams)
+	if (mRelayOverWebSocket && receiveFromNativeWebSocket(outReceiveResult))
+		return true;
+
 	// Check if there's pending data at all
 	uint32 pendingDataSize = 0;
 	if (::ioctlsocket(mInternal->mSocket, FIONREAD, (u_long*)(&pendingDataSize)) == 0)
@@ -1184,6 +1212,16 @@ void UDPSocket::startRelay(RelayRole role, const SocketAddress& relayAddress, ui
 	// Only a game connection (host or friend) may use the direct connections: they live in ONE browser-wide object (globalThis.__s3p2p), so a lobby directory socket that set it up
 	// would reset the game's channels, take over the signalling messages meant for the game (and drop them) and shut everything down when it closes
 	mDirectSupported = (role != RelayRole::DIRECTORY) && mDirectAllowedInLobby && isValid() && mInternal->mDirect.setup(mDirectIceServers, mDirectEnabled);
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	// Windows game: a relay at the made-up WebSocket address is reached by a WebSocket to the URL set right before (updateRelay below connects it)
+	if (nullptr != mInternal)
+		mInternal->mNativeWeb.close();
+	mRelayOverWebSocket = isValid() && relayAddress.getIP() == WEBSOCKET_RELAY_HOST;
+	mRelayOverWebSocketURL = mRelayOverWebSocket ? mRelayWebSocketURL : std::string();
+	mWebSocketNextConnect = 0.0;
+	mWebSocketBackoff = 0.5;
+	mWebSocketWasStarted = false;
+#endif
 #ifdef __EMSCRIPTEN__
 	if (isValid())
 	{
@@ -1213,6 +1251,11 @@ void UDPSocket::stopRelay()
 		mInternal->mDirect.shutdown();
 	mDirectSupported = false;
 	mDirectAllowedInLobby = true;		// (the switch belongs to one lobby)
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	if (nullptr != mInternal)
+		mInternal->mNativeWeb.close();
+	mRelayOverWebSocket = false;
+#endif
 #ifdef __EMSCRIPTEN__
 	if (nullptr != mInternal)
 	{
@@ -1255,6 +1298,12 @@ void UDPSocket::updateRelay()
 		}
 	}
 #endif
+	// Windows game with the relay over a WebSocket: the same, with its own connection
+	if (mRelayOverWebSocket && !updateNativeWebSocket())
+	{
+		mRelayReady = false;
+		return;
+	}
 
 	// A directory socket has nothing to register: it only sends and receives directory messages
 	if (mRelayRole == RelayRole::DIRECTORY)
@@ -1560,6 +1609,70 @@ bool UDPSocket::handleLanPacket(ReceiveResult& outReceiveResult)
 		mLanFoundAddress = outReceiveResult.mSenderAddress;
 	}
 	return true;
+}
+
+bool UDPSocket::updateNativeWebSocket()
+{
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	NativeWebSocket& webSocket = mInternal->mNativeWeb;
+	std::string line;
+	while (webSocket.takeLogLine(line))
+		RMX_LOG_INFO(line);
+
+	const double now = (double)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+	switch (webSocket.getState())
+	{
+		case NativeWebSocket::State::OPEN:
+			if (webSocket.takeJustOpened())
+			{
+				// A new connection is a new peer for the relay: the registration / join starts again right away
+				mWebSocketBackoff = 0.5;
+				mRelayLastHello = -1000.0;
+			}
+			return true;
+
+		case NativeWebSocket::State::CONNECTING:
+			return false;
+
+		case NativeWebSocket::State::CLOSED:
+		default:
+			if (mWebSocketWasStarted)
+			{
+				// It failed or closed: try again a bit later, each time a bit later up to 8 seconds (like the browser build)
+				mWebSocketWasStarted = false;
+				mWebSocketNextConnect = now + mWebSocketBackoff;
+				mWebSocketBackoff = (std::min)(mWebSocketBackoff * 2.0, 8.0);
+			}
+			if (now >= mWebSocketNextConnect)
+			{
+				webSocket.open(mRelayOverWebSocketURL);
+				mWebSocketWasStarted = true;
+			}
+			return false;
+	}
+#else
+	return true;
+#endif
+}
+
+bool UDPSocket::receiveFromNativeWebSocket(ReceiveResult& outReceiveResult)
+{
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+	outReceiveResult.mBuffer.clear();
+	if (!mInternal->mNativeWeb.receive(outReceiveResult.mBuffer))
+		return false;
+	// The next message from the relay server: handled like one of its UDP datagrams
+	outReceiveResult.mSenderAddress = mRelayAddress;
+	if (handleRelayPacket(outReceiveResult))
+	{
+		outReceiveResult.mBuffer.clear();
+		mConsumedLanPacket = true;
+	}
+	return true;
+#else
+	(void)outReceiveResult;
+	return false;
+#endif
 }
 
 bool UDPSocket::receiveInternal(ReceiveResult& outReceiveResult)

@@ -845,6 +845,26 @@ namespace NetplayLobby
 		return true;
 	}
 
+	// Windows game: a server address written as ws://... or wss://... is reached by a WebSocket (a relay on a free web host that only takes web traffic, the same
+	// server as the browsers'); every other address (a name, name:port, even a web address) stays a UDP server as before
+	inline bool isWebSocketAddress(const std::string& input)
+	{
+		size_t begin = 0;
+		while (begin < input.size() && (input[begin] == ' ' || input[begin] == '	'))
+			++begin;
+		auto startsWithNoCase = [&input, begin](const char* prefix) -> bool
+		{
+			for (size_t i = 0; prefix[i] != 0; ++i)
+				if (begin + i >= input.size() || std::tolower((unsigned char)input[begin + i]) != prefix[i])
+					return false;
+			return true;
+		};
+		if (!startsWithNoCase("ws://") && !startsWithNoCase("wss://"))
+			return false;
+		std::string url;
+		return normalizeRelayWebSocketURL(input, url);
+	}
+
 
 	// Why the host sends a friend away
 	enum class LeaveReason : uint8

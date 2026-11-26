@@ -701,8 +701,9 @@ void LobbyMenu::updateFlow()
 		finishFlow(getNoServerMessage(), NetplayFailure::Reason::NONE);
 		return;
 	}
-	// (Browser build: a server that does not answer may be asleep. The directory keeps the request and the menu waits for up to SERVER_WAKE_SECONDS, then this limit holds)
-	const float flowLimit = NetplayManager::isBrowserBuild() ? (NetplayManager::SERVER_WAKE_SECONDS + 20.0f) : 15.0f;
+	// (A WebSocket server - the browser's, or a ws:// / wss:// one in the Windows game - that does not answer may be asleep. The directory keeps the request and the menu waits
+	// for up to SERVER_WAKE_SECONDS, then this limit holds)
+	const float flowLimit = manager.usesWebSocketServer() ? (NetplayManager::SERVER_WAKE_SECONDS + 20.0f) : 15.0f;
 
 	if (mFlow == Flow::QUICK)
 	{
@@ -1300,8 +1301,9 @@ void LobbyMenu::update(float timeElapsed)
 
 	NetplayManager& manager = netplay();
 
-	// Browser build: how long the host has been waiting for the relay server to know its lobby (after a while the lobby screen says that it cannot be reached)
-	if (NetplayManager::isBrowserBuild() && mScreen == Screen::HOSTING && !manager.isRelayHostRegistered())
+	// WebSocket server (browser, or ws:// / wss:// in the Windows game): how long the host has been waiting for the relay server to know its lobby (after a while the lobby
+	// screen says that it cannot be reached)
+	if (manager.usesWebSocketServer() && mScreen == Screen::HOSTING && !manager.isRelayHostRegistered())
 	{
 		const float before = mRelayWaitSeconds;
 		mRelayWaitSeconds += timeElapsed;
@@ -2320,7 +2322,7 @@ void LobbyMenu::render()
 			else if (serverState == NetplayManager::LobbyServerState::NO_LIST)
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "This server has no lobby list. Friends join with the long code.", 5, orange);
 			else if (serverState == NetplayManager::LobbyServerState::UNREACHABLE || serverState == NetplayManager::LobbyServerState::BAD_ADDRESS)
-				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), NetplayManager::isBrowserBuild() ? "The server does not answer. Still trying in the background." : "The lobby server does not answer. Use the long code, or LAN.", 5, red);
+				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), manager.usesWebSocketServer() ? "The server does not answer. Still trying in the background." : "The lobby server does not answer. Use the long code, or LAN.", 5, red);
 			else
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Asking the lobby server for a lobby code...", 5, orange);
 		}
@@ -2332,7 +2334,7 @@ void LobbyMenu::render()
 		{
 			drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Long code (same network): " + longCode, 5, grey);
 		}
-		else if (NetplayManager::isBrowserBuild() && !manager.isRelayHostRegistered())
+		else if (manager.usesWebSocketServer() && !manager.isRelayHostRegistered())
 		{
 			if (mRelayWaitSeconds > 10.0f)
 				drawer.printText(global::mOxyfontSmall, Vec2i(anchorX, py), "Cannot reach the relay server. Friends cannot join yet.", 5, red);

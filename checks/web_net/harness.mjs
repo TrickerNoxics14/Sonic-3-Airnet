@@ -284,7 +284,9 @@ export async function startHarness({ webDir, romPath = defaultRomPath(), instanc
 	if (!chrome) throw new Error('No Chrome found (set CHROME)');
 	if (!fs.existsSync(path.join(webDir, 'sonic3air_web.html'))) throw new Error(`web build not found in ${webDir}`);
 	if (!fs.existsSync(romPath)) throw new Error('ROM not found (set S3AIR_ROM)');
-	const { server, port } = await startWebServer(webDir, romPath);
+	// The checks never use the published page's relay (relay_config.js names the live server): every session gives its own local one in the link (?relay=...)
+	const noPublishedRelay = (name, data) => name === 'relay_config.js' ? Buffer.from(data.toString('utf8').replace(/window\.S3AIR_RELAY_DEFAULT\s*=\s*'[^']*'/, "window.S3AIR_RELAY_DEFAULT = ''")) : null;
+	const { server, port } = await startWebServer(webDir, romPath, 0, noPublishedRelay);
 	const harness = { server, port, baseURL: `http://127.0.0.1:${port}`, instances: [] };
 	for (let i = 0; i < instances; ++i) {
 		const instance = new Instance(i, harness);

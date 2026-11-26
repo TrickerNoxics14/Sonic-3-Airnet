@@ -218,19 +218,25 @@ void NetplayManager::setRelayServerSetting(const std::string& text)
 std::string NetplayManager::getRelayDisplayName() const
 {
 	// Short text for the lobby: the host name only (never anything that looks like a password or a path)
-	std::string text = getRelayServerSetting();
-#ifdef PLATFORM_WEB
+	return getServerDisplayName(getRelayServerSetting());
+}
+
+std::string NetplayManager::getServerDisplayName(const std::string& text)
+{
+	// A WebSocket address (always in the browser, ws:// or wss:// in the Windows game) is shown as its host name only
 	std::string url;
-	if (NetplayLobby::normalizeRelayWebSocketURL(text, url))
+	if ((isBrowserBuild() || NetplayLobby::isWebSocketAddress(text)) && NetplayLobby::normalizeRelayWebSocketURL(text, url))
 	{
 		const size_t start = url.find("://") + 3;
 		const size_t end = url.find_first_of("/?", start);
 		return url.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
 	}
-	return std::string();
-#else
-	return text;
-#endif
+	return isBrowserBuild() ? std::string() : text;
+}
+
+bool NetplayManager::usesWebSocketServer() const
+{
+	return isBrowserBuild() || NetplayLobby::isWebSocketAddress(getEffectiveLobbyServer()) || NetplayLobby::isWebSocketAddress(getRelayServerSetting());
 }
 
 bool NetplayManager::resolveRelayAddress(SocketAddress& outAddress) const
@@ -276,6 +282,18 @@ bool NetplayManager::resolveServerSetting(const std::string& setting, SocketAddr
 	return true;
 #endif
 
+	// Windows game: a server written as ws://... or wss://... is reached by a WebSocket, like in the browser (a relay on a free web host has no UDP); there is nothing to look
+	// up here, the connection does that. Only call this on the game's thread for such a setting (the URL is handed over in a static, see UDPSocket::setRelayWebSocketURL).
+	if (NetplayLobby::isWebSocketAddress(setting))
+	{
+		std::string url;
+		if (!UDPSocket::isNativeWebSocketSupported() || !NetplayLobby::normalizeRelayWebSocketURL(setting, url))
+			return false;
+		UDPSocket::setRelayWebSocketURL(url);
+		outAddress.set(UDPSocket::WEBSOCKET_RELAY_HOST, 1);
+		return true;
+	}
+
 	// "host" or "host:port" (a name or an IPv4 address; a web address is accepted too, only its name is used)
 	std::string host;
 	int port = RelayProtocol::DEFAULT_PORT;
@@ -320,7 +338,14 @@ std::string NetplayManager::getLobbyServerSetting() const
 		return (_stricmp(testServer, "none") == 0) ? std::string() : std::string(testServer);
 	if (!Configuration::instance().mOnlineLobbyServer.empty())
 		return Configuration::instance().mOnlineLobbyServer;
+#ifdef PLATFORM_WEB
+	return std::string();		// (the browser takes its server from the page, relay_config.js: whoever hosts the page decides)
+#else
+	// The built-in server is for players; the automated checks (test hooks on) never reach the internet unless a check names a server
+	if (TestHooks::isEnabled())
+		return std::string();
 	return NetplayServerDefaults::DEFAULT_LOBBY_SERVER;
+#endif
 }
 
 void NetplayManager::setLobbyServerSetting(const std::string& text)
@@ -348,19 +373,7 @@ std::string NetplayManager::getEffectiveLobbyServer() const
 
 std::string NetplayManager::getLobbyServerDisplayName() const
 {
-	std::string text = getEffectiveLobbyServer();
-#ifdef PLATFORM_WEB
-	std::string url;
-	if (NetplayLobby::normalizeRelayWebSocketURL(text, url))
-	{
-		const size_t start = url.find("://") + 3;
-		const size_t end = url.find_first_of("/?", start);
-		return url.substr(start, (end == std::string::npos) ? std::string::npos : end - start);
-	}
-	return std::string();
-#else
-	return text;
-#endif
+	return getServerDisplayName(getEffectiveLobbyServer());
 }
 
 bool NetplayManager::isLobbyServerAddressUsable() const
@@ -371,6 +384,8 @@ bool NetplayManager::isLobbyServerAddressUsable() const
 #ifdef PLATFORM_WEB
 	return NetplayLobby::normalizeRelayWebSocketURL(text, url);
 #else
+	if (NetplayLobby::isWebSocketAddress(text))
+		return UDPSocket::isNativeWebSocketSupported();
 	return NetplayLobby::isPlausibleServerAddress(text);
 #endif
 }
@@ -494,25 +509,33 @@ void NetplayManager::updateLobbyDirectory(float deltaSeconds)
 			mLobbyDirectory.stop();
 		mDirectoryServer = server;
 		mDirectoryAddressState = DirectoryAddressState::RESOLVING;
-	#ifdef PLATFORM_WEB
-		SocketAddress address;
-		if (resolveServerSetting(server, address))
+		if (isBrowserBuild() || NetplayLobby::isWebSocketAddress(server))
 		{
-			mDirectoryAddressState = DirectoryAddressState::OK;
-			mLobbyDirectory.setPatienceSeconds(SERVER_WAKE_SECONDS);		// (the server may be asleep: it is retried for a minute, see LobbyDirectory.h)
-			mLobbyDirectory.start(address);
+			// A WebSocket server (always in the browser; ws:// or wss:// in the Windows game): nothing to look up first, the connection does that.
+			// Such a server is often a free web host that sleeps: it is given a minute to wake up (see LobbyDirectory.h)
+			SocketAddress address;
+			if (resolveServerSetting(server, address))
+			{
+				mDirectoryAddressState = DirectoryAddressState::OK;
+				mLobbyDirectory.setPatienceSeconds(SERVER_WAKE_SECONDS);
+				mLobbyDirectory.start(address);
+				RMX_LOG_INFO("Netplay: connecting to the lobby server (WebSocket)");
+			}
+			else
+			{
+				mDirectoryAddressState = DirectoryAddressState::BAD;
+			}
 		}
+	#ifndef PLATFORM_WEB
 		else
 		{
-			mDirectoryAddressState = DirectoryAddressState::BAD;
+			mDirectoryResolve = std::async(std::launch::async, [this, server]() -> std::pair<bool, SocketAddress>
+			{
+				SocketAddress address;
+				const bool ok = resolveServerSetting(server, address);
+				return std::make_pair(ok, address);
+			});
 		}
-	#else
-		mDirectoryResolve = std::async(std::launch::async, [this, server]() -> std::pair<bool, SocketAddress>
-		{
-			SocketAddress address;
-			const bool ok = resolveServerSetting(server, address);
-			return std::make_pair(ok, address);
-		});
 	#endif
 	}
 

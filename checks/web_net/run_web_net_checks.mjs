@@ -399,6 +399,80 @@ async function sessionN(relay) {
 	}
 }
 
+// Session W: crossplay over WebSocket. The relay has NO UDP port (like the free web host the published page uses), so the Windows game can only reach it the way a
+// browser does: a WebSocket. Public lobbies, QUICK JOIN and play in sync, the Windows game once as host and once as friend.
+async function sessionW() {
+	console.log('--- session W: a Windows game and a browser through a relay that only speaks WebSocket (no UDP)');
+	const R = await startLobbyRelay();
+	const wsRelay = `ws://127.0.0.1:${R.ports.port}`;
+	const query = relayQuery(R.ports.port);
+	try {
+		check('W0', 'the relay of this session has no UDP port (only WebSocket, like the free web host)', !R.ports.udpPort, JSON.stringify(R.ports));
+		// W1: the Windows game hosts a PUBLIC lobby, the browser finds it with QUICK JOIN
+		{
+			const h = await startHarness({ webDir, instances: 1, seeds: [0x53], basePort: 9372 });
+			try {
+				await withNativeGame({ S3AIR_RELAY: wsRelay, S3AIR_LOBBY_OPEN: 'hostpublic', S3AIR_LOBBY_AUTOSTART: '1', S3AIR_LOBBY_AUTOGAME: '0x0100', S3AIR_PLAYER_NAME: 'Windows', S3AIR_NO_SERVER: '1' }, '_nativeW1', async (native) => {
+					const [b] = h.instances;
+					await bootPage(b, h.baseURL, query);
+					const listed = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 60000);
+					check('W1a', 'the Windows game hosts a public lobby: it registers and is listed at the relay over a WebSocket (the relay has no UDP)', !!listed && R.core.stats.lobbies >= 1, `${JSON.stringify(listed && { code: listed.code, host: listed.host })} | ${native.mainLog().split('\n').filter((l) => /WebSocket|relay server|lobby server/i.test(l)).slice(-4).join(' | ')}`);
+					await b.toLobby();
+					b.forgetLogs();
+					await b.keys(['Down', 'Return'], 500);		// QUICK JOIN
+					const joined = await b.waitLog(/the host proved the code, player slot 2/, 60000);
+					check('W1b', 'a browser finds the Windows host\'s lobby with QUICK JOIN and joins it', !!joined, joined ?? b.allLogs.filter((l) => /Lobby|Netplay/.test(l)).slice(-5).join(' | '));
+					await sleep(2500);
+					await b.key('Return');		// READY
+					const loaded = await b.waitLog(/game state loaded, now at frame/, 90000);
+					check('W1c', 'the Windows host starts the level and the browser loads its game state', !!loaded);
+					await sleep(2000);
+					const end = Date.now() + 20000;
+					while (Date.now() < end) { await b.hold('Right', 900); await sleep(300); }
+					await sleep(7000);
+					const fsync = syncOk(parseOnlineLog(await b.onlineLog()), 'friend'), hsync = syncOk(parseOnlineLog(native.onlineLog()), 'host');
+					check('W1d', 'the Windows host and the browser stay in sync over the WebSocket relay (no repairs, recent sync ok)', fsync.ok && hsync.ok, `host: ${hsync.why}; friend: ${fsync.why}`);
+					fs.writeFileSync(path.join(logDir, 'web_net_W1_browser_console.txt'), b.allLogs.join('\n') + '\n' + JSON.stringify(R.core.stats));
+				});
+			} finally { await h.close(); }
+		}
+		// W2: the browser hosts a PUBLIC lobby, the Windows game finds it with QUICK JOIN (its own lobby list over the WebSocket)
+		{
+			const h = await startHarness({ webDir, instances: 1, seeds: [0x67], basePort: 9373 });
+			try {
+				const [b] = h.instances;
+				await bootPage(b, h.baseURL, query);
+				await sleep(2000);
+				await b.toLobby();
+				b.forgetLogs();
+				await b.createLobby();
+				await b.waitLog(/the lobby server listed this lobby/, 30000);
+				await waitFor(() => R.entries().filter((e) => e.isPublic && e.code).length >= 1, 20000);
+				await withNativeGame({ S3AIR_RELAY: wsRelay, S3AIR_LOBBY_OPEN: 'quick', S3AIR_LOBBY_AUTOREADY: '1', S3AIR_PLAYER_NAME: 'Windows', S3AIR_NO_SERVER: '1' }, '_nativeW2', async (native) => {
+					const joined = await b.waitLog(/a friend proved the code and is player 2/, 90000);
+					check('W2a', 'a Windows game finds the browser\'s public lobby with QUICK JOIN (lobby list over the WebSocket) and joins it', !!joined, joined ?? native.mainLog().split('\n').filter((l) => /Lobby|WebSocket|relay|lobby server/i.test(l)).slice(-6).join(' | '));
+					await sleep(6000);
+					b.forgetLogs();
+					await b.key('Return');		// host: START GAME (the Windows friend is ready by itself)
+					await b.waitLog(/Menu: main menu/, 40000);
+					await sleep(1000);
+					await b.keys(['Up', 'Up', 'Up', 'Return'], 700);
+					await sleep(3500);
+					await b.key('Return');
+					const started = await b.waitLog(/client loaded the game state/, 90000);
+					check('W2b', 'the browser host starts a new game and the Windows friend loads its game state', !!started);
+					const end = Date.now() + 20000;
+					while (Date.now() < end) { await b.hold('Right', 900); await sleep(300); }
+					await sleep(7000);
+					const hsync = syncOk(parseOnlineLog(await b.onlineLog()), 'host'), fsync = syncOk(parseOnlineLog(native.onlineLog()), 'friend');
+					check('W2c', 'the browser host and the Windows friend stay in sync over the WebSocket relay (no repairs, recent sync ok)', fsync.ok && hsync.ok, `host: ${hsync.why}; friend: ${fsync.why}`);
+					fs.writeFileSync(path.join(logDir, 'web_net_W2_browser_console.txt'), b.allLogs.join('\n') + '\n' + JSON.stringify(R.core.stats));
+				});
+			} finally { await h.close(); }
+		}
+	} finally { await R.stop(); }
+}
+
 // =====================================================================================================================
 // =====================================================================================================================
 // Session P: direct (WebRTC) connections between two browsers, with the relay as lobby, signalling and fallback.
@@ -1659,6 +1733,9 @@ try {
 	if (only.includes('M')) await sessionM();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
+	}
+	if (only.includes('N') || only.includes('W')) {
+		if (withNative) await sessionW(); else console.log('--- session W skipped (add --native to run it)');
 	}
 } catch (error) {
 	console.log(`ERROR  ${error.stack ?? error}`);
