@@ -1,6 +1,7 @@
 # Whitelist: only the mod, the online engine fork, the check tooling and the docs are tracked.
 /*
 !/.gitignore
+!/README.md
 !/DropInCoop/
 !/checks/
 !/sonic3air_online_stable_source/
