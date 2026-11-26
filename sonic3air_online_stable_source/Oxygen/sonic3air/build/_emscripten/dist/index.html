@@ -50,7 +50,7 @@
 	.steps { counter-reset: step; list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
 	.steps li { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px 16px 64px; position: relative; }
 	.steps li::before { counter-increment: step; content: counter(step); position: absolute; left: 18px; top: 14px; width: 30px; height: 30px; border-radius: 50%; background: var(--hero-b); color: #fff; font-weight: 700; display: grid; place-items: center; }
-	.note { background: var(--note-bg); border-left: 4px solid var(--note-line); border-radius: 8px; padding: 14px 18px; margin: 0 0 16px; }
+	.note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 8px; padding: 14px 18px; margin: 0 0 16px; }
 	.prose p, .prose li { color: var(--text); }
 	.prose ul { padding-left: 22px; }
 	.prose li { margin-bottom: 8px; }
@@ -92,7 +92,7 @@
 	<section aria-labelledby="features">
 		<h2 id="features">Play together, anywhere</h2>
 		<div class="cards">
-			<div class="card"><h3>Online lobbies</h3><p>Browse public lobbies, use Quick Join, or share a 6-digit code for a private game. No setup, no port forwarding.</p></div>
+			<div class="card"><h3>Online lobbies</h3><p>Browse public lobbies, use Quick Join, or share a 6-digit code for a private game. It works without router settings or port forwarding.</p></div>
 			<div class="card"><h3>Browser and Windows</h3><p>Browser players and Windows players meet in the same lobbies and play the same game.</p></div>
 			<div class="card"><h3>Up to four players</h3><p>Everyone gets their own screen, controller and character, chosen in the lobby.</p></div>
 			<div class="card"><h3>Your data stays yours</h3><p>Your ROM and save data never leave this browser. Public lobbies never show your IP address to other players.</p></div>
@@ -110,9 +110,9 @@
 
 	<section aria-labelledby="online" class="prose">
 		<h2 id="online">About online play</h2>
-		<p class="note">The free server goes to sleep after about 15 minutes without players. If you are the first one in a while, the game shows "Waking the server up" for up to a minute. Just wait, or press the button again.</p>
+		<p class="note">The free server goes to sleep after about 15 minutes without players. If you are the first one in a while, the game shows "Waking the server up" for up to a minute; if it gives up, press the button again.</p>
 		<ul>
-			<li>Players meet through a relay server that keeps the lobby list and forwards the game. It is already set up; there is nothing to configure.</li>
+			<li>Players meet through a relay server that keeps the lobby list and forwards the game. The game comes with its address already filled in.</li>
 			<li>In a <strong>private lobby</strong> (joined with its code), two browsers may connect to each other directly for lower latency. This shows each player's IP address to the other, so it is never used in public lobbies. To turn it off completely, open the game as <code>sonic3air_web.html?p2p=off</code>.</li>
 			<li>To play with Windows players, everybody needs the same game version, and Windows players switch mods off.</li>
 			<li>Want to use your own server? Open the game as <code>sonic3air_web.html?relay=wss://your-server</code>, or set it under <em>Relay Server</em> in the online menu.</li>
