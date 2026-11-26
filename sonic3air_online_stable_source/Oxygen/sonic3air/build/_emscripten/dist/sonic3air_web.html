@@ -30,9 +30,10 @@
 .rom-box code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; color: #ffe07c; }
 #s3kPromptMessage { display: block; margin: 4px 0 14px; min-height: 0; }
 #s3kPromptMessage.error { padding: 10px 12px; background: #fc0000; color: #ffffff; font-weight: 600; }
-.rom-cast { position: fixed; bottom: 0; right: 6vw; display: flex; align-items: flex-end; gap: 28px; pointer-events: none; }
+.rom-cast { position: fixed; bottom: 0; right: 6vw; display: flex; align-items: flex-end; pointer-events: none; }
+.rom-cast img + img { margin-left: -28px; }
 .rom-cast img { height: 160px; width: auto; image-rendering: pixelated; }
-@media (max-width: 600px) { .rom-cast { gap: 12px; } .rom-cast img { height: 80px; } .rom-box { padding: 20px 18px; } }
+@media (max-width: 600px) { .rom-cast img + img { margin-left: -14px; } .rom-cast img { height: 80px; } .rom-box { padding: 20px 18px; } }
 .file_upload{
 	position: fixed;
 	top: 50%;

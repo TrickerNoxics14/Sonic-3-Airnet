@@ -51,7 +51,8 @@
 	.btn.win .pix { --tint: var(--white); }
 	.btn:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--black); }
 	.btn:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 var(--black); }
-	.cast { position: absolute; right: 40px; bottom: 0; display: flex; align-items: flex-end; gap: 28px; }
+	.cast { position: absolute; right: 40px; bottom: 0; display: flex; align-items: flex-end; }
+	.cast img + img { margin-left: -28px; }		/* (the sprite frames have empty space around the characters) */
 	.cast img { height: 160px; width: auto; }
 	.cast img.knux { height: 160px; }
 
@@ -86,7 +87,8 @@
 		.card-body { padding: 40px 22px 200px; }
 		.zone { --px: 5; }
 		.logo { width: 360px; }
-		.cast { right: 12px; gap: 10px; }
+		.cast { right: 12px; }
+		.cast img + img { margin-left: -14px; }
 		.cast img, .cast img.knux { height: 80px; }
 		.lineup { gap: 10px; }
 		.lineup img { width: 60px; height: 60px; }
