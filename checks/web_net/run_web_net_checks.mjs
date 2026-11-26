@@ -452,6 +452,15 @@ async function sessionK() {
 		const left = b.allLogs.find((l) => /Lobby: screen (START|HOME)/.test(l));
 		const empty = b.allLogs.find((l) => /Lobby: the code screen holds 0 digits/.test(l));
 		check('K3', 'on the code screen Backspace deletes the digits and an extra Backspace does not leave the screen', !!empty && !left, `${empty ?? 'digits not cleared'} | ${left ?? 'stayed on the code screen'}`);
+		// K4: letters typed on the code screen are text, not buttons (the owner's decision: the on-screen pad is for controllers): A does not press a pad key,
+		// S does not take a digit away or leave
+		await b.type('34');
+		await b.waitLog(/Lobby: the code screen holds 2 digits/, 4000);
+		b.forgetLogs();
+		await b.type('asas');
+		await sleep(1000);
+		const changed = b.allLogs.find((l) => /Lobby: the code screen holds \d+ digits|Lobby: screen (START|HOME)/.test(l));
+		check('K4', 'typing the letters A and S on the code screen neither presses a pad key nor deletes a digit nor leaves the screen (letters are text, not buttons)', !changed, changed ?? '2 digits kept, still on the code screen');
 	} finally { await h.close(); await R.stop(); }
 }
 
@@ -920,7 +929,24 @@ async function shotSizes(inst, name, sizes = [[0, 0, ''], [640, 360, '_small'], 
 	await sleep(300);
 }
 
-/** The digit keys of the number pad: moves from the pad key `from` (0-11, rows of 3: 1 2 3 / 4 5 6 / 7 8 9 / DEL 0 JOIN) to the key for `digit` and presses A. Returns the new position. */
+/** A controller for the page (the browser's Gamepad API, which the game's SDL reads): a standard gamepad whose buttons the check presses. On the code screen
+ *  a typed letter is text, never a button, so the number pad's A has to come from a controller, as it does for a player. Add before the page loads. */
+const FAKE_GAMEPAD = `(() => {
+	const buttons = Array.from({ length: 17 }, () => ({ pressed: false, touched: false, value: 0 }));
+	const pad = { id: 'Standard Gamepad (check)', index: 0, connected: true, mapping: 'standard', timestamp: 0, axes: [0, 0, 0, 0], buttons };
+	navigator.getGamepads = () => [pad, null, null, null];
+	window.__padButton = (i, down) => { buttons[i].pressed = down; buttons[i].touched = down; buttons[i].value = down ? 1 : 0; pad.timestamp = performance.now(); };
+	window.addEventListener('load', () => { const e = new Event('gamepadconnected'); e.gamepad = pad; window.dispatchEvent(e); });
+})();`;
+
+async function pressPadButton(inst, index) {
+	await inst.eval(`window.__padButton(${index}, true); 1`);
+	await sleep(160);
+	await inst.eval(`window.__padButton(${index}, false); 1`);
+}
+
+/** The digit keys of the number pad: moves from the pad key `from` (0-11, rows of 3: 1 2 3 / 4 5 6 / 7 8 9 / DEL 0 JOIN) to the key for `digit` and presses the
+ *  controller's A (needs FAKE_GAMEPAD). Returns the new position. */
 async function padPress(inst, from, digit) {
 	const target = digit === 0 ? 10 : digit - 1;
 	let dx = (target % 3) - (from % 3), dy = Math.floor(target / 3) - Math.floor(from / 3);
@@ -929,7 +955,7 @@ async function padPress(inst, from, digit) {
 	for (let i = 0; i < Math.abs(dy); ++i) keys.push(dy > 0 ? 'Down' : 'Up');
 	for (let i = 0; i < Math.abs(dx); ++i) keys.push(dx > 0 ? 'Right' : 'Left');
 	await inst.keys(keys, 180);
-	await inst.key('a');
+	await pressPadButton(inst, 0);		// (button 0 of a standard gamepad: A)
 	await sleep(250);
 	return target;
 }
@@ -995,6 +1021,7 @@ async function sessionL2() {
 	try {
 		const [host, friend] = h.instances;
 		const query = relayQuery(R.ports.port);
+		await friend.addScript(FAKE_GAMEPAD);		// (B presses the number pad with a controller's A)
 		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
 		await host.toLobby();
 		host.forgetLogs();
@@ -1022,7 +1049,7 @@ async function sessionL2() {
 		check('L2b', 'the private lobby is not listed: B\'s list is empty and QUICK JOIN says there is no open lobby (it does not join a private one)', none && lobbyMenuMessage(friend).startsWith('There is no open lobby'), lobbyMenuMessage(friend));
 		await shot(friend, 'L_quick_none');
 
-		// the number pad: three digits typed on the keyboard, three with the D-pad and A
+		// the number pad: three digits typed on the keyboard, three with the D-pad and a controller's A
 		friend.forgetLogs();
 		await friend.openJoin();		// (the failed QUICK JOIN left the menu on its first screen)
 		await friend.waitLog(/Lobby: screen JOIN/, 8000);
@@ -1031,7 +1058,7 @@ async function sessionL2() {
 		let pad = 0;		// the cursor starts on the 1 key
 		for (const digit of entry.code.slice(3)) pad = await padPress(friend, pad, +digit);
 		const six = await friend.waitLog(/Lobby: the code screen holds 6 digits/, 5000);
-		check('L2c', 'the number pad takes digits typed on the keyboard and digits pressed with D-pad + A (6 digits in the field)', six, six ?? friend.allLogs.filter((l) => /Lobby/.test(l)).slice(-4).join(' | '));
+		check('L2c', 'the number pad takes digits typed on the keyboard and digits pressed with the D-pad and the A button of a controller (6 digits in the field)', six, six ?? friend.allLogs.filter((l) => /Lobby/.test(l)).slice(-4).join(' | '));
 		await shotSizes(friend, 'join', [[0, 0, ''], [640, 360, '_small'], [360, 640, '_phone']]);
 		await friend.key('Return');		// START = JOIN
 		const resolved = await friend.waitLog(/Lobby: the lobby server found the lobby, joining it/, 20000);
