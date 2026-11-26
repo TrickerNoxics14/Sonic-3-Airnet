@@ -30,7 +30,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,K,N').split(',');
 const withNative = args.includes('--native');
 const webDir = args.includes('--web-dir') ? path.resolve(args[args.indexOf('--web-dir') + 1]) : path.join(root, 'web_build');
 
@@ -397,6 +397,62 @@ async function sessionN(relay) {
 			});
 		} finally { await h.close(); }
 	}
+}
+
+// Session K: typing into the lobby's text fields with a keyboard. Letters that are also controller buttons in the default layout (A = A, S = B, D = X) and Backspace
+// (= Back) must type and edit text, never press menu buttons: a player reported that S and Backspace threw them out of the name field and A then pressed a button.
+async function sessionK() {
+	console.log('--- session K: typing a name and a code with the keyboard (letters and Backspace are text, not menu buttons)');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 1, basePort: 9460 });
+	try {
+		const [b] = h.instances;
+		await bootPage(b, h.baseURL, relayQuery(R.ports.port));
+		await b.toLobby();
+		// K1: SETTINGS > NAME, add " Sam" (S and A are the B and A buttons of the default keyboard layout), Enter saves
+		b.forgetLogs();
+		await b.keys(['Down', 'Down', 'Down', 'Down', 'Return'], 400);		// SETTINGS
+		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
+		await b.key('Return');		// NAME
+		await b.waitLog(/Lobby: screen TEXT/, 8000);
+		await sleep(500);
+		await b.type(' Sam');
+		await sleep(400);
+		await b.key('Return');
+		const k1 = await b.waitLog(/Netplay: the player name is now "/, 8000);
+		check('K1', 'typing " Sam" into the name field types the letters (S and A do not press Back / Accept) and Enter saves "Player Sam"', !!k1 && /"Player Sam"/.test(k1), k1 ?? b.allLogs.filter((l) => /Lobby: screen|player name/.test(l)).slice(-6).join(' | '));
+		// K2: open NAME again, Backspace four times (edits the text, does not leave the field), "Ada", Enter
+		b.forgetLogs();
+		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
+		await sleep(400);
+		await b.key('Return');
+		await b.waitLog(/Lobby: screen TEXT/, 8000);
+		await sleep(500);
+		await b.keys(['Backspace', 'Backspace', 'Backspace', 'Backspace'], 200);
+		await b.type('Ada');
+		await sleep(400);
+		await b.key('Return');
+		const k2 = await b.waitLog(/Netplay: the player name is now "/, 8000);
+		check('K2', 'Backspace in the name field deletes letters and keeps the field (four times turns "Player Sam" into "Player"), "Ada" and Enter save "PlayerAda"', !!k2 && /"PlayerAda"/.test(k2), k2 ?? b.allLogs.filter((l) => /Lobby: screen|player name/.test(l)).slice(-6).join(' | '));
+		// K3: the code screen: Backspace takes digits away and never leaves the screen (Escape and the controller's B do)
+		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
+		await sleep(400);
+		await b.key('Escape');		// back to the first screen
+		await b.waitLog(/Lobby: screen START/, 8000);
+		await sleep(400);
+		b.forgetLogs();
+		await b.openJoin();
+		await b.waitLog(/Lobby: screen JOIN/, 8000);
+		await sleep(400);
+		await b.type('12');
+		await b.waitLog(/Lobby: the code screen holds 2 digits/, 4000);
+		b.forgetLogs();
+		await b.keys(['Backspace', 'Backspace', 'Backspace'], 300);
+		await sleep(800);
+		const left = b.allLogs.find((l) => /Lobby: screen (START|HOME)/.test(l));
+		const empty = b.allLogs.find((l) => /Lobby: the code screen holds 0 digits/.test(l));
+		check('K3', 'on the code screen Backspace deletes the digits and an extra Backspace does not leave the screen', !!empty && !left, `${empty ?? 'digits not cleared'} | ${left ?? 'stayed on the code screen'}`);
+	} finally { await h.close(); await R.stop(); }
 }
 
 // Session W: crossplay over WebSocket. The relay has NO UDP port (like the free web host the published page uses), so the Windows game can only reach it the way a
@@ -1731,6 +1787,7 @@ try {
 	if (only.includes('T') || only.includes('T5')) await sessionT5(relay);
 	if (only.includes('T') || only.includes('T6')) await sessionT6(relay);
 	if (only.includes('M')) await sessionM();
+	if (only.includes('K')) await sessionK();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

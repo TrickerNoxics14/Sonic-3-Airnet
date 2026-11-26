@@ -239,12 +239,19 @@ void LobbyMenu::deinitialize()
 
 void LobbyMenu::keyboard(const rmx::KeyboardEvent& ev)
 {
+	// A key that types a character is also a controller button for letters A, S, D... of the default keyboard layout. Its key-down event arrives in the same frame
+	// as that button press (the typed character may come a frame later, in a browser), so this is where a frame is marked as typing (see update)
+	const bool printableKey = (ev.key >= 32 && ev.key < 127);
 	if (mScreen == Screen::TEXT && mMenuEntries.hasSelected())
 	{
+		if (ev.state && (printableKey || ev.key == SDLK_BACKSPACE || ev.key == SDLK_DELETE) && mMenuEntries.selected().is<InputFieldMenuEntry>())
+			mTextInputThisFrame = true;
 		mMenuEntries.selected().keyboard(ev);
 	}
 	else if (mScreen == Screen::JOIN && ev.state)
 	{
+		if (printableKey)
+			mTextInputThisFrame = true;		// (Backspace is not marked: on this screen it is the button that takes a digit away)
 		// Paste (Ctrl+V): only the digits of what is on the clipboard are used, so "Code: 123 456" works
 		if (ev.key == 'v' && (SDL_GetModState() & KMOD_CTRL) != 0 && PlatformFunctions::hasClipboardSupport())
 		{
@@ -271,6 +278,8 @@ void LobbyMenu::textinput(const rmx::TextInputEvent& ev)
 {
 	if (mScreen == Screen::TEXT && mMenuEntries.hasSelected())
 	{
+		// A typed letter is also a controller button (A, S, D... in the default keyboard layout): this frame it must only type (see update)
+		mTextInputThisFrame = true;
 		mMenuEntries.selected().textinput(ev);
 	}
 	else if (mScreen == Screen::JOIN)
@@ -1203,13 +1212,14 @@ void LobbyMenu::updateJoinScreenInput(const InputManager::ControllerScheme& keys
 	}
 	else if (back)
 	{
-		// Backspace and B take the last digit away, and leave the screen when there is none (Escape always leaves)
-		if (FTX::keyState(SDLK_ESCAPE) || mCodeDigits.empty())
+		// Backspace and B take the last digit away; with no digit left B leaves the screen, Backspace does not (a typist presses it once too often), Escape always leaves
+		const bool backspaceKey = FTX::keyState(SDLK_BACKSPACE) || FTX::keyState(SDLK_DELETE);
+		if (FTX::keyState(SDLK_ESCAPE) || (mCodeDigits.empty() && !backspaceKey))
 		{
 			playMenuSound(0xad);
 			goBackOneLevel();
 		}
-		else
+		else if (!mCodeDigits.empty())
 		{
 			playMenuSound(0xad);
 			mCodeDigits.pop_back();
@@ -1556,6 +1566,9 @@ void LobbyMenu::update(float timeElapsed)
 			const bool accept = (keys.Start.justPressed() || keys.A.justPressed() || keys.X.justPressed());
 			const bool back = (keys.Back.justPressed() || keys.B.justPressed());
 			const bool typing = (mScreen == Screen::TEXT && mMenuEntries.hasSelected() && mMenuEntries.selected().is<InputFieldMenuEntry>());
+			// In the text field the keyboard edits text: a key that typed a letter (S is the B button) or Backspace / Delete (Backspace is the Back button) must not
+			// also act as a menu button. A controller's B still leaves the field (to the buttons below), Enter (Start) still saves.
+			const bool keyboardEditing = typing && (mTextInputThisFrame || mTextInputLastFrame || FTX::keyState(SDLK_BACKSPACE) || FTX::keyState(SDLK_DELETE));
 			const int leftRight = (keys.Right.justPressed() ? 1 : 0) - (keys.Left.justPressed() ? 1 : 0);
 
 			// Entries that are changed with Left and Right
@@ -1852,7 +1865,7 @@ void LobbyMenu::update(float timeElapsed)
 			{
 				goBackOneLevel();
 			}
-			else if (back && typing && mMenuEntries.size() > 1)
+			else if (back && typing && !keyboardEditing && mMenuEntries.size() > 1)
 			{
 				// Back in the text field: go to the buttons below it
 				mMenuEntries.mSelectedEntryIndex = (int)mMenuEntries.size() - 1;
