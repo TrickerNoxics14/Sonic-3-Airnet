@@ -5,155 +5,248 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sonic 3 AirNet</title>
 <meta name="description" content="Online co-op for Sonic 3 A.I.R. in your browser: up to four players, public lobbies, Quick Join and 6-digit codes, together with Windows players.">
+<meta name="theme-color" content="#0000b4">
 <link rel="icon" href="icon.png">
 <link rel="apple-touch-icon" sizes="256x256" href="icon.png">
 <link rel="manifest" href="manifest.json">
 <style>
+	/* Every colour, sprite and the lettering come from Sonic 3 A.I.R.'s own data: the level select backdrop (three blues), the zone title card (red, yellow),
+	   the menu font (white with a black outline). Pixel art is only ever scaled by whole numbers. */
 	:root {
-		--bg: #f4f6fb; --surface: #ffffff; --text: #18203a; --muted: #4a5470; --line: #dde3f0;
-		--hero-a: #0d2c8c; --hero-b: #1f5fe0; --hero-text: #ffffff; --hero-muted: #d7e2ff;
-		--accent: #ffc93c; --accent-text: #1b1300; --link: #1d4fd1; --note-bg: #fff6dc; --note-line: #f0c64a;
-		--code-bg: #eef1f8;
-	}
-	@media (prefers-color-scheme: dark) {
-		:root {
-			--bg: #0c1124; --surface: #151c36; --text: #e8ecf8; --muted: #a9b3cf; --line: #27304f;
-			--hero-a: #0a1f63; --hero-b: #1846b8; --link: #8fb1ff; --note-bg: #2a2412; --note-line: #8a6d1f;
-			--code-bg: #1e2746;
-		}
+		--blue: #0024d8; --blue-mid: #0000b4; --night: #00006c;
+		--red: #fc0000; --yellow: #ffe07c; --black: #000000; --white: #ffffff;
+		--text: #e9edff; --soft: #b9c3f2;
 	}
 	* { box-sizing: border-box; }
-	body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-	a { color: var(--link); }
-	code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; font-size: 0.92em; }
-	.wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+	html { background: var(--night); }
+	body { margin: 0; color: var(--text); font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+	img.px, canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+	a { color: var(--yellow); text-underline-offset: 3px; }
+	a:focus-visible, button:focus-visible { outline: 3px solid var(--yellow); outline-offset: 3px; }
+	code { font-family: ui-monospace, Consolas, monospace; font-size: 0.88em; background: var(--black); color: var(--white); padding: 2px 6px; }
 
-	header { background: linear-gradient(135deg, var(--hero-a), var(--hero-b)); color: var(--hero-text); padding: 48px 0 56px; }
-	.hero { display: flex; gap: 32px; align-items: center; }
-	.hero img { width: 148px; height: 148px; border-radius: 28px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); flex: none; }
-	.hero h1 { margin: 0 0 8px; font-size: 2.6em; line-height: 1.15; letter-spacing: -0.02em; }
-	.hero p { margin: 0 0 24px; font-size: 1.2em; color: var(--hero-muted); max-width: 34em; }
-	.buttons { display: flex; flex-wrap: wrap; gap: 12px; }
-	.button { display: inline-block; padding: 14px 32px; border-radius: 10px; font-weight: 700; font-size: 1.1em; text-decoration: none; }
-	.button.primary { background: var(--accent); color: var(--accent-text); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); }
-	.button.primary:hover, .button.primary:focus-visible { background: #ffd866; }
-	.button.secondary { color: var(--hero-text); border: 2px solid rgba(255, 255, 255, 0.7); }
-	.button.secondary:hover, .button.secondary:focus-visible { background: rgba(255, 255, 255, 0.12); }
-	.hero small { display: block; margin-top: 16px; color: var(--hero-muted); }
+	/* Text in the game's font: drawn by the script below. Without the script the words show in bold capitals instead. */
+	.pix { font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; margin: 0; }
+	.pix.ready > .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+	.pix canvas { display: block; }
 
-	main section { padding: 40px 0 8px; }
-	h2 { font-size: 1.6em; margin: 0 0 16px; letter-spacing: -0.01em; }
-	h3 { font-size: 1.1em; margin: 0 0 6px; }
-	.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }
-	.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
-	.card p { margin: 0; color: var(--muted); }
-	.steps { counter-reset: step; list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
-	.steps li { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 20px 16px 64px; position: relative; }
-	.steps li::before { counter-increment: step; content: counter(step); position: absolute; left: 18px; top: 14px; width: 30px; height: 30px; border-radius: 50%; background: var(--hero-b); color: #fff; font-weight: 700; display: grid; place-items: center; }
-	.note { background: var(--note-bg); border: 1px solid var(--note-line); border-radius: 8px; padding: 14px 18px; margin: 0 0 16px; }
-	.prose p, .prose li { color: var(--text); }
-	.prose ul { padding-left: 22px; }
-	.prose li { margin-bottom: 8px; }
-	.install { display: grid; grid-template-columns: 1fr 260px; gap: 24px; align-items: start; }
-	.install img.shot { width: 100%; border-radius: 12px; border: 1px solid var(--line); }
-	.share { width: 22px; height: 22px; vertical-align: -5px; }
-	footer { margin-top: 48px; padding: 28px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.92em; }
+	/* ---- The title card ---- */
+	.card { position: relative; overflow: hidden; display: grid; grid-template-columns: 132px 1fr; min-height: 560px;
+		background: var(--blue-mid) url(ui_backdrop.png) 0 0 / 800px 448px repeat; animation: drift 40s linear infinite; }
+	@keyframes drift { to { background-position: 800px 448px; } }
+	.redbar { background: var(--red) url(ui_redbar.png) left bottom / 132px 356px no-repeat; image-rendering: pixelated; border-right: 4px solid var(--black); }
+	.card-body { position: relative; min-width: 0; padding: 72px 56px 64px; display: flex; flex-direction: column; align-items: flex-start; }
+	.logo { width: 540px; max-width: 100%; height: auto; margin: 0 0 28px; }
+	.zone { --px: 8; --tint: var(--yellow); margin: 0 0 22px; }
+	.textbox { max-width: 32em; margin: 0 0 32px; padding: 12px 16px; background: var(--black); color: var(--white); box-shadow: 6px 6px 0 var(--night); }
+	.textbox p { margin: 0; }
+	.lead { font-size: 1.12em; }
+	.note-rom { margin-top: 6px !important; color: var(--soft); font-size: 0.9em; }
+	.actions { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+	.btn { display: inline-block; text-decoration: none; padding: 14px 20px; border: 4px solid var(--black); box-shadow: 6px 6px 0 var(--black); }
+	.btn .pix { --px: 3; }
+	.btn.play { background: var(--yellow); }
+	.btn.play .pix { --tint: var(--night); }
+	.btn.win { background: var(--black); border-color: var(--white); box-shadow: 6px 6px 0 var(--night); }
+	.btn.win .pix { --tint: var(--white); }
+	.btn:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 var(--black); }
+	.btn:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 var(--black); }
+	.cast { position: absolute; right: 40px; bottom: 0; display: flex; align-items: flex-end; gap: 4px; }
+	.cast img { height: 160px; width: auto; }
+	.cast img.knux { height: 160px; }
+
+	/* ---- The rest of the page: one quiet column on the night blue ---- */
+	main { max-width: 760px; margin: 0 auto; padding: 24px 24px 0; }
+	section { padding: 48px 0 8px; }
+	h2.pix { --px: 3; --tint: var(--yellow); margin: 0 0 18px; }
+	p, li { max-width: 68ch; }
+	.lineup { display: flex; gap: 22px; margin: 6px 0 20px; flex-wrap: wrap; }
+	.lineup figure { margin: 0; text-align: center; }
+	.lineup img { width: 80px; height: 80px; display: block; }
+	.lineup figcaption { --px: 2; --tint: var(--white); display: flex; justify-content: center; margin-top: 6px; }
+	ol.steps { list-style: none; padding: 0; margin: 0; counter-reset: s; }
+	ol.steps li { counter-increment: s; position: relative; padding: 0 0 18px 56px; }
+	ol.steps li::before { content: counter(s); position: absolute; left: 0; top: -2px; width: 38px; height: 38px; display: grid; place-items: center;
+		background: var(--yellow); color: var(--black); font-weight: 900; border: 3px solid var(--black); box-shadow: 3px 3px 0 var(--black); }
+	.dialog { background: var(--black); border: 4px solid var(--white); padding: 16px 20px; margin: 4px 0 22px; color: var(--white); }
+	ul { padding-left: 22px; }
+	li { margin-bottom: 10px; }
+	.install { display: grid; grid-template-columns: 1fr 230px; gap: 28px; align-items: start; }
+	.install img { width: 100%; border: 4px solid var(--black); }
+	.share { width: 22px; height: 22px; vertical-align: -5px; background: var(--white); border-radius: 4px; }
+	footer { margin-top: 64px; border-top: 8px solid var(--red); background: var(--black); color: var(--soft); font-size: 0.9em; }
+	footer .in { max-width: 760px; margin: 0 auto; padding: 26px 24px 36px; }
 	footer p { margin: 0 0 8px; }
 
-	@media (max-width: 680px) {
-		header { padding: 32px 0 40px; }
-		.hero { flex-direction: column; text-align: center; gap: 20px; }
-		.hero img { width: 112px; height: 112px; border-radius: 22px; }
-		.hero h1 { font-size: 2em; }
-		.hero p { font-size: 1.05em; }
-		.buttons { justify-content: center; }
+	@media (min-width: 1101px) { .card-body { padding-right: 440px; } }
+	@media (max-width: 1100px) { .card-body { padding-bottom: 220px; } }
+	@media (max-width: 760px) {
+		.card { grid-template-columns: 44px 1fr; min-height: 0; }
+		.redbar { background-size: 44px auto; background-image: none; }
+		.card-body { padding: 40px 22px 200px; }
+		.zone { --px: 5; }
+		.logo { width: 360px; }
+		.cast { right: 12px; }
+		.cast img, .cast img.knux { height: 120px; }
+		.lineup { gap: 10px; }
+		.lineup img { width: 60px; height: 60px; }
 		.install { grid-template-columns: 1fr; }
-		.install img.shot { max-width: 280px; margin: 0 auto; display: block; }
+		.install img { max-width: 240px; }
 	}
+	@media (max-width: 420px) { .zone { --px: 4; } .btn .pix { --px: 2; } }
+	@media (min-width: 761px) { code { white-space: nowrap; } }
+	@media (prefers-reduced-motion: reduce) { .card { animation: none; } .btn:hover, .btn:active { transform: none; } }
 </style>
 </head>
 <body>
-<header>
-	<div class="wrap hero">
-		<img src="icon.png" alt="Sonic, Tails and Knuckles: the Sonic 3 A.I.R. icon">
-		<div>
-			<h1>Sonic 3 AirNet</h1>
-			<p>Online co-op for Sonic 3 A.I.R., right in your browser. Up to four players, each on their own screen, together with friends on Windows.</p>
-			<div class="buttons">
-				<a class="button primary" href="sonic3air_web.html">Play now</a>
-				<a class="button secondary" href="https://github.com/TrickerNoxics14/Sonic-3-Airnet/releases/latest">Download for Windows</a>
-			</div>
-			<small>You need your own Sonic 3 &amp; Knuckles ROM. It stays in your browser and is never uploaded.</small>
+<header class="card">
+	<div class="redbar" aria-hidden="true"></div>
+	<div class="card-body">
+		<h1 style="margin:0"><img class="px logo" src="ui_logo.png" width="180" height="24" alt="Sonic 3 AirNet"></h1>
+		<p class="pix zone"><span class="label">Online Zone</span></p>
+		<div class="textbox">
+			<p class="lead">Sonic 3 A.I.R. with friends, over the internet. Up to four players, each on their own screen, in the browser or on Windows.</p>
+			<p class="note-rom">You need your own Sonic 3 &amp; Knuckles ROM. It stays in your browser.</p>
+		</div>
+		<div class="actions">
+			<a class="btn play" href="sonic3air_web.html"><span class="pix"><span class="label">Play now</span></span></a>
+			<a class="btn win" href="https://github.com/TrickerNoxics14/Sonic-3-Airnet/releases/latest"><span class="pix"><span class="label">Windows version</span></span></a>
+		</div>
+		<div class="cast" aria-hidden="true">
+			<img class="px" src="ui_sonic_tails.png" width="56" height="40" alt="">
+			<img class="px knux" src="ui_knuckles.png" width="40" height="40" alt="">
 		</div>
 	</div>
 </header>
 
-<main class="wrap">
-	<section aria-labelledby="features">
-		<h2 id="features">Play together, anywhere</h2>
-		<div class="cards">
-			<div class="card"><h3>Online lobbies</h3><p>Browse public lobbies, use Quick Join, or share a 6-digit code for a private game. It works without router settings or port forwarding.</p></div>
-			<div class="card"><h3>Browser and Windows</h3><p>Browser players and Windows players meet in the same lobbies and play the same game.</p></div>
-			<div class="card"><h3>Up to four players</h3><p>Everyone gets their own screen, controller and character, chosen in the lobby.</p></div>
-			<div class="card"><h3>Your data stays yours</h3><p>Your ROM and save data never leave this browser. Public lobbies never show your IP address to other players.</p></div>
+<main>
+	<section aria-labelledby="h-players">
+		<h2 class="pix" id="h-players"><span class="label">Four players</span></h2>
+		<div class="lineup" aria-hidden="true">
+			<figure><img class="px" src="ui_sonic.png" width="40" height="40" alt=""><figcaption class="pix"><span class="label">P1</span></figcaption></figure>
+			<figure><img class="px" src="ui_tails.png" width="40" height="40" alt=""><figcaption class="pix"><span class="label">P2</span></figcaption></figure>
+			<figure><img class="px" src="ui_knuckles.png" width="40" height="40" alt=""><figcaption class="pix"><span class="label">P3</span></figcaption></figure>
+			<figure><img class="px" src="ui_sonic.png" width="40" height="40" alt=""><figcaption class="pix"><span class="label">P4</span></figcaption></figure>
 		</div>
+		<p>Each player gets the whole screen, their own controller and their own character, picked in the lobby. Open a lobby and share its 6-digit code, browse the public list, or press Quick Join to drop into an open game. Browser and Windows players meet in the same lobbies.</p>
 	</section>
 
-	<section aria-labelledby="start">
-		<h2 id="start">Getting started</h2>
+	<section aria-labelledby="h-start">
+		<h2 class="pix" id="h-start"><span class="label">How to start</span></h2>
 		<ol class="steps">
-			<li><strong>Open the game.</strong> Press <a href="sonic3air_web.html">Play now</a>. The first start downloads about 13 MB; later starts are quicker.</li>
-			<li><strong>Choose your ROM.</strong> Select your <code>Sonic_Knuckles_wSonic3.bin</code> file when asked. It is kept in this browser, so you only do this once.</li>
-			<li><strong>Go online.</strong> Pick <em>Online Lobby</em> in the main menu, then create a lobby, use Quick Join, or enter a friend's code.</li>
+			<li><strong>Press <a href="sonic3air_web.html">Play now</a>.</strong> The first start downloads about 13 MB.</li>
+			<li><strong>Pick your ROM</strong>, the file <code>Sonic_Knuckles_wSonic3.bin</code>. The game keeps it in this browser, so you only do this once. It is never uploaded.</li>
+			<li><strong>Choose Online Lobby</strong> in the main menu and create a lobby, use Quick Join, or type a friend's code.</li>
 		</ol>
 	</section>
 
-	<section aria-labelledby="online" class="prose">
-		<h2 id="online">About online play</h2>
-		<p class="note">The free server goes to sleep after about 15 minutes without players. If you are the first one in a while, the game shows "Waking the server up" for up to a minute; if it gives up, press the button again.</p>
+	<section aria-labelledby="h-online">
+		<h2 class="pix" id="h-online"><span class="label">Online play</span></h2>
+		<p class="dialog">The free server sleeps when nobody has played for about 15 minutes. If you are the first one in a while, the game says "Waking the server up" for up to a minute; if it gives up, press the button again.</p>
 		<ul>
-			<li>Players meet through a relay server that keeps the lobby list and forwards the game. The game comes with its address already filled in.</li>
-			<li>In a <strong>private lobby</strong> (joined with its code), two browsers may connect to each other directly for lower latency. This shows each player's IP address to the other, so it is never used in public lobbies. To turn it off completely, open the game as <code>sonic3air_web.html?p2p=off</code>.</li>
-			<li>To play with Windows players, everybody needs the same game version, and Windows players switch mods off.</li>
-			<li>Want to use your own server? Open the game as <code>sonic3air_web.html?relay=wss://your-server</code>, or set it under <em>Relay Server</em> in the online menu.</li>
+			<li>Players meet through a relay server that keeps the lobby list and passes the game along. Its address is built in.</li>
+			<li>In a private lobby two browsers may connect straight to each other for less lag. That shows each player's IP address to the other, so public lobbies always go through the relay. To switch it off, open the game as <code>sonic3air_web.html?p2p=off</code>.</li>
+			<li>With Windows players, everybody needs the same game version, and the Windows players turn their mods off.</li>
+			<li>Running your own server? Open the game as <code>sonic3air_web.html?relay=wss://your-server</code>, or enter it under Relay Server in the online menu.</li>
 		</ul>
 	</section>
 
-	<section aria-labelledby="notes" class="prose">
-		<h2 id="notes">Good to know</h2>
-		<p>The browser version is a <strong>beta</strong>. It has fewer features than the Windows version, and you may run into problems.</p>
+	<section aria-labelledby="h-notes">
+		<h2 class="pix" id="h-notes"><span class="label">Good to know</span></h2>
+		<p>The browser version is a beta. It does less than the Windows version, and some things may not work.</p>
 		<ul>
-			<li><strong>Files and saves.</strong> A basic file manager is in the Options menu (on a computer you can also right-click in the game and choose <em>Open mods folder</em> or <em>Open saved data folder</em>). Use it to upload mods (one file at a time; .zip mods are supported) and to back up your saves or bring them over from the PC version.</li>
-			<li><strong>Remastered soundtrack.</strong> It is not included, because everything has to fit into memory and it would add over 100 MB. You can download it from the Options menu, or upload <code>audioremaster.bin</code> from the PC version through the file manager. If the game becomes unstable afterwards, delete that file again.</li>
-			<li><strong>New versions</strong> are downloaded in full, just like on PC.</li>
-			<li>Known issues of the original browser and iOS port are listed in its <a href="https://projects.sappharad.com/s3air_ios/todoList.html">to-do list</a>.</li>
+			<li><strong>Saves and mods.</strong> The Options menu has a small file manager (on a computer, right-click in the game and choose Open mods folder or Open saved data folder). Upload mods one file at a time (.zip works), and back up your saves or bring them over from the PC version.</li>
+			<li><strong>Remastered music</strong> is not included, because the whole game has to fit into memory and it would add over 100 MB. Download it from the Options menu, or upload <code>audioremaster.bin</code> from the PC version. If the game gets unstable afterwards, delete that file again.</li>
+			<li><strong>Updates</strong> download the whole game again, as on PC.</li>
+			<li>Known issues of the original browser and iOS port are in its <a href="https://projects.sappharad.com/s3air_ios/todoList.html">to-do list</a>.</li>
 		</ul>
 	</section>
 
-	<section aria-labelledby="ios">
-		<h2 id="ios">Install on iPhone or iPad</h2>
+	<section aria-labelledby="h-ios">
+		<h2 class="pix" id="h-ios"><span class="label">iPhone and iPad</span></h2>
 		<div class="install">
-			<div class="prose">
-				<p>Requires iOS 13 or later. On older devices, you may still be able to play in Safari with the <a href="sonic3air_web.html">Play now</a> link.</p>
+			<div>
+				<p>Needs iOS 13 or later. On older devices, try <a href="sonic3air_web.html">Play now</a> in Safari.</p>
 				<ol>
 					<li>Open this page in Safari on the device.</li>
-					<li>Tap the Share button <img class="share" src="share.svg" alt="Share"> in the toolbar.</li>
-					<li>Choose <em>Add to Home Screen</em>.</li>
-					<li>Open the new <em>Sonic 3 AirNet</em> app from your home screen.</li>
-					<li>When the first download has finished, select your <code>Sonic_Knuckles_wSonic3.bin</code> file. It is copied into the app's save data, so you only do this once.</li>
+					<li>Tap Share <img class="share" src="share.svg" alt="(the Share button)"> in the toolbar.</li>
+					<li>Choose Add to Home Screen.</li>
+					<li>Start Sonic 3 AirNet from your home screen.</li>
+					<li>After the first download, pick your <code>Sonic_Knuckles_wSonic3.bin</code>. It is copied into the app, so you only do this once.</li>
 				</ol>
 				<p>Keep the device awake during the first download; if it goes to sleep, close the app and open it again.</p>
 			</div>
-			<img class="shot" src="addToHome.png" alt="The Add to Home Screen option in the Safari share menu">
+			<img src="addToHome.png" alt="The Add to Home Screen entry in Safari's share menu">
 		</div>
 	</section>
 </main>
 
 <footer>
-	<div class="wrap">
-		<p><strong>Sonic 3 AirNet</strong> is built on <a href="https://sonic3air.org/">Sonic 3 A.I.R.</a> by Eukaryot. The source code is on <a href="https://github.com/TrickerNoxics14/Sonic-3-Airnet">GitHub</a> under the GNU GPL v3.</p>
+	<div class="in">
+		<p>Sonic 3 AirNet is built on <a href="https://sonic3air.org/">Sonic 3 A.I.R.</a> by Eukaryot. Source code on <a href="https://github.com/TrickerNoxics14/Sonic-3-Airnet">GitHub</a>, GNU GPL v3.</p>
 		<p>A non-profit fan project, not affiliated with or endorsed by SEGA, Sonic Team or the Sonic 3 A.I.R. team. Sonic the Hedgehog is a trademark of SEGA. No game ROM is included.</p>
 	</div>
 </footer>
+
+<script>
+// Draws the words of every .pix element in Sonic 3's menu font (data/font/sonic3_fontB: white letters with a black outline, 8 pixels high), tinted like
+// the game tints it, at a whole-number scale set in the CSS (--px). The real text stays in the page for screen readers and search.
+(function () {
+	var GLYPHS = {"0":[238,8],"1":[247,7],"2":[254,8],"3":[263,8],"4":[272,8],"5":[281,8],"6":[290,8],"7":[299,8],"8":[308,8],"9":[317,8],"A":[1,8],"B":[10,8],"C":[19,8],"D":[28,8],"E":[37,8],"F":[46,8],"G":[55,8],"H":[64,8],"I":[73,4],"J":[78,8],"K":[87,8],"L":[96,8],"M":[105,8],"N":[114,8],"O":[123,8],"P":[132,8],"Q":[141,8],"R":[150,8],"S":[159,8],"T":[168,8],"U":[177,8],"V":[186,8],"W":[195,8],"X":[204,8],"Y":[213,8],"Z":[222,8],"*":[231,6]," ":[325,6],":":[332,8],"+":[340,8],".":[349,6],",":[357,6],"_":[364,7],"-":[372,6]};
+	var font = new Image();
+	font.onload = function () { drawAll(); window.addEventListener('resize', drawAll); };
+	font.src = 'ui_font.png';
+
+	function tintOf(el) {
+		var probe = document.createElement('span');
+		probe.style.color = getComputedStyle(el).getPropertyValue('--tint').trim() || '#ffffff';
+		document.body.appendChild(probe);
+		var m = getComputedStyle(probe).color.match(/\d+/g);
+		probe.remove();
+		return m ? m.map(Number) : [255, 255, 255];
+	}
+
+	function draw(el) {
+		var label = el.querySelector('.label');
+		var text = (label ? label.textContent : el.textContent).toUpperCase();
+		var scale = parseInt(getComputedStyle(el).getPropertyValue('--px'), 10) || 2;
+		var width = 0;
+		for (var i = 0; i < text.length; ++i) width += (GLYPHS[text[i]] || GLYPHS[' '])[1] + 1;
+		width = Math.max(1, width - 1);
+		// Never wider than the space it has: the largest whole-number scale that fits
+		var fits = el.classList.contains('zone') || el.tagName === 'H2';		// (a button sizes itself to its words, so only titles are fitted)
+		var room = fits && el.parentNode ? el.parentNode.clientWidth - (parseFloat(getComputedStyle(el.parentNode).paddingLeft) || 0) - (parseFloat(getComputedStyle(el.parentNode).paddingRight) || 0) : 0;
+		while (scale > 1 && room > 0 && width * scale > room) --scale;
+		var small = document.createElement('canvas');
+		small.width = width; small.height = 8;
+		var s = small.getContext('2d');
+		var x = 0;
+		for (var j = 0; j < text.length; ++j) {
+			var g = GLYPHS[text[j]] || GLYPHS[' '];
+			s.drawImage(font, g[0], 0, g[1], 8, x, 0, g[1], 8);
+			x += g[1] + 1;
+		}
+		// The game multiplies the letters by a colour: white becomes the tint, the black outline stays black
+		var tint = tintOf(el);
+		var data = s.getImageData(0, 0, width, 8);
+		for (var k = 0; k < data.data.length; k += 4) {
+			data.data[k] = data.data[k] * tint[0] / 255;
+			data.data[k + 1] = data.data[k + 1] * tint[1] / 255;
+			data.data[k + 2] = data.data[k + 2] * tint[2] / 255;
+		}
+		s.putImageData(data, 0, 0);
+		var big = el.querySelector('canvas') || document.createElement('canvas');
+		big.setAttribute('aria-hidden', 'true');
+		big.width = width * scale; big.height = 8 * scale;
+		var b = big.getContext('2d');
+		b.imageSmoothingEnabled = false;
+		b.drawImage(small, 0, 0, width * scale, 8 * scale);
+		if (!big.parentNode) el.appendChild(big);
+		el.classList.add('ready');
+	}
+
+	function drawAll() { document.querySelectorAll('.pix').forEach(draw); }
+})();
+</script>
 </body>
 </html>

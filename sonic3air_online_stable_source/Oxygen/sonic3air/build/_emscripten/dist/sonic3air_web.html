@@ -9,10 +9,29 @@
 <link rel="manifest" href="manifest.json">
 <style>body{background:black;color:white;font-family:arial;margin:0;padding:none;overflow:hidden;-webkit-user-select:none;}.emscripten{padding-right:0;margin-left:auto;margin-right:auto;display:block}div.emscripten{text-align:center}div.emscripten_border{border:0 none;}canvas.emscripten{border:0 none;background-color:#000}.spinner{height:30px;width:30px;margin:0;margin-top:20px;margin-left:20px;display:inline-block;vertical-align:top;-webkit-animation:rotation .8s linear infinite;-moz-animation:rotation .8s linear infinite;-o-animation:rotation .8s linear infinite;animation:rotation .8s linear infinite;border-left:5px solid #ebebeb;border-right:5px solid #ebebeb;border-bottom:5px solid #ebebeb;border-top:5px solid #787878;border-radius:100%;background-color:#bdd72e}@-webkit-keyframes rotation{from{-webkit-transform:rotate(0)}to{-webkit-transform:rotate(360deg)}}@-moz-keyframes rotation{from{-moz-transform:rotate(0)}to{-moz-transform:rotate(360deg)}}@-o-keyframes rotation{from{-o-transform:rotate(0)}to{-o-transform:rotate(360deg)}}@keyframes rotation{from{transform:rotate(0)}to{transform:rotate(360deg)}}#status{display:inline-block;vertical-align:top;margin-top:30px;margin-left:20px;font-size:1em;font-weight:700;color:#787878}#progress{height:20px;width:250px}
 .hidden{display:none !important;}
-.file_select{
-	text-align:center;
-	font-size: 0.9em;
+/* The screen before the game starts (loading, then the ROM): Sonic 3 A.I.R.'s level select backdrop, its logo and menu sprites, scaled by whole numbers only */
+#startup, #spinner, #status, #progress { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+#startup h2 { font-weight: 600; font-size: 1.1em; margin: 24px; color: #b9c3f2; }
+#spinner { border-color: #ffe07c; border-top-color: #fc0000; background-color: transparent; }
+#status { color: #b9c3f2; }
+#progress { accent-color: #ffe07c; }
+.file_select {
+	position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px 16px 140px;
+	background: #0000b4 url(ui_backdrop.png) 0 0 / 800px 448px repeat; image-rendering: pixelated; animation: romdrift 40s linear infinite;
+	font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: #ffffff; text-align: left;
 }
+@keyframes romdrift { to { background-position: 800px 448px; } }
+@media (prefers-reduced-motion: reduce) { .file_select { animation: none; } }
+.file_select.dragging .rom-box { outline: 4px dashed #ffe07c; outline-offset: 8px; }
+.rom-box { width: 100%; max-width: 560px; background: #000000; box-shadow: 8px 8px 0 #00006c; padding: 26px 28px 24px; image-rendering: auto; }
+.rom-logo { display: block; width: 360px; max-width: 100%; height: auto; margin: 0 0 20px; image-rendering: pixelated; }
+.rom-box p { margin: 0 0 12px; font-size: 1.05em; line-height: 1.55; }
+.rom-box .quiet { color: #b9c3f2; font-size: 0.92em; }
+.rom-box code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; color: #ffe07c; }
+#s3kPromptMessage { display: block; margin: 4px 0 14px; min-height: 0; }
+#s3kPromptMessage.error { padding: 10px 12px; background: #fc0000; color: #ffffff; font-weight: 600; }
+.rom-cast { position: fixed; bottom: 0; right: 6vw; height: 160px; width: auto; image-rendering: pixelated; pointer-events: none; }
+@media (max-width: 600px) { .rom-cast { height: 120px; } .rom-box { padding: 20px 18px; } }
 .file_upload{
 	position: fixed;
 	top: 50%;
@@ -27,25 +46,22 @@
 input[type="file"] {display: none;}
 .fileSelector {
   display: inline-block;
-  background: #222;
-  background: linear-gradient(0deg, #111 0%, #444 100%);
-  border: 1px solid #999;
-  border-radius: 5px;
-  margin-top:3px;
-  padding: 5px 8px;
-  outline: none;
+  background: #ffe07c;
+  color: #00006c;
+  border: 4px solid #ffffff;
+  box-shadow: 6px 6px 0 #00006c;
+  margin: 4px 0 14px;
+  padding: 12px 22px;
   white-space: nowrap;
   user-select: none;
   cursor: pointer;
-  text-shadow: 1px 1px #555;
-  font-size: 32px;
+  font-weight: 800;
+  font-size: 1.15em;
+  letter-spacing: 0.02em;
 }
-.fileSelector:hover {
-  border-color: black;
-}
-.fileSelector:active {
-  background: linear-gradient(0deg, #333 0%, #555 100%);
-}
+.fileSelector:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 #00006c; }
+.fileSelector:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 #00006c; }
+.fileSelector:focus-visible, input#fileSelector:focus-visible + .fileSelector { outline: 3px solid #ffe07c; outline-offset: 4px; }
 .restart{text-align:center;font-size: 1em;}
 .extraDownloads{display:inline-block;}
 .restart > button,.extraDownloads > button,.extraDownloadsSection > button {
@@ -301,16 +317,21 @@ function installS3kFile(fileInput) {
     var fr = new FileReader();
     fr.onload = function () {
         var data = new Uint8Array(fr.result);
+		var prompt = document.getElementById("s3kPromptMessage");
 		if(data.length != 4194304){
 			//Wrong size! No good!
-			document.getElementById("s3kPromptMessage").innerText = "The selected file was not Sonic 3 and Knuckles. Try again:";
+			prompt.innerText = "\"" + file.name + "\" is not the Sonic 3 & Knuckles ROM: that file is exactly 4 MB. Choose Sonic_Knuckles_wSonic3.bin.";
+			prompt.classList.add('error');
 			return;
 		}
 		else if(data[0x186] != 0x31 || data[0x187] != 0x35 || data[0x188] != 0x36 || data[0x189] != 0x33){
 			//MK-1563 is Sonic & Knuckles, which is attached to Sonic 3. If this is not in the header, the ROM is wrong.
-			document.getElementById("s3kPromptMessage").innerText = "The selected file was not Sonic 3 and Knuckles. Try again:";
+			prompt.innerText = "\"" + file.name + "\" is a 4 MB ROM, but not Sonic 3 & Knuckles. Choose Sonic_Knuckles_wSonic3.bin.";
+			prompt.classList.add('error');
 			return;
 		}
+		prompt.classList.remove('error');
+		prompt.innerText = "";
 
 		//If this call throws an exception with error code 20, it means the ROM already exists.
 		//But that shouldn't happen because we wouldn't be calling this if it already existed.
@@ -328,6 +349,26 @@ function installS3kFile(fileInput) {
     };
     fr.readAsArrayBuffer(file);
 }
+
+// The ROM can also be dropped anywhere on the page while the ROM screen shows
+document.addEventListener('dragover', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (!romScreen || romScreen.classList.contains('hidden')) return;
+	e.preventDefault();
+	romScreen.classList.add('dragging');
+});
+document.addEventListener('dragleave', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (romScreen && e.target === romScreen) romScreen.classList.remove('dragging');
+});
+document.addEventListener('drop', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (!romScreen || romScreen.classList.contains('hidden')) return;
+	e.preventDefault();
+	romScreen.classList.remove('dragging');
+	if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0)
+		installS3kFile({ files: e.dataTransfer.files });
+});
 
 function triggerFileSelect(){
 	// Show the file upload dialog box. iOS requires the user to tap the input button themselves, it can't be invoked programmatically.
@@ -442,14 +483,16 @@ function fileManagerExportFile(filePath){
 <div class="emscripten pageUI hidden" id=status>Downloading...</div>
 <div class="emscripten pageUI hidden"><progress hidden id=progress max=100 value=0></progress></div>
 <div class="file_select hidden">
-	<span>To run the game, Sonic 3 AirNet requires an original copy of the Sonic 3 and Knuckles ROM. 
-	You can get this file by purchasing the game on Steam for Windows, Mac or Linux.</span><br/>
-	<span>Your ROM stays in this browser only. It is not uploaded anywhere and not part of this page.</span><br/>
-	<span id="s3kPromptMessage">Please provide Sonic_Knuckles_wSonic3.bin:</span><br/>
-	<label for="fileSelector" class="fileSelector">
-	    Select File...
-	</label>
-	<input id="fileSelector" class="fileSelector" type="file" onChange="installS3kFile(this);"/>
+	<div class="rom-box">
+		<img class="rom-logo" src="ui_logo.png" width="180" height="24" alt="Sonic 3 AirNet">
+		<p>The game runs on your own copy of Sonic 3 &amp; Knuckles. Choose the ROM file <code>Sonic_Knuckles_wSonic3.bin</code>; it comes with the Steam version of the game for Windows, Mac and Linux.</p>
+		<p class="quiet">The file stays in this browser and is never uploaded. You only do this once.</p>
+		<span id="s3kPromptMessage" role="alert"></span>
+		<label for="fileSelector" class="fileSelector" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('fileSelector').click();}">Choose ROM file</label>
+		<input id="fileSelector" class="fileSelector" type="file" onChange="installS3kFile(this);"/>
+		<p class="quiet">Or drop the file anywhere on this page.</p>
+	</div>
+	<img class="rom-cast" src="ui_sonic_tails.png" width="56" height="40" alt="">
 </div>
 <div class="file_upload hidden">
 	<div style="margin-bottom: 15px; font-size: 1.2em;">Select a file to import:</div>
