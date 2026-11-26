@@ -11,16 +11,17 @@ page again before you rely on a number. Whatever could not be confirmed is marke
 | | A. Free web service (Render) | B. Free always-on VM (Oracle Cloud Always Free) |
 | --- | --- | --- |
 | Browser players | yes | yes |
-| Windows / Android games (they speak UDP) | **no** | yes |
+| Windows games | yes, over a WebSocket (`wss://`, since 2026-11-26) | yes (UDP or `wss://`) |
+| Android games (UDP only; Android work is stopped) | **no** | yes |
 | Sleeps | after 15 minutes without inbound traffic; wakes in about a minute | no, but an idle VM can be reclaimed (see B) |
 | Free outbound traffic | 5 GB a month for the whole workspace; then services stop until next month (no card on file) or cost $0.15 per GB (card on file) | 10 TB a month |
 | Effort (my estimate, not tried) | short, no server administration | about an hour, you run a Linux server |
 | Needs | a Render account and the GitHub repository | an Oracle account (card and phone number for verification), a free DuckDNS name |
 
-* **Only browsers play?** Take A. **Windows or Android players must be in the same lobbies as browsers?** Take B: a relay without UDP cannot serve them.
+* **Browsers and Windows players?** A is enough: the Windows game reaches a `wss://` relay over a WebSocket like a browser (tested: web_net session W against
+  a relay with no UDP port, and live against the Render relay). **Android players too?** Take B: the Android build speaks UDP only.
 * **UDP cannot be had on a free web service**: Render's web services take public traffic on one HTTP port only (docs: web-services) and
-  none of the pages read mentions UDP. A free HTTP-only relay therefore means: Windows and Android games cannot use it, and crossplay
-  between exe/Android and browsers is impossible there. Browser versus browser works.
+  none of the pages read mentions UDP. That is why the Windows game got its WebSocket transport; Android games cannot use such a relay.
 * **How much traffic the relay carries.** README: roughly 100 to 300 KB/s per person while the game runs *through the relay*. When two browsers connect
   directly (WebRTC), the relay carries only the lobby list and a few signalling messages. On A the 5 GB budget is about 4.6 to 14 hours of one
   person playing through the relay (5 GB divided by 300 and by 100 KB/s), so A suits groups whose direct connections work. Direct connections were only tried on one
@@ -39,7 +40,7 @@ page again before you rely on a number. Whatever could not be confirmed is marke
 * The server accepts capital letters, a trailing slash or the page path in the setting and cleans them up. An entry that no browser could ever send (`trickernoxics14.github.io` without `https://`, a `*` wildcard like `https://*.github.io`, a user name, a query, a bad host or port) stops the program at start with a message instead of locking everybody out. Several origins are separated by commas.
 * Windows and Android games send no origin and are let in; so is any script, because a script can write any origin it likes. The list keeps *other web pages* from using your relay; it is not a password. An `Origin` header that is present but empty (a browser never sends one) or `null` (a sandboxed frame, a local file) is refused with 403 while a list is set.
 
-## A. Render free web service (browsers only)
+## A. Render free web service (browsers and Windows games over WebSocket)
 
 Sources: render.com/docs/free, /docs/web-services, /docs/health-checks, /docs/websocket, /docs/outbound-bandwidth, /docs/monorepo-support, /docs/node-version, /docs/your-first-deploy.
 
@@ -170,7 +171,12 @@ sent by the player (caddyserver.com docs), so the relay sees exactly one address
 
   It is a plain script: you can edit it in the published folder without rebuilding the game. Players can also open the page as `sonic3air_web.html?relay=wss://NAME.onrender.com` (the link wins) or type the address under *Online lobby, RELAY SERVER* (saved in their browser).
   A page on `https://` only accepts `wss://` addresses. With no address anywhere the lobby says "No relay server is set. Online play needs one: enter its address in the lobby." and nothing else happens.
-* **Windows version (B only):** `settings.json`, `"Online" : { "RelayServer" : "your-name.duckdns.org:28842" }` (the UDP address, not `wss://`). Everybody in one lobby must use the same relay, game version and mods (the browser version has none: Windows players switch mods off to play with browsers).
+* **Windows version, A or B:** a `wss://` address works too (since 2026-11-26): the Windows game then talks to the relay the way a browser does, over a WebSocket
+  (WinHTTP, part of Windows), so the free web service of A is enough for crossplay. The Windows game's built-in lobby server is the Render relay of the published page
+  (`NetplayServerDefaults.h`, `wss://sonic3-airnet-relay.onrender.com`); a player can set another one under ONLINE > SETTINGS or in `settings.json`,
+  `"Online" : { "LobbyServer" : "wss://NAME.onrender.com" }` (WebSocket) or `"your-name.duckdns.org:28842"` (UDP, B only). Only an address that starts with
+  `ws://` or `wss://` means WebSocket; a plain name is UDP as before. Everybody in one lobby must use the same relay, game version and mods (the browser version
+  has none: Windows players switch mods off to play with browsers).
 
 ## Settings at a glance
 
