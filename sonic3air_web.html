@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang=en-us>
+<head>
+<meta charset=utf-8>
+<meta content="text/html; charset=utf-8"http-equiv=Content-Type>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Sonic 3 AirNet</title>
+<link rel="apple-touch-icon" sizes="256x256" href="icon.png">
+<link rel="manifest" href="manifest.json">
+<style>body{background:black;color:white;font-family:system-ui, -apple-system, "Segoe UI", sans-serif;margin:0;padding:none;overflow:hidden;-webkit-user-select:none;}.emscripten{padding-right:0;margin-left:auto;margin-right:auto;display:block}div.emscripten{text-align:center}div.emscripten_border{border:0 none;}canvas.emscripten{border:0 none;background-color:#000}.spinner{height:30px;width:30px;margin:0;margin-top:20px;margin-left:20px;display:inline-block;vertical-align:top;-webkit-animation:rotation .8s linear infinite;-moz-animation:rotation .8s linear infinite;-o-animation:rotation .8s linear infinite;animation:rotation .8s linear infinite;border-left:5px solid #ebebeb;border-right:5px solid #ebebeb;border-bottom:5px solid #ebebeb;border-top:5px solid #787878;border-radius:100%;background-color:#bdd72e}@-webkit-keyframes rotation{from{-webkit-transform:rotate(0)}to{-webkit-transform:rotate(360deg)}}@-moz-keyframes rotation{from{-moz-transform:rotate(0)}to{-moz-transform:rotate(360deg)}}@-o-keyframes rotation{from{-o-transform:rotate(0)}to{-o-transform:rotate(360deg)}}@keyframes rotation{from{transform:rotate(0)}to{transform:rotate(360deg)}}#status{display:inline-block;vertical-align:top;margin-top:30px;margin-left:20px;font-size:1em;font-weight:700;color:#787878}#progress{height:20px;width:250px}
+.hidden{display:none !important;}
+/* The screen before the game starts (loading, then the ROM): Sonic 3 A.I.R.'s level select backdrop, its logo and menu sprites, scaled by whole numbers only */
+#startup, #spinner, #status, #progress { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+#startup h2 { font-weight: 600; font-size: 1.1em; margin: 24px; color: #b9c3f2; }
+#spinner { border-color: #ffe07c; border-top-color: #fc0000; background-color: transparent; }
+#status { color: #b9c3f2; }
+#progress { accent-color: #ffe07c; }
+.file_select {
+	position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px 16px 140px;
+	background: #0000b4 url(ui_backdrop.png) 0 0 / 800px 448px repeat; image-rendering: pixelated; animation: romdrift 40s linear infinite;
+	font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #ffffff; text-align: left;
+}
+@keyframes romdrift { to { background-position: 800px 448px; } }
+@media (prefers-reduced-motion: reduce) { .file_select { animation: none; } }
+/* The remastered music loads with the game (the loading bar); only when that fails, this box offers what to do */
+#musicProblem { max-width: 560px; margin: 24px 20px; padding: 20px 22px; background: #000000; border: 2px solid #fc0000; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #ffffff; }
+#musicStatus { margin: 0 0 14px; line-height: 1.5; font-weight: 600; }
+button.fileSelector { font-family: inherit; }
+.musicSkip { background: none; border: none; padding: 12px 6px; margin-left: 14px; color: #b9c3f2; font: inherit; text-decoration: underline; cursor: pointer; }
+.musicSkip:hover { color: #ffffff; }
+.musicSkip:focus-visible { outline: 3px solid #ffe07c; outline-offset: 2px; }
+.file_select.dragging .rom-box { outline: 4px dashed #ffe07c; outline-offset: 8px; }
+.rom-box { width: 100%; max-width: 560px; background: #000000; box-shadow: 8px 8px 0 #00006c; padding: 26px 28px 24px; image-rendering: auto; }
+.rom-logo { display: block; width: 360px; max-width: 100%; height: auto; margin: 0 0 20px; image-rendering: pixelated; }
+.rom-box p { margin: 0 0 12px; font-size: 1.05em; line-height: 1.55; }
+.rom-box .quiet { color: #b9c3f2; font-size: 0.92em; }
+.rom-box code { font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; color: #ffe07c; }
+#s3kPromptMessage { display: block; margin: 4px 0 14px; min-height: 0; }
+#s3kPromptMessage.error { padding: 10px 12px; background: #fc0000; color: #ffffff; font-weight: 600; }
+.rom-cast { position: fixed; bottom: 0; right: 6vw; display: flex; align-items: flex-end; pointer-events: none; }
+.rom-cast img + img { margin-left: -28px; }
+.rom-cast img { height: 160px; width: auto; image-rendering: pixelated; }
+@media (max-width: 600px) { .rom-cast img + img { margin-left: -14px; } .rom-cast img { height: 80px; } .rom-box { padding: 20px 18px; } }
+.file_upload{
+	position: fixed;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	background: rgba(20,20,20,0.75);
+	border-radius: 10px;
+	padding: 20px;
+	text-align: center;
+	z-index: 10000;
+}
+input[type="file"] {display: none;}
+.fileSelector {
+  display: inline-block;
+  background: #ffe07c;
+  color: #00006c;
+  border: 4px solid #ffffff;
+  box-shadow: 6px 6px 0 #00006c;
+  margin: 4px 0 14px;
+  padding: 12px 22px;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  font-weight: 800;
+  font-size: 1.15em;
+  letter-spacing: 0.02em;
+}
+.fileSelector:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 #00006c; }
+.fileSelector:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 #00006c; }
+.fileSelector:focus-visible, input#fileSelector:focus-visible + .fileSelector { outline: 3px solid #ffe07c; outline-offset: 4px; }
+.restart{text-align:center;font-size: 1em;}
+.restart > button {
+  display: inline-block;
+  color: white;
+  background: #222;
+  background: linear-gradient(0deg, #111 0%, #444 100%);
+  border: 1px solid #999;
+  border-radius: 5px;
+  margin-top:3px;
+  padding: 5px 8px;
+  outline: none;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  text-shadow: 1px 1px #555;
+  font-size: 32px;
+}
+#root{
+	color: black;
+}
+#fileUpload{
+	display: inline-block;
+    background: #222;
+    background: linear-gradient(0deg, #111 0%, #444 100%);
+	border: 1px solid #999;
+	border-radius: 5px;
+	margin: 10px 5px;
+	padding: 10px 15px;
+	outline: none;
+	white-space: nowrap;
+	user-select: none;
+	cursor: pointer;
+	text-shadow: 1px 1px #555;
+	font-size: 24px;
+	color: white;
+}
+#fileUpload:hover {
+	border-color: black;
+}
+#fileUpload:active {
+	background: linear-gradient(0deg, #333 0%, #555 100%);
+}
+.cancelButton {
+	display: inline-block;
+	background: #444;
+	background: linear-gradient(0deg, #222 0%, #555 100%);
+	border: 1px solid #999;
+	border-radius: 5px;
+	margin: 10px 5px;
+	padding: 10px 15px;
+	outline: none;
+	cursor: pointer;
+	text-shadow: 1px 1px #555;
+	font-size: 24px;
+	color: white;
+}
+.cancelButton:hover {
+	border-color: black;
+}
+.cancelButton:active {
+	background: linear-gradient(0deg, #444 0%, #666 100%);
+}
+#ios_workaround{
+	width: 100%;
+	height: 100%;
+	position: absolute;
+	top: 0;
+	left: 0;
+	text-align: center;
+	padding-top: 40vh;
+	font-size: 2em;
+	user-select: none;
+	cursor: default;
+	background-color: rgba(0,0,0,50%);
+}
+</style>
+<script>
+    //This wrapper around the wasm build of the game is intentionally not obfuscated.
+    //Feel free to use it as an example of how to interact with emscripten WebAssembly builds for other projects.
+var hasRemasteredAudio = false;
+function startGame(){
+	callMain();
+	
+	//Resize canvas AFTER it starts, because it needs an inital size to work properly.
+	var gameCanvas = document.getElementById('canvas');
+	gameCanvas.style.width = "min(100vw, calc(100vh * 16 / 9))";
+	gameCanvas.style.height = "min(100vh, calc(100vw * 9 / 16))";
+	gameCanvas.style.marginTop = "max(0vh, calc(50vh - (100vw * 9 / 16 / 2)))";
+	
+	if(isRunningOniOS()){
+		let iosoverlay = document.getElementById('ios_workaround');
+		if(iosoverlay){
+			iosoverlay.classList.remove('hidden');
+		}
+	}
+}
+
+function isRunningOniOS() {
+  return [
+    'iPad Simulator',
+    'iPhone Simulator',
+    'iPod Simulator',
+    'iPad',
+    'iPhone',
+    'iPod'
+  ].includes(navigator.platform)
+  // iPad on iOS 13 detection
+  || (navigator.userAgent.includes("Mac") && "ontouchend" in document)
+}
+
+function hideIOSoverlay(){
+	//iOS prevents websites from playing sound unless the user interacts with the web page first.
+	//Prior to iOS 16, tapping the canvas used to be enough to enable sound but now they need to tap a normal page element first.
+	//The full screen overlay on iOS is a workaround, once tapped sound will enable and we can get rid of the overlay.
+	let iosoverlay = document.getElementById('ios_workaround');
+	if(iosoverlay){
+		document.body.removeChild(iosoverlay);
+	}
+}
+
+function onPageLoaded(){
+	//Uncomment the service worker below for actual releases to force files to be cached so you can play offline.
+	//Leave it commented when testing because otherwise when you refresh the page you'll still be getting cached data.
+	/*if('serviceWorker' in navigator) {
+    	navigator.serviceWorker.register('worker.js');
+	};*/
+	var startup = document.getElementById("startup");
+	startup.style.display = 'none';
+	
+	var uiElements = document.getElementsByClassName('pageUI');
+	for (var i = 0; i < uiElements.length; i++) {
+		uiElements[i].classList.remove('hidden');
+	}
+	
+	//Load the loader after the rest of the stuff, because otherwise we get a console error?
+	var loader=document.createElement('script');
+	loader.setAttribute('async', '');
+	loader.setAttribute('src', 'loader.js');
+	document.body.appendChild(loader);
+	Module['calledRun'] = true; //We got here from pre-run, so loader needs to know that.
+	
+	if(isRunningOniOS() == false){
+		hideIOSoverlay();
+	}
+}
+
+function onGameExit(){
+	//We shouldn't be able to get to this point anymore because I removed the Exit option, 
+	//but if it crashes or something the user can still get a Restart button to reload the page.
+	var restartBits = document.getElementsByClassName('restart');
+	for (var i = 0; i < restartBits.length; i++) {
+		restartBits[i].classList.remove('hidden');
+	}
+
+	var gameView = document.getElementById("gameView");
+	gameView.classList.add('hidden');
+	var rootView = document.getElementById("root");
+	rootView.classList.remove('hidden');
+	
+	exitRuntime();
+}
+
+function onDownloadsComplete(){
+	FS.chdir("/sonic3air");
+	beginRemasteredMusic();		// (the music loads now, also while a new player picks the ROM)
+	if(FS.analyzePath("/sonic3air/savedata/Sonic_Knuckles_wSonic3.bin", true).exists === true){
+		//Everything exists
+		var internalFolder = FS.analyzePath("/sonic3air/___internal/");
+		if(!internalFolder.exists){
+			FS.mkdir('/sonic3air/___internal/');
+		}
+		startGameWhenReady();
+	}
+	else{
+		//No ROM, display file selector
+		var uiElements = document.getElementsByClassName('file_select');
+		for (var i = 0; i < uiElements.length; i++) {
+			uiElements[i].classList.remove('hidden');
+		}
+	}
+}
+
+function hidePageUI(){
+	var fileElement = document.getElementsByClassName('file_select');
+	if(fileElement.length > 0){
+		fileElement[0].remove();
+	}
+		
+	var uiElements = document.getElementsByClassName('pageUI');
+	for (var i = 0; i < uiElements.length; i++) {
+		uiElements[i].style.display = 'none';
+	}
+}
+
+// ---- The remastered music (audioremaster.bin, 126 MB) ----
+// The page has it in parts (GitHub takes no file over 100 MB); audioremaster.json lists them with their sizes. It is downloaded once, before the first start, straight into
+// the browser's storage (never into the game's own memory), and linked to where the game looks for it. The game's Options menu uses the same download (airnetMusic).
+var MUSIC_FILE = '/sonic3air/savedata/audioremaster.bin';
+var MUSIC_LINK = '/sonic3air/data/audioremaster.bin';
+// state: 0 = not there, 1 = downloading, 2 = there, 3 = the download failed (error says why)
+var airnetMusic = { state: 0, bytes: 0, total: 0, error: '', running: null, abort: null };
+
+function linkRemasteredMusic(){
+	if (FS.analyzePath(MUSIC_FILE, true).exists !== true)
+		return false;
+	if (FS.analyzePath(MUSIC_LINK, false).exists !== true)
+		FS.symlink(MUSIC_FILE, MUSIC_LINK);
+	hasRemasteredAudio = true;
+	airnetMusic.state = 2;
+	return true;
+}
+
+// One write of the browser storage, in the same queue as the game's own saves (one sync at a time, see FileIO.cpp)
+function requestStorageSync(){
+	var state = Module.__rmxSyncState || (Module.__rmxSyncState = { running: false, again: false });
+	var run = function(){
+		state.running = true;
+		state.again = false;
+		FS.syncfs(false, function(err){
+			if (err) console.error('FS.syncfs failed:', err);
+			state.running = false;
+			if (state.again) run();
+		});
+	};
+	if (state.running) state.again = true; else run();
+}
+
+airnetMusic.start = function(onProgress){
+	if (airnetMusic.running)
+		return airnetMusic.running;
+	var controller = new AbortController();
+	airnetMusic.abort = controller;
+	airnetMusic.running = (async function(){
+		var temp = MUSIC_FILE + '.download';
+		var stream = null;
+		airnetMusic.state = 1;
+		airnetMusic.bytes = 0;
+		airnetMusic.error = '';
+		try {
+			var infoResponse = await fetch('audioremaster.json', { cache: 'no-cache', signal: controller.signal });
+			if (!infoResponse.ok) throw new Error('the list of parts: HTTP ' + infoResponse.status);
+			var info = await infoResponse.json();
+			airnetMusic.total = info.size;
+			stream = FS.open(temp, 'w');
+			FS.ftruncate(stream.fd, info.size);		// (the whole size at once, so the file does not grow step by step)
+			var position = 0;
+			for (var i = 0; i < info.parts.length; ++i) {
+				var response = await fetch(info.parts[i].file, { signal: controller.signal });
+				if (!response.ok) throw new Error('part ' + (i + 1) + ': HTTP ' + response.status);
+				var reader = response.body.getReader();
+				var partBytes = 0;
+				for (;;) {
+					var chunk = await reader.read();
+					if (chunk.done) break;
+					FS.write(stream, chunk.value, 0, chunk.value.length, position);
+					position += chunk.value.length;
+					partBytes += chunk.value.length;
+					airnetMusic.bytes = position;
+					if (onProgress) onProgress();
+				}
+				if (partBytes !== info.parts[i].size) throw new Error('part ' + (i + 1) + ' has ' + partBytes + ' bytes instead of ' + info.parts[i].size);
+			}
+			FS.close(stream);
+			stream = null;
+			if (position !== info.size) throw new Error('got ' + position + ' bytes instead of ' + info.size);
+			FS.rename(temp, MUSIC_FILE);
+			linkRemasteredMusic();
+			requestStorageSync();
+			console.log('Music: the remastered music is ready (' + info.size + ' bytes)');
+		} catch (e) {
+			if (stream) { try { FS.close(stream); } catch (x) {} }
+			try { FS.unlink(temp); } catch (x) {}
+			var stopped = controller.signal.aborted;
+			airnetMusic.state = stopped ? 0 : 3;
+			airnetMusic.error = stopped ? '' : String((e && e.message) || e);
+			console.warn('Music: the download ' + (stopped ? 'was stopped' : ('failed: ' + airnetMusic.error)));
+		}
+		airnetMusic.running = null;
+		airnetMusic.abort = null;
+		if (onProgress) onProgress();
+		return airnetMusic.state === 2;
+	})();
+	return airnetMusic.running;
+};
+
+airnetMusic.cancel = function(){
+	if (airnetMusic.abort) airnetMusic.abort.abort();
+};
+
+// The music is part of loading the game: it starts as soon as the game's own files are there, on the same loading bar (and while a new player picks the ROM),
+// and the game starts when both are done. (?music=skip leaves it out, for the automated checks.)
+var musicLoading = null;		// the download running for the start of the game, or null
+function isMusicSkipped(){ return /[?&]music=skip(&|$)/.test(location.search); }
+function megabytes(bytes){ return Math.round(bytes / 1048576); }
+
+function showMusicProgress(){
+	var romNote = document.getElementById('romMusicNote');
+	if (airnetMusic.state === 1) {
+		var part = (airnetMusic.total > 0) ? (megabytes(airnetMusic.bytes) + ' of ' + megabytes(airnetMusic.total) + ' MB') : '';
+		statusElement.innerText = 'Loading the remastered music... ' + part;
+		if (airnetMusic.total > 0) {
+			progressElement.max = airnetMusic.total;
+			progressElement.value = airnetMusic.bytes;
+			progressElement.hidden = false;
+		}
+		spinnerElement.hidden = false;
+		spinnerElement.style.display = '';
+		if (romNote) { romNote.hidden = false; romNote.innerText = 'The remastered music is loading meanwhile (' + part + ').'; }
+	}
+	else if (romNote) {
+		romNote.hidden = (airnetMusic.state !== 2 && airnetMusic.state !== 3);
+		romNote.innerText = (airnetMusic.state === 2) ? 'The remastered music is ready.' : 'The remastered music could not be loaded; you can still play.';
+	}
+}
+
+function beginRemasteredMusic(){
+	if (isMusicSkipped() || linkRemasteredMusic())
+		return;
+	if (!musicLoading)
+		musicLoading = airnetMusic.start(showMusicProgress);
+}
+
+function setLoadingBarVisible(visible){
+	var uiElements = document.getElementsByClassName('pageUI');
+	for (var i = 0; i < uiElements.length; i++) {
+		uiElements[i].classList.remove('hidden');
+		uiElements[i].style.display = visible ? '' : 'none';
+	}
+}
+
+function showMusicProblem(visible){
+	var problem = document.getElementById('musicProblem');
+	if (!problem) return;
+	problem.classList.toggle('hidden', !visible);
+	if (visible) {
+		document.getElementById('musicStatus').innerText = 'The remastered music could not be loaded (' + airnetMusic.error + '). Check the connection and try again, or play with the original music for now: it can be loaded later in Options.';
+		problem.querySelector('button').focus();
+	}
+}
+
+// After the ROM: the game starts when the music is there too (the loading bar shows it while it is still on its way)
+async function startGameWhenReady(){
+	var fileElement = document.getElementsByClassName('file_select');
+	if (fileElement.length > 0) fileElement[0].remove();
+	showMusicProblem(false);
+	beginRemasteredMusic();
+	if (musicLoading) {
+		setLoadingBarVisible(true);
+		showMusicProgress();
+		var ok = await musicLoading;
+		musicLoading = null;
+		if (!ok) {
+			spinnerElement.style.display = 'none';
+			statusElement.innerText = 'The remastered music did not load.';
+			progressElement.hidden = true;
+			showMusicProblem(true);		// ("Try again" or "Play with the original music for now")
+			return;
+		}
+	}
+	hidePageUI();
+	startGame();
+}
+
+function retryRemasteredMusic(){
+	startGameWhenReady();
+}
+
+function skipRemasteredMusic(){
+	console.log('Music: the player starts with the original music');
+	showMusicProblem(false);
+	hidePageUI();
+	startGame();
+}
+
+function installS3kFile(fileInput) {
+    if (fileInput.files.length == 0)
+        return;
+    var file = fileInput.files[0];
+
+    var fr = new FileReader();
+    fr.onload = function () {
+        var data = new Uint8Array(fr.result);
+		var prompt = document.getElementById("s3kPromptMessage");
+		if(data.length != 4194304){
+			//Wrong size! No good!
+			prompt.innerText = "\"" + file.name + "\" is not the Sonic 3 & Knuckles ROM: that file is exactly 4 MB. Choose Sonic_Knuckles_wSonic3.bin.";
+			prompt.classList.add('error');
+			return;
+		}
+		else if(data[0x186] != 0x31 || data[0x187] != 0x35 || data[0x188] != 0x36 || data[0x189] != 0x33){
+			//MK-1563 is Sonic & Knuckles, which is attached to Sonic 3. If this is not in the header, the ROM is wrong.
+			prompt.innerText = "\"" + file.name + "\" is a 4 MB ROM, but not Sonic 3 & Knuckles. Choose Sonic_Knuckles_wSonic3.bin.";
+			prompt.classList.add('error');
+			return;
+		}
+		prompt.classList.remove('error');
+		prompt.innerText = "";
+
+		//If this call throws an exception with error code 20, it means the ROM already exists.
+		//But that shouldn't happen because we wouldn't be calling this if it already existed.
+        Module['FS_createDataFile']('/sonic3air/savedata/', 'Sonic_Knuckles_wSonic3.bin', data, true, true, true);
+		FS.syncfs(function (err) {
+			//Save into IndexedDB
+			var internalFolder = FS.analyzePath("/sonic3air/___internal/");
+			if(!internalFolder.exists){
+				FS.mkdir('/sonic3air/___internal/');
+			}
+			startGameWhenReady();
+  		});
+    };
+    fr.readAsArrayBuffer(file);
+}
+
+// The ROM can also be dropped anywhere on the page while the ROM screen shows
+document.addEventListener('dragover', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (!romScreen || romScreen.classList.contains('hidden')) return;
+	e.preventDefault();
+	romScreen.classList.add('dragging');
+});
+document.addEventListener('dragleave', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (romScreen && e.target === romScreen) romScreen.classList.remove('dragging');
+});
+document.addEventListener('drop', function (e) {
+	var romScreen = document.querySelector('.file_select');
+	if (!romScreen || romScreen.classList.contains('hidden')) return;
+	e.preventDefault();
+	romScreen.classList.remove('dragging');
+	if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0)
+		installS3kFile({ files: e.dataTransfer.files });
+});
+
+function triggerFileSelect(){
+	// Show the file upload dialog box. iOS requires the user to tap the input button themselves, it can't be invoked programmatically.
+	var fileUploadDiv = document.querySelector('.file_upload');
+	if (fileUploadDiv) {
+		fileUploadDiv.classList.remove('hidden');
+	}
+}
+
+function cancelFileSelect(){
+	var fileUploadDiv = document.querySelector('.file_upload');
+	if (fileUploadDiv) {
+		fileUploadDiv.classList.add('hidden');
+	}
+}
+
+function addFile(fileInput) {
+	if (fileInput.files.length == 0)
+		return;
+	var file = fileInput.files[0];
+
+	// Hide the file upload dialog box after selection
+	cancelFileSelect();
+
+	var uploadPath = window.__s3airFileUploadPath || '/sonic3air/savedata/';
+	if (uploadPath.endsWith('/') == false) {
+		uploadPath += '/';
+	}
+
+	var fr = new FileReader();
+	fr.onload = function () {
+		var data = new Uint8Array(fr.result);
+		Module['FS_createDataFile'](uploadPath, file.name, data, true, true, true);
+		FS.syncfs(function (err) {
+			if (!err) {
+				notifyFileImportDone();
+			}
+  		});
+	};
+	fr.readAsArrayBuffer(file);
+}
+
+function notifyFileImportDone() {
+	if (Module && Module._ImGuiFileBrowser_OnWebImportDone) {
+		Module._ImGuiFileBrowser_OnWebImportDone();
+		return;
+	}
+	if (Module && Module.ccall) {
+		try {
+			Module.ccall('ImGuiFileBrowser_OnWebImportDone', null, [], []);
+			return;
+		} catch (e) {
+			// Ignore and fall through.
+		}
+	}
+}
+
+function fileManagerPromptRename(oldName, currentPath, isFile) {
+	setTimeout(function() {
+		var title = isFile ? 'Rename file:' : 'Rename folder:';
+		var value = prompt(title, oldName);
+		if (value === null) {
+			return;
+		}
+		value = value.trim();
+		if (value.length === 0 || value === oldName) {
+			return;
+		}
+		if (/[\\/\*\?:\|<>\"]/.test(value)) {
+			return;
+		}
+		try {
+			FS.rename(currentPath + oldName, currentPath + value);
+			notifyFileImportDone();
+		} catch (e) {
+			console.warn('Rename failed:', e);
+		}
+	}, 0);
+}
+
+function fileManagerExportFile(filePath){
+	if (!filePath) {
+		return;
+	}
+
+	try {
+		var data = FS.readFile(filePath, { encoding: 'binary' });
+		var filename = filePath.split('/').filter(Boolean).pop() || 'download.bin';
+		var blob = new Blob([data], { type: 'application/octet-stream' });
+		var blobUrl = URL.createObjectURL(blob);
+
+		var link = document.createElement('a');
+		link.style.display = 'none';
+		link.href = blobUrl;
+		link.download = filename;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+
+		setTimeout(function () {
+			URL.revokeObjectURL(blobUrl);
+		}, 0);
+	} catch (e) {
+		console.warn('Export failed:', e);
+	}
+}
+</script>
+</head>
+<body>
+<div id="startup"><h2>Loading...</h2></div>
+<div class="spinner pageUI hidden" id=spinner></div>
+<div class="emscripten pageUI hidden" id=status>Downloading...</div>
+<div class="emscripten pageUI hidden"><progress hidden id=progress max=100 value=0></progress></div>
+<div class="file_select hidden">
+	<div class="rom-box">
+		<img class="rom-logo" src="ui_logo.png" width="180" height="24" alt="Sonic 3 AirNet">
+		<p>The game runs on your own copy of Sonic 3 &amp; Knuckles. Choose the ROM file <code>Sonic_Knuckles_wSonic3.bin</code>; it comes with the Steam version of the game for Windows, Mac and Linux.</p>
+		<p class="quiet">The file stays in this browser and is never uploaded. You only do this once.</p>
+		<span id="s3kPromptMessage" role="alert"></span>
+		<label for="fileSelector" class="fileSelector" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('fileSelector').click();}">Choose ROM file</label>
+		<input id="fileSelector" class="fileSelector" type="file" onChange="installS3kFile(this);"/>
+		<p class="quiet">Or drop the file anywhere on this page.</p>
+		<p class="quiet" id="romMusicNote" role="status" hidden></p>
+	</div>
+	<div class="rom-cast" aria-hidden="true"><img src="ui_sonic.png" width="40" height="40" alt=""><img src="ui_tails.png" width="40" height="40" alt=""></div>
+</div>
+<div class="file_upload hidden">
+	<div style="margin-bottom: 15px; font-size: 1.2em;">Select a file to import:</div>
+	<label for="fileUploadInput" id="fileUpload">
+	    Select File...
+	</label>
+	<input id="fileUploadInput" type="file" onChange="addFile(this);"/>
+	<button type="button" onclick="cancelFileSelect()" class="cancelButton">Cancel</button>
+</div>
+<div id="musicProblem" class="hidden" role="alert">
+	<p id="musicStatus"></p>
+	<div id="musicActions">
+		<button type="button" class="fileSelector" onclick="retryRemasteredMusic()">Try again</button>
+		<button type="button" class="musicSkip" onclick="skipRemasteredMusic()">Play with the original music for now</button>
+	</div>
+</div>
+<div class="restart hidden">
+	<button type="button" onclick="location.reload()">Restart Game</button>
+</div>
+<div id="root" class="hidden"></div>
+<div id="gameView" class="emscripten_border">
+	<canvas class="emscripten" id=canvas oncontextmenu=event.preventDefault() tabindex=-1></canvas>
+</div>
+<div id="ios_workaround" class="hidden" onclick="hideIOSoverlay()">
+	Tap to Start
+</div>
+<script>
+var statusElement = document.getElementById("status"),
+    progressElement = document.getElementById("progress"),
+    spinnerElement = document.getElementById("spinner");
+var Module = {
+    preRun: function(){
+		onPageLoaded();
+    },
+    postRun: [],
+	onExit: function(){
+		onGameExit();
+	},
+	noInitialRun: true,
+    printErr: function(e) {
+        arguments.length > 1 && (e = Array.prototype.slice.call(arguments).join(" ")), console.error(e)
+    },
+    canvas: function() {
+        var e = document.getElementById("canvas");
+        return e.addEventListener("webglcontextlost", (function(e) {
+            alert("WebGL context lost. You will need to reload the page."), e.preventDefault()
+        }), !1), e
+    }(),
+    setStatus: function(e) {
+        if (Module.setStatus.last || (Module.setStatus.last = {
+                time: Date.now(),
+                text: ""
+            }), e !== Module.setStatus.last.text) {
+            var t = e.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/),
+                n = Date.now();
+            t && n - Module.setStatus.last.time < 30 || (Module.setStatus.last.time = n, Module.setStatus.last.text = e, t ? (e = t[1], progressElement.value = 100 * parseInt(t[2]), progressElement.max = 100 * parseInt(t[4]), progressElement.hidden = !1, spinnerElement.hidden = !1) : (progressElement.value = null, progressElement.max = null, progressElement.hidden = !0, e || (spinnerElement.style.display = "none")), statusElement.innerHTML = e)
+        }
+    },
+    totalDependencies: 0,
+    monitorRunDependencies: function(e) {
+        this.totalDependencies = Math.max(this.totalDependencies, e), Module.setStatus(e ? "Preparing... (" + (this.totalDependencies - e) + "/" + this.totalDependencies + ")" : "All downloads complete.")
+        if(!e){
+            if(FS.analyzePath("/sonic3air/config.json", true).exists === true){
+                //Done downloading or retrieving from IDBFS the game data
+                FS.mkdir('/sonic3air/savedata');
+                FS.mount(IDBFS, {}, '/sonic3air/savedata');
+				FS.syncfs(true, function(err) {
+					if(err) {
+						console.warn('IDBFS sync error:', err);
+					}
+					onDownloadsComplete();
+				});
+            }
+        }
+    }
+};
+Module.setStatus("Downloading..."), window.onerror = function(e) {
+    Module.setStatus("Exception thrown, see JavaScript console"), spinnerElement.style.display = "none", Module.setStatus = function(e) {
+        e && Module.printErr("[post-exception status] " + e)
+    }
+}
+</script>
+<script src="relay_config.js"></script>
+<script async src=sonic3air_web.js></script>
+</body>
+</html>

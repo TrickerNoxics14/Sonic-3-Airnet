@@ -1,0 +1,19 @@
+{
+  "file": "audioremaster.bin",
+  "size": 131677405,
+  "sha256": "55f460dd9a3516494e56abcd39e687fff4a75011d66eafcd83c1490a8e254fa4",
+  "parts": [
+    {
+      "file": "audioremaster.part1",
+      "size": 43892469
+    },
+    {
+      "file": "audioremaster.part2",
+      "size": 43892469
+    },
+    {
+      "file": "audioremaster.part3",
+      "size": 43892467
+    }
+  ]
+}
