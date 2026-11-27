@@ -756,6 +756,8 @@ namespace
 			report("characters: names are plain text, known extra slots have their own name, the others are called after the slot",
 				getCharacterName(CHARACTER_SONIC) == "SONIC" && getCharacterName(CHARACTER_TAILS) == "TAILS" && getCharacterName(CHARACTER_KNUCKLES) == "KNUCKLES" &&
 				getCharacterName(makeExtraCharacter(35)) == "MODERN SONIC" && getCharacterName(makeExtraCharacter(90)) == "RETO" && getCharacterName(makeExtraCharacter(201)) == "EXTRA 201" && getCharacterName(0x7777) == "?");
+			report("characters: the lobby's player rows call a pick in the game's own menu \"ANY\" (not \"GAME MENU\"), the others by their name",
+				getCharacterLabel(CHARACTER_MENU) == "ANY" && getCharacterLabel(CHARACTER_SONIC) == "SONIC" && getCharacterLabel(makeExtraCharacter(35)) == "MODERN SONIC" && getCharacterLabel(makeExtraCharacter(201)) == "EXTRA 201");
 		}
 
 		// What each player may pick: with no extra-slot mod, only the three stock characters can be picked

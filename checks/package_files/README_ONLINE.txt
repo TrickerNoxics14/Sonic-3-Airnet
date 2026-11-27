@@ -52,14 +52,14 @@ This build is based on the official stable Sonic 3 A.I.R. 26.03.28.0.
 
 Main menu -> ONLINE. The first screen offers:
 
-  PUBLIC LOBBIES  The list of open lobbies (name, host, players, open /
-                  playing / full, version). Choose one and press A. Lobbies of
-                  another game version or with other mods are greyed out.
-                  REFRESH and the SHOW filter (all lobbies, or only those that
-                  fit your version) are below the list; it also refreshes
-                  itself.
-  QUICK JOIN      Joins the best open lobby for your version (the fullest one
-                  that is still waiting for players).
+  FIND A LOBBY    QUICK JOIN at the top joins the best open lobby for your
+                  version (the fullest one that is still waiting for players).
+                  Below it is the list of open lobbies (name, host, players,
+                  open / playing / full, version). Choose one and press A.
+                  Lobbies of another game version or with other mods are
+                  greyed out. REFRESH and the SHOW filter (all lobbies, or
+                  only those that fit your version) are below the list; it
+                  also refreshes itself.
   CREATE LOBBY    NAME, LOBBY (PUBLIC = listed, PRIVATE = joined only with its
                   code), PLAYERS (2 to 4), then OPEN LOBBY.
   JOIN WITH CODE  Numbers only: 6 digits = a lobby code, 13 digits = a long
@@ -70,9 +70,11 @@ Main menu -> ONLINE. The first screen offers:
                   GAME shows a long code, JOIN A LAN GAME takes it.
   SETTINGS        Your NAME, the LOBBY SERVER and the RELAY SERVER.
 
-In the lobby the host sees the code (COPY CODE puts it on the clipboard).
-Friends press READY, the host presses START GAME and picks Normal Game (or Act
-Select) and a save as usual; everybody joins as soon as the game starts.
+In the lobby the code is shown at the top right (OPTIONS > COPY CODE puts it
+on the clipboard). The players are listed on the right with their character,
+ping and READY state, the chat below them. Friends press READY, the host
+presses START GAME and picks Normal Game (or Act Select) and a save as usual;
+everybody joins as soon as the game starts.
 Back keeps the lobby open, LEAVE LOBBY closes it. The first time you host,
 Windows may ask whether the game may use the network: choose Allow.
 
@@ -125,17 +127,21 @@ across both.
  4. IN THE LOBBY
 ------------------------------------------------------------------------------
 
+  CHARACTER   Left/Right picks your character. ANY means the character is
+              chosen in the game's own menu.
+  OPTIONS     Input delay (host), KICK (host, only when a friend is there),
+              your NAME and COPY CODE (host).
   NAME        The name the others see (12 plain characters, default
               "Player"), saved in settings.json (Online, PlayerName). It is
               shown in the lobby and on the labels below the screens.
   PING        Each friend's round-trip time is shown next to their name
               (measured by the host about once a second). The host gets a red
               warning when somebody is above 150 ms.
-  CHAT        SAY sends a quick message: Left/Right picks one of 12, the last
-              choice, WRITE A MESSAGE, takes a short text (up to 40 plain
+  CHAT        Sends a quick message: Left/Right picks one of 12, the last
+              choice, "Write a message...", takes a short text (up to 40 plain
               characters). One message per 1.2 seconds per player.
-  KICK        (Host) Removes a friend, who cannot come back for a minute. This
-              is a short block, not a ban.
+  KICK        (Host, in OPTIONS) Removes a friend, who cannot come back for
+              a minute. This is a short block, not a ban.
   START       If somebody is not ready when the host presses START GAME,
               they get a prompt and 20 seconds. Then the game starts without
               them (or at once if the host presses START GAME again); they can

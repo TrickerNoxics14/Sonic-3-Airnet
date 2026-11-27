@@ -257,6 +257,7 @@ export class Instance {
 	/** From the ONLINE menu's first screen: CREATE LOBBY, then OPEN LOBBY with the defaults (public), or as a private lobby (not on the public list: the only kind
 	 *  that makes direct connections). */
 	async createLobby({ privateLobby = false } = {}) {
+		await this.toStart();
 		await this.choose('CREATE LOBBY', { screen: 'START' });
 		if (privateLobby) {
 			await this.choose('LOBBY', { screen: 'CREATE', press: false });
@@ -266,23 +267,42 @@ export class Instance {
 		await this.choose('OPEN LOBBY', { screen: 'CREATE' });
 	}
 
+	/** Back to the ONLINE menu's first screen from one of its sub screens (a failed QUICK JOIN, for one, stays on the list it was started from). */
+	async toStart() {
+		if (['LIST', 'CREATE', 'SETTINGS', 'LAN', 'JOIN'].includes(this.lastScreen)) {
+			await this.key('Escape');
+			const end = Date.now() + 8000;
+			while (Date.now() < end && this.lastScreen !== 'START') await sleep(100);
+			await sleep(300);
+		}
+	}
+
 	/** From the ONLINE menu's first screen to the code screen (JOIN WITH CODE). */
 	async openJoin() {
+		await this.toStart();
 		await this.choose('JOIN WITH CODE', { screen: 'START' });
 	}
 
-	/** From the ONLINE menu's first screen to the list of public lobbies. */
+	/** From the ONLINE menu's first screen to the list of public lobbies (FIND A LOBBY); from the list itself it goes back and opens it again. */
 	async openList() {
-		await this.choose('PUBLIC LOBBIES', { screen: 'START' });
+		await this.toStart();
+		await this.choose('FIND A LOBBY', { screen: 'START' });
 	}
 
-	/** From the ONLINE menu's first screen: QUICK JOIN. */
+	/** QUICK JOIN: the first row of the list (FIND A LOBBY). */
 	async quickJoin() {
-		await this.choose('QUICK JOIN', { screen: 'START' });
+		const shows = () => this.allLogs.filter((l) => /Lobby: the list shows/.test(l)).length;
+		const before = shows();
+		await this.openList();
+		// (the first list that arrives puts the cursor on the first lobby that can be joined: wait for it, a few seconds at most, a server that is down sends none)
+		const end = Date.now() + 4000;
+		while (Date.now() < end && shows() === before) await sleep(100);
+		await this.choose('QUICK JOIN', { screen: 'LIST', direction: 'Up' });
 	}
 
 	/** From the ONLINE menu's first screen to the online settings. */
 	async openSettings() {
+		await this.toStart();
 		await this.choose('SETTINGS', { screen: 'START' });
 	}
 

@@ -30,7 +30,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,K,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,K,O,N').split(',');
 const withNative = args.includes('--native');
 const webDir = args.includes('--web-dir') ? path.resolve(args[args.indexOf('--web-dir') + 1]) : path.join(root, 'web_build');
 
@@ -998,6 +998,18 @@ async function sessionL1() {
 		await shotSizes(friend, 'list');
 		check('L1b', 'browser B opens PUBLIC LOBBIES and the list shows the lobby of A', seen, seen ?? friend.allLogs.slice(-5).join(' | '));
 
+		// L1q: QUICK JOIN is the first row of the list, and the cursor stays on it when the list refreshes by itself (every 8 s)
+		{
+			const firstLabel = friend.lastSelected;		// (where the cursor is once the list has arrived)
+			await friend.choose('QUICK JOIN', { direction: 'Up', press: false }).catch(() => {});
+			const onQuick = friend.lastSelected === 'QUICK JOIN';
+			const shows = () => friend.allLogs.filter((l) => /Lobby: the list shows/.test(l)).length;
+			const before = shows();
+			await waitFor(() => shows() > before, 15000, 200);
+			await sleep(500);
+			check('L1q', 'the list opens on the lobby that can be joined, QUICK JOIN is the row above it, and a refresh of the list keeps the cursor on QUICK JOIN', /^ROW /.test(firstLabel ?? '') && onQuick && shows() > before && friend.lastSelected === 'QUICK JOIN', `first: ${firstLabel}, on quick join: ${onQuick}, refreshed: ${shows() > before}, now: ${friend.lastSelected}`);
+		}
+
 		// quick join from the first screen
 		await friend.key('Escape');
 		await friend.waitLog(/Lobby: screen START/, 8000);
@@ -1366,6 +1378,92 @@ async function sessionL7() {
 		await friend.key('Return');
 		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
 		check('L7c', 'the friend joins that lobby with the long code through the same server', proved);
+	} finally { await h.close(); await R.stop(); }
+}
+
+// Session O: the lobby's OPTIONS screen (input delay, kick, name, copy code are there, not in the lobby itself), and the code at the top of a public lobby
+async function sessionO() {
+	console.log('--- session O: the lobby OPTIONS screen (alone and with a friend), and the code shown at the top of a public lobby');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 2, seeds: [0x4f, 0x50], basePort: 9510 });
+	// Moves the cursor down through all entries once and returns the labels it saw
+	const walkLabels = async (inst) => {
+		const seen = [];
+		for (let i = 0; i < 9; ++i) {
+			seen.push(inst.lastSelected);
+			const before = inst.selectionCount;
+			await inst.key('Down');
+			await waitFor(() => inst.selectionCount !== before, 1500, 50);
+		}
+		return [...new Set(seen.filter(Boolean))];
+	};
+	try {
+		const [host, friend] = h.instances;
+		const query = relayQuery(R.ports.port);
+		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
+
+		// O1: alone in a public lobby
+		await host.toLobby();
+		host.forgetLogs();
+		await host.createLobby();
+		await host.waitLog(/Lobby: screen HOSTING/, 10000);
+		await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
+		await sleep(2000);
+		await shot(host, 'O_room_alone');
+		const roomLabels = await walkLabels(host);
+		check('O1a', 'the host\'s lobby has the buttons START GAME, CHARACTER, CHAT, OPTIONS and LEAVE LOBBY (input delay, kick, name and copy code moved to OPTIONS)', ['START GAME', 'CHARACTER', 'CHAT', 'OPTIONS', 'LEAVE LOBBY'].every((l) => roomLabels.includes(l)) && !roomLabels.some((l) => /INPUT DELAY|KICK|^NAME|COPY CODE/.test(l)), roomLabels.join(', '));
+		check('R1', 'a public lobby shows its short code at the top, never the long code', host.hasLog(/Lobby: header code short/) && !host.hasLog(/Lobby: header code long/), host.allLogs.filter((l) => /header code/.test(l)).join(' | ') || 'no header code line');
+		host.forgetLogs();
+		await host.choose('OPTIONS', { screen: 'HOSTING' });
+		const opened = await host.waitLog(/Lobby: screen OPTIONS/, 8000);
+		await sleep(600);
+		await shot(host, 'O_options_alone');
+		const aloneLabels = await walkLabels(host);
+		check('O1b', 'alone in the lobby, OPTIONS has INPUT DELAY and NAME, and no KICK (nobody to kick)', !!opened && aloneLabels.includes('INPUT DELAY') && aloneLabels.includes('NAME') && !aloneLabels.includes('KICK'), aloneLabels.join(', '));
+		host.forgetLogs();
+		await host.choose('BACK', { screen: 'OPTIONS' });
+		check('O1c', 'BACK in OPTIONS goes back to the lobby', !!(await host.waitLog(/Lobby: screen HOSTING/, 8000)));
+
+		// O2: a friend joins: now the host's OPTIONS has KICK; the friend changes its name from its OPTIONS and stays in the lobby
+		await friend.toLobby();
+		friend.forgetLogs();
+		await friend.quickJoin();
+		const joined = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
+		await sleep(3000);
+		await shot(host, 'O_room_two');
+		await shot(friend, 'O_room_friend');
+		host.forgetLogs();
+		await host.choose('OPTIONS', { screen: 'HOSTING' });
+		await host.waitLog(/Lobby: screen OPTIONS/, 8000);
+		await sleep(600);
+		await shot(host, 'O_options_host');
+		const hostLabels = await walkLabels(host);
+		check('O2a', 'with a friend in the lobby the host\'s OPTIONS has KICK', !!joined && hostLabels.includes('KICK'), `${joined ? 'joined' : 'not joined'} | ${hostLabels.join(', ')}`);
+		await host.choose('BACK', { screen: 'OPTIONS' });
+		friend.forgetLogs();
+		await friend.choose('OPTIONS', { screen: 'JOINED' });
+		await friend.waitLog(/Lobby: screen OPTIONS/, 8000);
+		await sleep(600);
+		await shot(friend, 'O_options_friend');
+		friend.forgetLogs();
+		await friend.choose('NAME', { screen: 'OPTIONS' });
+		await friend.waitLog(/Lobby: screen TEXT/, 8000);
+		await sleep(500);
+		await friend.type('Z');
+		await sleep(300);
+		await friend.key('Return');
+		const renamed = await friend.waitLog(/Netplay: the player name is now "/, 8000);
+		const back = await friend.waitLog(/Lobby: screen OPTIONS/, 8000);
+		await sleep(1500);
+		check('O2b', 'a friend changes its name from OPTIONS: back on OPTIONS afterwards, and still in the lobby', !!renamed && !!back && !friend.hasLog(/Lobby: screen START/) && R.entries()[0]?.players === 2, `${renamed ?? 'no rename'} | ${back ? 'back on OPTIONS' : 'not back on OPTIONS'} | players ${R.entries()[0]?.players}`);
+
+		// O3: the host leaves while the friend is in OPTIONS: the friend is told why, on the first screen
+		friend.forgetLogs();
+		await host.leaveLobby();
+		const told = await friend.waitLog(/Lobby: screen START/, 90000);
+		await sleep(800);
+		check('O3', 'the host leaves while the friend is in OPTIONS: the friend gets back to the first screen with a message', !!told && lobbyMenuMessage(friend).length > 0, `${told ?? 'still in OPTIONS'} | ${lobbyMenuMessage(friend)}`);
+		await shot(friend, 'O_host_left');
 	} finally { await h.close(); await R.stop(); }
 }
 
@@ -1815,6 +1913,7 @@ try {
 	if (only.includes('T') || only.includes('T6')) await sessionT6(relay);
 	if (only.includes('M')) await sessionM();
 	if (only.includes('K')) await sessionK();
+	if (only.includes('O')) await sessionO();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
 	}

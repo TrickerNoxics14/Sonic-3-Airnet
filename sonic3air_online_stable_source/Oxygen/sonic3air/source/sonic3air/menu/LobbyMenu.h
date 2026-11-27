@@ -12,6 +12,7 @@
 #include "oxygen/network/netplay/NetplayFailure.h"
 #include "oxygen_netcore/network/DirectoryProtocol.h"
 #include "oxygen/application/input/InputManager.h"
+#include "sonic3air/menu/helper/GameMenuControlsDisplay.h"
 
 class MenuBackground;
 
@@ -22,7 +23,8 @@ class MenuBackground;
 //  - join with a code: 6 digits (a lobby of the lobby server) or 13 digits (a long code, which also works without any server of ours, on the same network),
 //  - play on the same network without any server (LAN GAME),
 //  - set the player name, the lobby server and the relay server.
-// In a lobby: player names with their ping and character, ready state, quick chat, the host's input delay setting, kicking a player, and a ready check with a time limit.
+// In a lobby: player names with their ping and character, ready state, quick chat, and a ready check with a time limit; its OPTIONS screen has the host's input delay
+// setting, kicking a player, the player name and copying the code.
 // When everybody is ready, the host starts the game as usual (Normal Game, Act Select, ...) and the friends follow.
 class LobbyMenu : public GameMenuBase
 {
@@ -53,8 +55,8 @@ private:
 
 	enum class Screen
 	{
-		HOME,		// The first screen: public lobbies, quick join, create, join with a code, LAN, settings
-		LIST,		// The public lobbies
+		HOME,		// The first screen: find a lobby, create one, join with a code, LAN, settings
+		LIST,		// Find a lobby: quick join, and the public lobbies
 		JOIN,		// Typing a code (number pad)
 		CREATE,		// Name, public or private, number of players
 		LAN,		// Play on the same network, without any server
@@ -62,7 +64,8 @@ private:
 		SEARCHING,	// Waiting for the lobby server (quick join, looking up a code)
 		HOSTING,	// In a lobby as the host
 		JOINED,		// In a lobby as a friend
-		TEXT		// Typing a player name, a lobby name, an address or a chat line
+		TEXT,		// Typing a player name, a lobby name, an address or a chat line
+		OPTIONS		// In a lobby: its options (input delay, kick, name, copy code)
 	};
 
 	enum class TextMode
@@ -120,7 +123,16 @@ private:
 	void changeCharacter(int step);
 	std::string getServerStatusLine(uint32& outColorKind) const;
 	std::string getNoServerMessage() const;
+	bool isRoomScreen() const;
+	bool isEntryEnabled(uint32 data) const;
+	void drawHeader(Drawer& drawer, int anchorX, float alpha, const std::string& title, const std::string& rightText);
+	void drawPanel(Drawer& drawer, const Recti& rect, float alpha);
+	void drawRow(Drawer& drawer, Font& font, int centerX, int y, const std::string& text, bool selected, bool enabled, float alpha);
+	void drawValueRow(Drawer& drawer, int centerX, int y, const std::string& label, const std::string& value, bool selected, bool changeable, bool enabled, float alpha);
+	int drawEntryRows(Drawer& drawer, int centerX, int y, int step, size_t first, size_t last, float alpha);
+	void renderControlsDisplay(Drawer& drawer, float alpha);
 	void renderBrowserScreen(Drawer& drawer, int anchorX, float alpha);
+	void renderRoom(Drawer& drawer, int anchorX, float alpha);
 	void renderCodeKeypad(Drawer& drawer, int anchorX, float alpha, int top);
 
 private:
@@ -135,6 +147,9 @@ private:
 	bool mWasWaking = false;			// Browser build: the lobby server did not answer and is being retried (it may be asleep), as of the last frame
 	size_t mLoggedCodeDigits = 0;		// What the log says about the code screen (the automated checks read it)
 	std::string mLoggedSelection;		// What the log says about the selected entry, "screen|label" (the automated checks pick entries by label)
+	std::string mLoggedHeaderCode;		// What the log says about the code at the top of the lobby: "short", "long" or "none"
+	bool mKickAvailable = false;		// The host's OPTIONS screen shows KICK (somebody is there to be kicked)
+	GameMenuControlsDisplay mControlsDisplay;
 	std::string mMessage;		// Shown to the player, e.g. why joining failed
 	bool mShowCopied = false;
 	int mQuickIndex = 1;		// Quick chat message 1 to 12, or 13 for "write a message"

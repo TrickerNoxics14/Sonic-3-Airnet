@@ -536,6 +536,12 @@ namespace NetplayLobby
 		return "?";
 	}
 
+	// The name in the lobby's player rows: a player who picks the character in the game's own menu (Data Select) is shown as "ANY", not as "GAME MENU"
+	inline std::string getCharacterLabel(uint16 id)
+	{
+		return (id == CHARACTER_MENU) ? std::string("ANY") : getCharacterName(id);
+	}
+
 	// The characters that are installed: the three stock ones, plus the extra slots whose script function was found (sorted, no duplicates, bounded)
 	class CharacterList
 	{

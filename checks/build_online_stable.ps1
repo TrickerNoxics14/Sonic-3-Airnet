@@ -21,6 +21,12 @@ if ($LASTEXITCODE -ne 0 -and (Select-String -LiteralPath $logPath -Pattern "C100
     $env:_LINK_ = "/PDBALTPATH:%_PDB% /cgthreads:1"
     & $msbuild $solution "/target:sonic3air" /p:Configuration=Release /p:Platform=x64 /m:1 /nologo /verbosity:minimal "/flp:logfile=$logPath;verbosity=minimal"
 }
+elseif ($LASTEXITCODE -ne 0 -and (Select-String -LiteralPath $logPath -Pattern "C1004|C1060" -Quiet)) {
+    # With many compilers at once the compiler can run out of memory: "out of heap space" (C1060) or a header read only in part, "unexpected end-of-file" (C1004),
+    # in a file nobody touched. The objects it left behind can be broken (a precompiled header that does not link), so build everything again, one project at a time.
+    Write-Warning "The compiler ran out of memory in the parallel build (C1004 / C1060); building again from scratch, one project at a time"
+    & $msbuild $solution "/target:sonic3air:Rebuild" /p:Configuration=Release /p:Platform=x64 /m:1 /nodeReuse:false /nologo /verbosity:minimal "/flp:logfile=$logPath;verbosity=minimal"
+}
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Stable online fork build failed (exit $LASTEXITCODE). See $logPath"
     exit $LASTEXITCODE

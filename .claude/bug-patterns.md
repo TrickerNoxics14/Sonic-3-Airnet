@@ -777,3 +777,17 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `git grep -nE 'InputFieldMenuEntry|keys\.(A|B|X|Back)\.justPressed' -- 'sonic3air_online_stable_source/Oxygen/sonic3air/source/*.cpp'`
 - Siblings: LobbyMenu.cpp TEXT screen (name, lobby name, chat, relay and lobby server address) fixed (key-down of a printable key, Backspace or Delete marks the frame as typing; Back is ignored then, a controller's B still leaves the field) · LobbyMenu.cpp JOIN screen letters fixed (the guard used only the typed character; now the key-down marks the frame too) · LobbyMenu.cpp JOIN screen Backspace fixed (deletes digits and no longer leaves the screen when none is left (Escape and B still leave)) · mods/ModsMenu.cpp filter field not a bug (compiled out (#if 0), and its update already takes only Up/Down while a field is selected) · ImGui fields (F9 window) not a bug (InputManager does not turn keys into buttons while ImGui captures the keyboard)
 - Guard: web_net session K (K1 name with S and A, K2 Backspace in the name, K3 Backspace on the code screen): RED before (0/3, and K3 alone with only its fix reverted), GREEN after
+
+## 2026-11-27 · text-cut-by-letter-count · cpp
+- Seed: sonic3air/menu/LobbyMenu.cpp (lobby list) - shorten(entry.mName, 19): a lobby name of 20 W ran over the HOST and PLAYERS columns
+- Broken assumption: a limit in letters keeps a text inside its column (letters have different widths: W is about twice as wide as i)
+- Search: `grep -n 'shorten(' sonic3air_online_stable_source/Oxygen/sonic3air/source/sonic3air/menu/LobbyMenu.cpp  (every shorten() whose result is drawn)`
+- Siblings: LobbyMenu.cpp list host column fixed (fitText 60 px) · LobbyMenu.cpp room player name, chat line, header title, value rows fixed (fitText (new code)) · LobbyMenu.cpp server status line (shorten 70) fixed (close to the edge with a 30 letter server name, now fitText 380 px) · LobbyMenu.cpp Joining "name" (shorten 20) fixed (close to the edge, now fitText 150 px) · LobbyMenu.cpp Playing as, warnings with a 12 letter name, character notice not a bug (the name is capped at 12 letters and the line fits with 12 W) · scripts/general/netplay_labels.lemon in-game name labels not a bug (not cut; 12 W in oxyfont_tiny fit the label space)
+- Guard: fitText(font, text, maxWidth) in LobbyMenu.cpp cuts by pixel width; checks/web_net/lobby_screens_tour.mjs draws every screen with 12/20 W names for a look by eye (no automated pixel test)
+
+## 2026-11-27 · parallel-build-out-of-memory · powershell
+- Seed: checks/build_online_stable.ps1 - msbuild /m: C1004 unexpected end-of-file and C1060 out of heap space in untouched headers, then LNK2011 from a broken pch.obj
+- Broken assumption: a failed parallel build only needs the same build again; the script only retried C1001
+- Search: `grep -n 'C1001\|C1004\|C1060\|/m' checks/build_*.ps1`
+- Siblings: checks/build_online_stable.ps1 fixed (C1004/C1060 now rebuild from scratch with /m:1) · checks/build_web.ps1 not a bug (already re-runs ninja after a crashed clang/wasm-opt) · checks/build_android.ps1 not a bug (Android work is stopped)
+- Guard: the retry branch in build_online_stable.ps1 (seen working: the /m:1 rebuild passed after three parallel failures)
