@@ -104,6 +104,8 @@ private:
 	void openTextScreen(TextMode mode, Screen returnTo);
 	void sendQuickChat();
 	void updateEntryTexts();
+	std::string getSelectionLabel();
+	void logSelection();
 	void updateTestHooks(float timeElapsed);
 	void updateBrowserInput();
 	void updateJoinScreenInput(const InputManager::ControllerScheme& keys);
@@ -132,6 +134,7 @@ private:
 	float mRelayWaitSeconds = 0.0f;		// Browser build: how long the host has been waiting for the relay server to know its lobby
 	bool mWasWaking = false;			// Browser build: the lobby server did not answer and is being retried (it may be asleep), as of the last frame
 	size_t mLoggedCodeDigits = 0;		// What the log says about the code screen (the automated checks read it)
+	std::string mLoggedSelection;		// What the log says about the selected entry, "screen|label" (the automated checks pick entries by label)
 	std::string mMessage;		// Shown to the player, e.g. why joining failed
 	bool mShowCopied = false;
 	int mQuickIndex = 1;		// Quick chat message 1 to 12, or 13 for "write a message"

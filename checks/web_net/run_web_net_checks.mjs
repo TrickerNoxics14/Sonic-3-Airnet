@@ -409,11 +409,18 @@ async function sessionK() {
 		const [b] = h.instances;
 		await bootPage(b, h.baseURL, relayQuery(R.ports.port));
 		await b.toLobby();
+		// K0: the menu says which entry is selected (the checks pick entries by their label, not by counting key presses)
+		{
+			let found = false;
+			try { found = await b.choose('SETTINGS', { screen: 'START', press: false }); } catch (e) { found = false; }
+			check('K0', 'the lobby menu logs the selected entry ("Lobby: selected SETTINGS" after moving down to it)', found && b.lastSelected === 'SETTINGS', `selected: ${b.lastSelected}`);
+			await b.choose('PUBLIC LOBBIES', { direction: 'Up', press: false }).catch(() => {});
+		}
 		// K1: SETTINGS > NAME, add " Sam" (S and A are the B and A buttons of the default keyboard layout), Enter saves
 		b.forgetLogs();
-		await b.keys(['Down', 'Down', 'Down', 'Down', 'Return'], 400);		// SETTINGS
+		await b.openSettings();
 		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
-		await b.key('Return');		// NAME
+		await b.choose('NAME', { screen: 'SETTINGS' });
 		await b.waitLog(/Lobby: screen TEXT/, 8000);
 		await sleep(500);
 		await b.type(' Sam');
@@ -484,7 +491,7 @@ async function sessionW() {
 					check('W1a', 'the Windows game hosts a public lobby: it registers and is listed at the relay over a WebSocket (the relay has no UDP)', !!listed && R.core.stats.lobbies >= 1, `${JSON.stringify(listed && { code: listed.code, host: listed.host })} | ${native.mainLog().split('\n').filter((l) => /WebSocket|relay server|lobby server/i.test(l)).slice(-4).join(' | ')}`);
 					await b.toLobby();
 					b.forgetLogs();
-					await b.keys(['Down', 'Return'], 500);		// QUICK JOIN
+					await b.quickJoin();		// QUICK JOIN
 					const joined = await b.waitLog(/the host proved the code, player slot 2/, 60000);
 					check('W1b', 'a browser finds the Windows host\'s lobby with QUICK JOIN and joins it', !!joined, joined ?? b.allLogs.filter((l) => /Lobby|Netplay/.test(l)).slice(-5).join(' | '));
 					await sleep(2500);
@@ -984,7 +991,7 @@ async function sessionL1() {
 		// B opens PUBLIC LOBBIES and sees it
 		await friend.toLobby();
 		friend.forgetLogs();
-		await friend.key('Return');
+		await friend.openList();
 		await friend.waitLog(/Lobby: screen LIST/, 8000);
 		const seen = await friend.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
 		await sleep(800);
@@ -995,7 +1002,7 @@ async function sessionL1() {
 		await friend.key('Escape');
 		await friend.waitLog(/Lobby: screen START/, 8000);
 		friend.forgetLogs();
-		await friend.keys(['Down', 'Return'], 500);
+		await friend.quickJoin();
 		const picked = await friend.waitLog(/Lobby: quick join picks the lobby "My lobby" \(1\/4\)/, 15000);
 		const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
 		check('L1c', 'QUICK JOIN picks the lobby from the list and B ends up in it as player 2 (code proof both ways through the relay)', picked && proved, `${picked ?? 'no pick'} | ${proved ?? 'not joined'}`);
@@ -1025,9 +1032,7 @@ async function sessionL2() {
 		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
 		await host.toLobby();
 		host.forgetLogs();
-		await host.keys(['Down', 'Down', 'Return'], 600);		// CREATE LOBBY
-		await host.waitLog(/Lobby: screen CREATE/, 8000);
-		await host.keys(['Down', 'Right', 'Down', 'Down', 'Return'], 600);		// LOBBY: public -> private, then OPEN LOBBY
+		await host.createLobby({ privateLobby: true });
 		await host.waitLog(/Lobby: screen HOSTING/, 10000);
 		const entry = await waitFor(() => R.entries().find((e) => e.code), 20000);
 		check('L2a', 'a private lobby gets its 6 digit code from the server but is not in the public list', entry && !entry.isPublic, JSON.stringify(entry && { code: entry.code, isPublic: entry.isPublic }));
@@ -1035,7 +1040,7 @@ async function sessionL2() {
 
 		await friend.toLobby();
 		friend.forgetLogs();
-		await friend.key('Return');
+		await friend.openList();
 		await friend.waitLog(/Lobby: screen LIST/, 8000);
 		await friend.waitLog(/Lobby: the list shows 0 public lobbies/, 15000);
 		await sleep(500);
@@ -1043,7 +1048,7 @@ async function sessionL2() {
 		await friend.key('Escape');
 		await friend.waitLog(/Lobby: screen START/, 8000);
 		friend.forgetLogs();
-		await friend.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		await friend.quickJoin();		// QUICK JOIN
 		const none = await friend.waitLog(/Lobby: the lookup ended: There is no open lobby for your version/, 20000);
 		await sleep(800);
 		check('L2b', 'the private lobby is not listed: B\'s list is empty and QUICK JOIN says there is no open lobby (it does not join a private one)', none && lobbyMenuMessage(friend).startsWith('There is no open lobby'), lobbyMenuMessage(friend));
@@ -1077,13 +1082,13 @@ async function sessionL3() {
 		await bootPage(b, h.baseURL, relayQuery(R.ports.port));
 		await b.toLobby();
 		// (pictures of two more screens while here: CREATE LOBBY and the settings, which in a browser hold the relay server and no lobby server)
-		await b.keys(['Down', 'Down', 'Return'], 500);
+		await b.choose('CREATE LOBBY', { screen: 'START' });
 		await b.waitLog(/Lobby: screen CREATE/, 8000);
 		await sleep(600);
 		await shotSizes(b, 'create', [[0, 0, ''], [640, 360, '_small']]);
 		await b.key('Escape');
 		await b.waitLog(/Lobby: screen START/, 8000);
-		await b.keys(['Down', 'Down', 'Down', 'Down', 'Return'], 500);
+		await b.openSettings();
 		await b.waitLog(/Lobby: screen SETTINGS/, 8000);
 		await sleep(600);
 		await shotSizes(b, 'settings', [[0, 0, ''], [640, 360, '_small']]);
@@ -1127,7 +1132,7 @@ async function sessionL3() {
 		b.forgetLogs();
 		await b.key('Escape');
 		const home = await b.waitLog(/Lobby: screen START/, 8000);
-		await b.key('Return');
+		await b.openList();
 		const list = await b.waitLog(/Lobby: screen LIST/, 8000);
 		check('L3e', 'after the lockout the menu still works (back to the first screen, PUBLIC LOBBIES opens)', home && list);
 	} finally { await h.close(); await R.stop(); }
@@ -1149,7 +1154,7 @@ async function sessionL4() {
 		await bootPage(b, h.baseURL, relayQuery(port));
 		await b.toLobby();
 		b.forgetLogs();
-		await b.keys(['Down', 'Return'], 500);		// QUICK JOIN while the server does not answer
+		await b.quickJoin();		// QUICK JOIN while the server does not answer
 		const waking = await b.waitLog(/Lobby: waking the server/, 12000);
 		const t0 = Date.now();
 		await sleep(14000);
@@ -1192,7 +1197,7 @@ async function sessionL5() {
 		await b.toLobby();
 		b.forgetLogs();
 		const t0 = Date.now();
-		await b.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		await b.quickJoin();		// QUICK JOIN
 		const ended = await b.waitLog(/Lobby: the lookup ended: The lobby server does not answer/, 90000);
 		const seconds = (Date.now() - t0) / 1000;
 		check('L5a', 'a server that stays down: after about a minute of retries QUICK JOIN says the lobby server does not answer (not before 50 s, not after 75 s)', ended && seconds > 50 && seconds < 75, `${ended ?? 'no end'} after ${Math.round(seconds)} s`);
@@ -1202,7 +1207,7 @@ async function sessionL5() {
 		b.forgetLogs();		// (kept from here on: the waking line of the next window must show up in it)
 		await b.key('Down');		// the menu is not broken: PUBLIC LOBBIES, then back
 		await b.key('Up');
-		await b.key('Return');
+		await b.openList();
 		const list = await b.waitLog(/Lobby: screen LIST/, 8000);
 		await sleep(2500);
 		await shot(b, 'L_list_down');
@@ -1210,7 +1215,7 @@ async function sessionL5() {
 		const back = await b.waitLog(/Lobby: screen START/, 8000);
 
 		// A NEW request after the first window has run out gets a full window of its own (it used to fail at once: the window was counted from the start of the menu, not from the request)
-		await b.keys(['Down', 'Down', 'Down', 'Return'], 500);
+		await b.openJoin();
 		const join = await b.waitLog(/Lobby: screen JOIN/, 8000);
 		await b.type('123456');
 		const t1 = Date.now();
@@ -1227,7 +1232,7 @@ async function sessionL5() {
 		await b.waitLog(/Lobby: screen START/, 8000);
 		b.forgetLogs();
 		const t2 = Date.now();
-		await b.keys(['Down', 'Down', 'Return'], 500);		// QUICK JOIN again (the first entry is RETRY after the failed lookup)
+		await b.quickJoin();		// QUICK JOIN again (RETRY may be the first entry after the failed lookup)
 		await b.waitLog(/Lobby: waking the server/, 15000);
 		await sleep(12000);
 		R = await startLobbyRelay({ port });
@@ -1266,14 +1271,13 @@ async function sessionL6() {
 		const entry = await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
 		await oldPage.toLobby();
 		oldPage.forgetLogs();
-		await oldPage.key('Return');
+		await oldPage.openList();
 		await oldPage.waitLog(/Lobby: screen LIST/, 8000);
 		await oldPage.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
 		await sleep(600);
 		await shotSizes(oldPage, 'list_other', [[0, 0, ''], [360, 640, '_phone']]);
 		oldPage.forgetLogs();
-		await oldPage.key('Up');		// (the cursor waits on REFRESH, because no lobby of the list can be joined)
-		await oldPage.key('Return');		// the row of the other version
+		await oldPage.choose(/^ROW /, { direction: 'Up' });		// the row of the other version
 		await sleep(900);
 		const msg = lobbyMenuMessage(oldPage);
 		check('L6b', 'the list marks the lobby of the other version and choosing it says to reload the page (a new version is out) instead of trying to join', /[Rr]eload the page/.test(msg) && !oldPage.hasLog(/asking the relay server to let us in/), msg);
@@ -1314,13 +1318,12 @@ async function sessionL6() {
 		await waitFor(() => R2.entries().find((e) => e.isPublic && e.code), 20000);
 		await newPage.toLobby();
 		newPage.forgetLogs();
-		await newPage.key('Return');
+		await newPage.openList();
 		await newPage.waitLog(/Lobby: screen LIST/, 8000);
 		await newPage.waitLog(/Lobby: the list shows 1 public lobb/, 15000);
 		await sleep(600);
 		newPage.forgetLogs();
-		await newPage.key('Up');
-		await newPage.key('Return');
+		await newPage.choose(/^ROW /, { direction: 'Up' });
 		await sleep(900);
 		const msg3 = lobbyMenuMessage(newPage);
 		check('L6e', 'the other way round (old page hosts, new page browses) the lobby is also marked as another version, with the same advice', /[Rr]eload the page/.test(msg3), msg3);
@@ -1337,12 +1340,12 @@ async function sessionL7() {
 		await Promise.all([bootPage(host, h.baseURL, query), bootPage(friend, h.baseURL, query)]);
 		await friend.toLobby();
 		friend.forgetLogs();
-		await friend.keys(['Down', 'Return'], 500);		// QUICK JOIN
+		await friend.quickJoin();		// QUICK JOIN
 		const ended = await friend.waitLog(/Lobby: the lookup ended: This server has no list of public lobbies/, 30000);
 		await sleep(800);
 		check('L7a', 'a server that relays but has no lobby directory: QUICK JOIN says at once (within 30 s, not after a minute of retries) that the server has no list and that a long code still works', ended && /13 digits/.test(lobbyMenuMessage(friend)), `${ended ?? 'no end'} | ${lobbyMenuMessage(friend)}`);
 		await shot(friend, 'L_no_list_home');
-		await friend.key('Return');		// PUBLIC LOBBIES
+		await friend.openList();
 		await friend.waitLog(/Lobby: screen LIST/, 8000);
 		await sleep(1500);
 		await shot(friend, 'L_no_list_list');
@@ -1376,7 +1379,7 @@ async function openAndQuickJoin(host, friend, R) {
 	const hostTail = host.allLogs.slice(-14).join(' | ');
 	const friendLobbyOk = await friend.toLobby();
 	friend.forgetLogs();
-	await friend.keys(['Down', 'Return'], 500);
+	await friend.quickJoin();
 	const proved = await friend.waitLog(/the host proved the code, player slot 2/, 40000);
 	await sleep(2000);
 	// what happened during the setup, for a failing run (a failure to set up is not a failure of the case that follows, and must be told apart from it)
@@ -1400,13 +1403,12 @@ async function sessionL8() {
 		await waitFor(() => R.entries().find((e) => e.isPublic && e.code), 20000);
 		await friend.toLobby();
 		friend.forgetLogs();
-		await friend.key('Return');		// PUBLIC LOBBIES
+		await friend.openList();
 		await friend.waitLog(/Lobby: screen LIST/, 8000);
 		const seen = await friend.waitLog(/Lobby: the list shows 1 public lobby/, 15000);
 		host.forgetLogs();
 		const tLeave = Date.now();
-		await host.key('Up');		// from START GAME round to LEAVE LOBBY
-		await host.key('Return');
+		await host.leaveLobby();
 		const left = await host.waitLog(/Lobby: screen START/, 8000);
 		const gone = await waitFor(() => R.entries().length === 0, 10000, 200);
 		const goneSeconds = (Date.now() - tLeave) / 1000;
@@ -1422,8 +1424,7 @@ async function sessionL8() {
 		const entry = await openAndQuickJoin(host, friend, R);
 		friend.forgetLogs();
 		const t1 = Date.now();
-		await host.key('Up');
-		await host.key('Return');
+		await host.leaveLobby();
 		const hostLeftB = await host.waitLog(/Lobby: screen START/, 8000);
 		const gone2 = await waitFor(() => R.entries().length === 0, 10000, 200);
 		const told = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 90000);
@@ -1432,7 +1433,7 @@ async function sessionL8() {
 		check('L8b', 'the host leaves while B is in its lobby: the listing is gone and B is told within 15 s that the host closed the lobby (the host says goodbye to the relay connection before it is closed), not after a timeout of more than a minute', entry && gone2 && told && (Date.now() - t1) / 1000 < 15 && /The host closed the lobby or stopped answering/.test(msg), `${Math.round((Date.now() - t1) / 1000)} s until told; ${msg}; gone2=${!!gone2}; hostLeft=${!!hostLeftB}; setup=${JSON.stringify(openAndQuickJoin.last)}; friend: ${friend.allLogs.filter((l) => /Netplay|Lobby/.test(l)).slice(-6).join(" | ")}`);
 		await shot(friend, 'L_host_left_message');
 		friend.forgetLogs();
-		await friend.keys(['Down', 'Return'], 400);		// (the first entry is RETRY, then PUBLIC LOBBIES)
+		await friend.openList();
 		check('L8b2', 'B is back on the first screen and can open PUBLIC LOBBIES', !!(await friend.waitLog(/Lobby: screen LIST/, 8000)));
 		await R.stop(); R = null;
 
@@ -1485,8 +1486,7 @@ async function sessionL8R() {
 			const statsBefore = JSON.stringify(R.core.stats);
 			friend.forgetLogs(); host.forgetLogs();
 			const t1 = Date.now();
-			await host.key('Up');
-			await host.key('Return');
+			await host.leaveLobby();
 			const hostLeft = await host.waitLog(/Lobby: screen START/, 8000);
 			const gone = await waitFor(() => R.entries().length === 0, 10000, 200);
 			const told = await friend.waitLog(/Lobby: showing the problem to the player \(HOST_CLOSED\)/, 100000);

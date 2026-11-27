@@ -74,6 +74,9 @@ namespace
 		PAD_KEY = 2000			// + 0 to 9 for the digits, 10 = delete, 11 = join
 	};
 
+	// The names of the screens in the log (the automated checks wait for them; START is the first screen)
+	static const char* const SCREEN_NAMES[] = { "START", "LIST", "JOIN", "CREATE", "LAN", "SETTINGS", "SEARCHING", "HOSTING", "JOINED", "TEXT" };
+
 	static const int WRITE_MESSAGE_INDEX = NetplayLobby::NUM_QUICK_MESSAGES + 1;
 	static const int PAD_DELETE = 10;
 	static const int PAD_JOIN = 11;
@@ -328,7 +331,6 @@ void LobbyMenu::showScreen(Screen screen)
 void LobbyMenu::rebuildEntries()
 {
 	{
-		static const char* const SCREEN_NAMES[] = { "START", "LIST", "JOIN", "CREATE", "LAN", "SETTINGS", "SEARCHING", "HOSTING", "JOINED", "TEXT" };
 		RMX_LOG_INFO("Lobby: screen " << SCREEN_NAMES[(int)mScreen]);		// (what the automated checks wait for; START is the first screen)
 	}
 
@@ -461,6 +463,8 @@ void LobbyMenu::rebuildEntries()
 	for (size_t i = 0; i < mMenuEntries.size(); ++i)
 		mMenuEntries[i].mAnimation.mHighlight = 0.0f;
 	updateEntryTexts();
+	mLoggedSelection.clear();		// (logged again after each "Lobby: screen" line, even if it is the same entry)
+	logSelection();
 }
 
 void LobbyMenu::openTextScreen(TextMode mode, Screen returnTo)
@@ -1134,6 +1138,39 @@ void LobbyMenu::updateEntryTexts()
 	}
 	if (GameMenuEntry* entry = mMenuEntries.getEntryByData(READY))
 		entry->mText = (nullptr != client && client->isLobbyReady()) ? "NOT READY" : "READY";
+}
+
+// The selected entry as the automated checks name it: its text up to the ':' ("CHARACTER: SONIC" is "CHARACTER"), "ROW <lobby name>" for a row of the list,
+// "PAD <key>" for a key of the number pad, "TEXT FIELD" for the text field
+std::string LobbyMenu::getSelectionLabel()
+{
+	if (!mMenuEntries.hasSelected())
+		return "(nothing)";
+	GameMenuEntry& entry = mMenuEntries.selected();
+	if (entry.is<InputFieldMenuEntry>())
+		return "TEXT FIELD";
+	if (entry.mData >= PAD_KEY)
+	{
+		const int value = (int)(entry.mData - PAD_KEY);
+		return std::string("PAD ") + ((value == PAD_DELETE) ? "DEL" : ((value == PAD_JOIN) ? "JOIN" : std::string(1, (char)('0' + value))));
+	}
+	if (entry.mData >= LIST_ROW)
+		return "ROW " + entry.mText;
+	std::string label = entry.mText.substr(0, entry.mText.find(':'));
+	while (!label.empty() && label.back() == ' ')
+		label.pop_back();
+	return label;
+}
+
+void LobbyMenu::logSelection()
+{
+	const std::string label = getSelectionLabel();
+	const std::string key = std::string(SCREEN_NAMES[(int)mScreen]) + "|" + label;
+	if (key != mLoggedSelection)
+	{
+		mLoggedSelection = key;
+		RMX_LOG_INFO("Lobby: selected " << label);		// (the automated checks pick entries by this label instead of counting key presses)
+	}
 }
 
 void LobbyMenu::updateJoinScreenInput(const InputManager::ControllerScheme& keys)
@@ -1872,6 +1909,9 @@ void LobbyMenu::update(float timeElapsed)
 			}
 		}
 	}
+
+	if (mState == State::SHOW)
+		logSelection();
 
 	mTextInputLastFrame = mTextInputThisFrame;
 	mTextInputThisFrame = false;

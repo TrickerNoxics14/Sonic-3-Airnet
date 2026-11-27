@@ -109,8 +109,40 @@ export class Instance {
 
 	#onMessage(m) {
 		if (m.id && this.pending.has(m.id)) { this.pending.get(m.id)(m); this.pending.delete(m.id); }
-		else if (m.method === 'Runtime.consoleAPICalled') { const line = `${m.params.type} ${m.params.args.map((a) => a.value ?? a.description).join(' ')}`; this.logs.push(line); this.allLogs.push(line); if (this.allLogs.length > 20000) this.allLogs.splice(0, 10000); }
+		else if (m.method === 'Runtime.consoleAPICalled') { const line = `${m.params.type} ${m.params.args.map((a) => a.value ?? a.description).join(' ')}`; this.logs.push(line); this.allLogs.push(line); if (this.allLogs.length > 20000) this.allLogs.splice(0, 10000); this.#trackSelection(line); }
 		else if (m.method === 'Runtime.exceptionThrown') this.logs.push(`EXC ${m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text}`);
+	}
+
+	// The lobby menu logs "Lobby: screen X" when a screen is built, then "Lobby: selected LABEL" for the entry under the cursor (and again whenever it changes)
+	#trackSelection(line) {
+		if (/Lobby: screen \w+/.test(line)) { this.lastSelected = null; this.lastScreen = /Lobby: screen (\w+)/.exec(line)[1]; }
+		const m = /Lobby: selected ([^\r\n]*)/.exec(line);		// (a console line can end with a line break)
+		if (m) { this.lastSelected = m[1].trim(); this.selectionCount = (this.selectionCount ?? 0) + 1; }
+	}
+
+	/** In the lobby menu: moves the cursor (Down, or `direction`) until the entry `label` is selected, then presses Return (unless `press` is false).
+	 *  `screen` waits for that screen first. A label is the entry's text up to its ':' (e.g. "CHARACTER"), "ROW <lobby name>" for a list row, "PAD 7" for a pad key. */
+	async choose(label, { screen = null, press = true, maxSteps = 16, direction = 'Down' } = {}) {
+		if (screen) {
+			const end = Date.now() + 10000;
+			while (Date.now() < end && this.lastScreen !== screen) await sleep(100);
+			if (this.lastScreen !== screen) throw new Error(`choose: the screen ${screen} did not open (on ${this.lastScreen})`);
+		}
+		const until = Date.now() + 5000;
+		while (Date.now() < until && this.lastSelected == null) await sleep(100);
+		if (this.lastSelected == null) throw new Error(`choose: the lobby menu does not say which entry is selected (on ${this.lastScreen}, looking for "${label}")`);
+		for (let step = 0; step <= maxSteps; ++step) {
+			if (this.lastSelected != null && (label instanceof RegExp ? label.test(this.lastSelected) : this.lastSelected === label)) {
+				if (press) { await sleep(150); await this.key('Return'); await sleep(400); }
+				return true;
+			}
+			if (step === maxSteps) break;
+			const before = this.selectionCount ?? 0;
+			await this.key(direction);
+			const end = Date.now() + 1500;
+			while (Date.now() < end && (this.selectionCount ?? 0) === before) await sleep(50);
+		}
+		throw new Error(`choose: "${label}" not found on ${this.lastScreen} (the cursor is on "${this.lastSelected}")`);
 	}
 
 	send(method, params = {}) {
@@ -225,14 +257,38 @@ export class Instance {
 	/** From the ONLINE menu's first screen: CREATE LOBBY, then OPEN LOBBY with the defaults (public), or as a private lobby (not on the public list: the only kind
 	 *  that makes direct connections). */
 	async createLobby({ privateLobby = false } = {}) {
-		await this.keys(['Down', 'Down', 'Return'], 600);
-		await this.waitLog(/Lobby: screen CREATE/, 8000);
-		await this.keys(privateLobby ? ['Down', 'Right', 'Down', 'Down', 'Return'] : ['Down', 'Down', 'Down', 'Return'], 600);		// (LOBBY: public -> private)
+		await this.choose('CREATE LOBBY', { screen: 'START' });
+		if (privateLobby) {
+			await this.choose('LOBBY', { screen: 'CREATE', press: false });
+			await this.key('Right');		// (public -> private)
+			await sleep(400);
+		}
+		await this.choose('OPEN LOBBY', { screen: 'CREATE' });
 	}
 
 	/** From the ONLINE menu's first screen to the code screen (JOIN WITH CODE). */
 	async openJoin() {
-		await this.keys(['Down', 'Down', 'Down', 'Return'], 600);
+		await this.choose('JOIN WITH CODE', { screen: 'START' });
+	}
+
+	/** From the ONLINE menu's first screen to the list of public lobbies. */
+	async openList() {
+		await this.choose('PUBLIC LOBBIES', { screen: 'START' });
+	}
+
+	/** From the ONLINE menu's first screen: QUICK JOIN. */
+	async quickJoin() {
+		await this.choose('QUICK JOIN', { screen: 'START' });
+	}
+
+	/** From the ONLINE menu's first screen to the online settings. */
+	async openSettings() {
+		await this.choose('SETTINGS', { screen: 'START' });
+	}
+
+	/** In a lobby (host or friend): LEAVE LOBBY. */
+	async leaveLobby() {
+		await this.choose('LEAVE LOBBY', { direction: 'Up' });
 	}
 
 	/** Opens the page, hands the player's ROM to the page like the file picker does, and starts the game. */
