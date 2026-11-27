@@ -791,3 +791,10 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -n 'C1001\|C1004\|C1060\|/m' checks/build_*.ps1`
 - Siblings: checks/build_online_stable.ps1 fixed (C1004/C1060 now rebuild from scratch with /m:1) · checks/build_web.ps1 not a bug (already re-runs ninja after a crashed clang/wasm-opt) · checks/build_android.ps1 not a bug (Android work is stopped)
 - Guard: the retry branch in build_online_stable.ps1 (seen working: the /m:1 rebuild passed after three parallel failures)
+
+## 2026-11-27 · fixed-position-under-variable-rows · cpp
+- Seed: sonic3air/menu/LobbyMenu.cpp HOME - hint at a fixed y 178: the Windows game's extra LAN GAME row put BACK on top of it (owner's screenshot)
+- Broken assumption: every build shows the same number of entries (the browser has no LAN GAME; RETRY comes and goes), and a picture of the browser build stands for both
+- Search: `grep -nE 'hint\(1[0-9]{2}|statusLine\(1[0-9]{2}|Recti\(anchorX, 1[0-9]{2}' sonic3air_online_stable_source/Oxygen/sonic3air/source/sonic3air/menu/LobbyMenu.cpp`
+- Siblings: LobbyMenu.cpp HOME hint + Playing as fixed (follow the entries) · LobbyMenu.cpp CREATE hint fixed (same entries in both builds, made to follow anyway) · LobbyMenu.cpp LAN hint fixed (Windows only, fitted; made to follow) · LobbyMenu.cpp SETTINGS status + hint fixed (Windows has LOBBY SERVER too, fitted with 10 px; made to follow)
+- Guard: Lobby: layout log line; checks K5 (browser) and P7c (Windows game, run_lobby_checks.ps1 -Only P7): text starts below the entries and ends above 213

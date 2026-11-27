@@ -84,9 +84,9 @@ THE LOBBY SERVER
   game data between players who cannot reach each other directly.
   This build uses a free public one by default
   (wss://sonic3-airnet-relay.onrender.com), so online play works without any
-  settings. It is hosted on a free plan that goes to sleep after about 15
-  minutes without players: the first player after a quiet time sees "Waking
-  the server up" and may wait up to a minute.
+  settings. It runs on a free plan that would go to sleep after 15 minutes
+  without players; a scheduled job keeps it awake. If it ever does sleep,
+  the first player sees "Waking the server up" and may wait up to a minute.
   You can use another server under SETTINGS > LOBBY SERVER (or in
   settings.json, section Online, LobbyServer). An address that starts with
   wss:// or ws:// is reached by a WebSocket, like the browser version does;

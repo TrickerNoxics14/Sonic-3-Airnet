@@ -48,6 +48,7 @@ Sources: render.com/docs/free, /docs/web-services, /docs/health-checks, /docs/we
 
 * 750 free instance hours per workspace and month; a spun-down service uses none. One service awake all month needs at most 744, so one fits; a second one that is awake all month would not.
 * Spins down after **15 minutes without inbound traffic**; HTTP requests and WebSocket messages on open connections count. Waking takes **"about one minute"** (browsers get a loading page meanwhile).
+* **Kept awake:** the repository's scheduled workflow `.github/workflows/keep-lobby-server-awake.yml` asks `/health` every 10 minutes, so players do not wait for a wake-up. That keeps the one service awake all month (744 hours at most, inside the 750), so a second free service would not fit. GitHub runs it only from the default branch (`main`), can start it some minutes late, and pauses it after 60 days without activity in the repository (re-enable it under Actions).
   The game waits **60 seconds** per request ("Waking the server up, retrying" in the menus), so the first player after a quiet time may need to press the button once more. How Render answers
   a WebSocket request while the service wakes is not documented on those pages: UNVERIFIED. The program itself listens in well under a second here; the minute is Render's.
   Whether a browser's automatic answer to the relay's 20-second ping counts as traffic is not stated: UNVERIFIED (an open lobby page may keep it awake, which is harmless, see the hours above).

@@ -36,7 +36,7 @@ Everybody in one lobby needs the same game version. To play with browser players
 
 ## How online play works
 
-Players meet through a small **relay server** that keeps the public lobby list, hands out the 6-digit codes and forwards game data. The default relay is hosted for free; it goes to sleep after about 15 minutes without players, so the first player afterwards may wait up to a minute while it wakes up.
+Players meet through a small **relay server** that keeps the public lobby list, hands out the 6-digit codes and forwards game data. The default relay is hosted for free and kept awake by a scheduled job; if it ever falls asleep, the first player waits up to a minute while it wakes up.
 
 In a private lobby, two browsers may connect to each other directly (WebRTC) for lower latency. This shows each player's IP address to the other, so it is never used in public lobbies, and it can be switched off by opening the page with `?p2p=off`.
 

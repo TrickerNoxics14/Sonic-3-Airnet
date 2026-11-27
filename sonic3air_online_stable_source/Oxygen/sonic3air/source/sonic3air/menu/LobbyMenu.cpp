@@ -2277,6 +2277,17 @@ void LobbyMenu::renderCodeKeypad(Drawer& drawer, int anchorX, float alpha, int t
 	}
 }
 
+// Where the entries of a screen end, and where the text below them starts and ends (it must start below the entries and end above the bar with the buttons, at 215): written when it changes, the checks read it
+void LobbyMenu::logLayout(const char* screenName, int rowsEnd, int textStart, int textEnd)
+{
+	const std::string line = std::string(screenName) + " entries end at " + std::to_string(rowsEnd) + ", the text below starts at " + std::to_string(textStart) + " and ends at " + std::to_string(textEnd);
+	if (line != mLoggedLayout)
+	{
+		mLoggedLayout = line;
+		RMX_LOG_INFO("Lobby: layout " << line);
+	}
+}
+
 void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 {
 	NetplayManager& manager = netplay();
@@ -2329,21 +2340,23 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 		case Screen::HOME:
 		{
 			// The big choices first (Retry, Find a lobby, Create lobby, Join with code), then the small ones (LAN game, Settings, Back)
+			// (the lines below the choices follow them: the Windows game has one choice more, LAN GAME, and a failure adds RETRY)
 			const bool hasRetry = (mMenuEntries.size() > 0 && mMenuEntries[0].mData == RETRY);
-			int y = hasRetry ? 50 : 56;
+			int y = hasRetry ? 48 : 52;
 			bool bigBefore = true;
 			for (size_t i = 0; i < mMenuEntries.size(); ++i)
 			{
 				GameMenuEntry& entry = mMenuEntries[i];
 				const bool big = (entry.mData == RETRY || entry.mData == PUBLIC_LOBBIES || entry.mData == CREATE_LOBBY || entry.mData == JOIN_LOBBY);
 				if (!big && bigBefore)
-					y += hasRetry ? 6 : 10;
+					y += hasRetry ? 6 : 8;
 				if (entry.mData == BACK)
 					y += 4;
 				bigBefore = big;
 				drawRow(drawer, big ? global::mSonicFontC : global::mOxyfontRegular, anchorX, y, entry.mText, (int)i == mMenuEntries.mSelectedEntryIndex, isEntryEnabled(entry.mData), alpha);
-				y += big ? (hasRetry ? 20 : 24) : 14;
+				y += big ? (hasRetry ? 20 : 22) : 15;
 			}
+			const int rowsEnd = y;
 
 			// What the selected choice does
 			std::string text;
@@ -2358,10 +2371,15 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 				case BACK:				text = "Back to the main menu.";  break;
 				default: break;
 			}
+			// (a message, drawn further below, matters more than these two lines)
+			int lastLineEnd = rowsEnd;
 			if (mMessage.empty())
-				hint(178, text, grey);		// (a message, below, matters more)
-			if (mMessage.empty())
-				drawer.printText(global::mOxyfontSmall, Recti(anchorX, 190, 0, 10), "Playing as " + shorten(manager.getLocalPlayerName(), 16), 5, dark);
+			{
+				hint(rowsEnd + 8, text, grey);
+				drawer.printText(global::mOxyfontSmall, Recti(anchorX, rowsEnd + 20, 0, 10), "Playing as " + shorten(manager.getLocalPlayerName(), 16), 5, dark);
+				lastLineEnd = rowsEnd + 30;
+			}
+			logLayout("START", rowsEnd, mMessage.empty() ? (rowsEnd + 8) : rowsEnd, lastLineEnd);
 			break;
 		}
 
@@ -2485,10 +2503,11 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 
 		case Screen::CREATE:
 		{
-			drawEntryRows(drawer, anchorX, 56, 16, 0, mMenuEntries.size(), alpha);
+			const int rowsEnd = drawEntryRows(drawer, anchorX, 56, 16, 0, mMenuEntries.size(), alpha);
+			const int hintY = std::max(150, rowsEnd + 14);
 			if (!manager.isLobbyServerConfigured())
 			{
-				hint(150, std::string("Without a lobby server the lobby is not listed: it is private.\n") + (NetplayManager::isBrowserBuild() ? "Online play needs a server: choose SETTINGS, then RELAY SERVER." : "Friends join with the long code (the matchmaking server, or LAN)."), orange);
+				hint(hintY, std::string("Without a lobby server the lobby is not listed: it is private.\n") + (NetplayManager::isBrowserBuild() ? "Online play needs a server: choose SETTINGS, then RELAY SERVER." : "Friends join with the long code (the matchmaking server, or LAN)."), orange);
 			}
 			else
 			{
@@ -2501,8 +2520,9 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 					case OPEN_LOBBY:		text = "Opens the lobby. Its code is shown at the top.";  break;
 					default: break;
 				}
-				hint(150, text, grey);
+				hint(hintY, text, grey);
 			}
+			logLayout("CREATE", rowsEnd, hintY, hintY + 20);
 			break;
 		}
 
@@ -2510,16 +2530,20 @@ void LobbyMenu::renderBrowserScreen(Drawer& drawer, int anchorX, float alpha)
 		{
 			drawer.printText(global::mOxyfontRegular, Recti(anchorX, 50, 0, 10), "Play with friends on the same network.", 5, grey);
 			drawer.printText(global::mOxyfontRegular, Recti(anchorX, 61, 0, 10), "No server is needed.", 5, grey);
-			drawEntryRows(drawer, anchorX, 86, 16, 0, mMenuEntries.size(), alpha);
-			hint(150, "Host a game and tell your friends the long code,\nor type the long code that they give you.", grey);
+			const int rowsEnd = drawEntryRows(drawer, anchorX, 86, 16, 0, mMenuEntries.size(), alpha);
+			const int hintY = std::max(150, rowsEnd + 14);
+			logLayout("LAN", rowsEnd, hintY, hintY + 20);
+			hint(hintY, "Host a game and tell your friends the long code,\nor type the long code that they give you.", grey);
 			break;
 		}
 
 		case Screen::SETTINGS:
 		{
-			drawEntryRows(drawer, anchorX, 56, 16, 0, mMenuEntries.size(), alpha);
-			statusLine(136);
-			hint(152, "The lobby server lists public lobbies and gives the 6 digit codes.\nThe relay helps players whose direct connection fails.", grey);
+			const int rowsEnd = drawEntryRows(drawer, anchorX, 56, 16, 0, mMenuEntries.size(), alpha);
+			const int statusY = std::max(136, rowsEnd + 12);
+			statusLine(statusY);
+			logLayout("SETTINGS", rowsEnd, statusY, statusY + 36);
+			hint(statusY + 16, "The lobby server lists public lobbies and gives the 6 digit codes.\nThe relay helps players whose direct connection fails.", grey);
 			break;
 		}
 
@@ -2628,7 +2652,7 @@ void LobbyMenu::renderRoom(Drawer& drawer, int anchorX, float alpha)
 		{
 			if (!lobbyCode.empty())
 			{
-				codeText = "CODE " + NetplayCodes::formatLobbyCode(lobbyCode);
+				codeText = NetplayCodes::formatLobbyCode(lobbyCode);
 				codeKind = "short";
 			}
 			else if (!onLobbyServer)
@@ -2639,7 +2663,7 @@ void LobbyMenu::renderRoom(Drawer& drawer, int anchorX, float alpha)
 		}
 		else if (mLastJoinCode.size() == (size_t)NetplayCodes::LOBBY_CODE_DIGITS)
 		{
-			codeText = "CODE " + NetplayCodes::formatLobbyCode(mLastJoinCode);
+			codeText = NetplayCodes::formatLobbyCode(mLastJoinCode);
 			codeKind = "short";
 		}
 		if (mLoggedHeaderCode != codeKind)

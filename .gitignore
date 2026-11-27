@@ -6,6 +6,7 @@
 !/checks/
 !/sonic3air_online_stable_source/
 !/.claude/
+!/.github/
 /.claude/*
 !/.claude/bug-patterns.md
 

@@ -415,6 +415,11 @@ try
 		}
 		Add-Result 'P7a' 'All screens of the menu were opened and photographed' (Test-Path (Join-Path $lastLogs 'P-P7-quick.png')) "P-P7-*.png in checks\last_logs"
 		Add-Result 'P7b' 'Typing on the code screen keeps the digits and ignores letters (48a2b916 gives 6 digits)' ((Get-NetLog '_pfriend') -match 'typed on the code screen, the field now holds 6 digits') ""
+		# The screens say where their entries end and where the text below them starts and ends (the Windows game has one entry more than the browser: LAN GAME)
+		$layouts = @([regex]::Matches((Get-NetLog '_pfriend'), 'Lobby: layout (\w+) entries end at (\d+), the text below starts at (\d+) and ends at (\d+)') | ForEach-Object { [pscustomobject]@{ Screen = $_.Groups[1].Value; Rows = [int]$_.Groups[2].Value; Start = [int]$_.Groups[3].Value; End = [int]$_.Groups[4].Value } })
+		$badLayouts = @($layouts | Where-Object { ($_.Start -lt $_.Rows) -or ($_.End -gt 213) })
+		$layoutText = (@($layouts | ForEach-Object { "$($_.Screen) $($_.Rows)/$($_.Start)/$($_.End)" }) | Select-Object -Unique) -join ', '
+		Add-Result 'P7c' 'On the screens of the menu the text below the entries starts after them and ends above the button bar (no overlap)' ((@($layouts | Where-Object { $_.Screen -eq 'START' }).Count -gt 0) -and ($badLayouts.Count -eq 0)) $layoutText
 		Save-Logs 'P7' @('_pfriend')
 		Stop-StartedProcesses
 		Stop-FakeLobbies

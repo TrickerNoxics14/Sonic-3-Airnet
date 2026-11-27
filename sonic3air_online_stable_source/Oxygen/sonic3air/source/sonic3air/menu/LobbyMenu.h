@@ -131,6 +131,7 @@ private:
 	void drawValueRow(Drawer& drawer, int centerX, int y, const std::string& label, const std::string& value, bool selected, bool changeable, bool enabled, float alpha);
 	int drawEntryRows(Drawer& drawer, int centerX, int y, int step, size_t first, size_t last, float alpha);
 	void renderControlsDisplay(Drawer& drawer, float alpha);
+	void logLayout(const char* screenName, int rowsEnd, int textStart, int textEnd);
 	void renderBrowserScreen(Drawer& drawer, int anchorX, float alpha);
 	void renderRoom(Drawer& drawer, int anchorX, float alpha);
 	void renderCodeKeypad(Drawer& drawer, int anchorX, float alpha, int top);
@@ -148,6 +149,7 @@ private:
 	size_t mLoggedCodeDigits = 0;		// What the log says about the code screen (the automated checks read it)
 	std::string mLoggedSelection;		// What the log says about the selected entry, "screen|label" (the automated checks pick entries by label)
 	std::string mLoggedHeaderCode;		// What the log says about the code at the top of the lobby: "short", "long" or "none"
+	std::string mLoggedLayout;			// What the log says about where the text of the screen ends (the checks read it)
 	bool mKickAvailable = false;		// The host's OPTIONS screen shows KICK (somebody is there to be kicked)
 	GameMenuControlsDisplay mControlsDisplay;
 	std::string mMessage;		// Shown to the player, e.g. why joining failed

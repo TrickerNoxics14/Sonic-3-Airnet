@@ -414,7 +414,12 @@ async function sessionK() {
 			let found = false;
 			try { found = await b.choose('SETTINGS', { screen: 'START', press: false }); } catch (e) { found = false; }
 			check('K0', 'the lobby menu logs the selected entry ("Lobby: selected SETTINGS" after moving down to it)', found && b.lastSelected === 'SETTINGS', `selected: ${b.lastSelected}`);
-			await b.choose('PUBLIC LOBBIES', { direction: 'Up', press: false }).catch(() => {});
+			await b.choose('FIND A LOBBY', { direction: 'Up', press: false }).catch(() => {});
+		}
+		// K5: the first screen's text below the entries starts after them and ends above the button bar (they overlapped in the Windows game, which has LAN GAME too)
+		{
+			const layout = b.allLogs.map((l) => /Lobby: layout START entries end at (\d+), the text below starts at (\d+) and ends at (\d+)/.exec(l)).filter(Boolean).at(-1);
+			check('K5', 'the first screen\'s hint and "Playing as" lines start below its entries and end above the button bar', !!layout && Number(layout[2]) >= Number(layout[1]) && Number(layout[3]) <= 213, layout ? layout[0] : 'no layout line');
 		}
 		// K1: SETTINGS > NAME, add " Sam" (S and A are the B and A buttons of the default keyboard layout), Enter saves
 		b.forgetLogs();
