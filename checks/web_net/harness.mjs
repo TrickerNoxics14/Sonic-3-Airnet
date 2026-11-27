@@ -311,9 +311,12 @@ export class Instance {
 		await this.choose('LEAVE LOBBY', { direction: 'Up' });
 	}
 
-	/** Opens the page, hands the player's ROM to the page like the file picker does, and starts the game. */
-	async openGame(baseURL, query = '') {
-		await this.navigate(`${baseURL}/sonic3air_web.html${query}`);
+	/** Opens the page, hands the player's ROM to the page like the file picker does, and starts the game. With `pageFlow` the page starts it the way it does for a
+	 *  player (startGameWhenReady: the remastered music first); otherwise the game starts at once, without the music download. */
+	async openGame(baseURL, query = '', { pageFlow = false } = {}) {
+		// (without pageFlow the page does not load the remastered music at all: music=skip)
+		const fullQuery = pageFlow ? query : `${query}${query.includes('?') ? '&' : '?'}music=skip`;
+		await this.navigate(`${baseURL}/sonic3air_web.html${fullQuery}`);
 		for (let i = 0; i < 120; ++i) {
 			const state = await this.eval(`(typeof Module !== 'undefined' && Module.calledRun ? 'run' : 'wait') + ':' + (document.getElementById('s3kPromptMessage') ? 'prompt' : 'noprompt') + ':' + (typeof FS !== 'undefined' && FS.analyzePath('/sonic3air/savedata').exists)`).catch(() => 'wait');
 			if (/^run:prompt:true/.test(state)) break;
@@ -328,7 +331,7 @@ export class Instance {
 				step = 'sync the file system'; await new Promise((resolve) => FS.syncfs(resolve));
 				step = 'hide the page UI'; hidePageUI();
 				step = 'make the internal folder'; if (!FS.analyzePath('/sonic3air/___internal/').exists) FS.mkdir('/sonic3air/___internal/');
-				step = 'start the game'; startGame();
+				step = 'start the game'; if (${pageFlow}) startGameWhenReady(); else startGame();
 				return 'started';
 			} catch (e) { return 'failed at "' + step + '": ' + (e && (e.message || e.name)) + ' errno=' + (e && e.errno); }
 		})()`);

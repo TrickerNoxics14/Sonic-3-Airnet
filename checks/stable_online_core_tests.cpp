@@ -1654,6 +1654,8 @@ namespace
 		report("update forbidden: the test marker and test fixtures", isForbiddenPackagePath("testhooks.enabled", 1) && isForbiddenPackagePath("harness/ChecksHarness/mod.json", 1) && isForbiddenPackagePath("x/PartyHarness/a", 1));
 		report("update forbidden: ROM-like files", isForbiddenPackagePath("Sonic_Knuckles_wSonic3.bin", 10) && isForbiddenPackagePath("rom.gen", 1) && isForbiddenPackagePath("rom.SMD", 1) && isForbiddenPackagePath("a.md", 1) && isForbiddenPackagePath("data/big.bin", 600 * 1024));
 		report("update allowed: the game's own files", !isForbiddenPackagePath("Sonic3AIR.exe", 100000000) && !isForbiddenPackagePath("data/audio.bin", 1000) && !isForbiddenPackagePath("bundled_mods/DropInCoop/mod.json", 100) && !isForbiddenPackagePath("scripts/main_gameapp.lemon", 100) && !isForbiddenPackagePath("README_ONLINE.txt", 10) && !isForbiddenPackagePath("config.json", 10) && !isForbiddenPackagePath("version.txt", 5));
+		report("update allowed: the bundled remastered soundtrack is data/audioremaster.pak (126 MB); under its official name .bin the updater (also of older versions) would refuse it as ROM-like",
+			!isForbiddenPackagePath("data/audioremaster.pak", 131677405) && isForbiddenPackagePath("data/audioremaster.bin", 131677405));
 		report("update: config.json is kept if it exists, nothing else is", isKeepIfExistsPath("config.json") && isKeepIfExistsPath("Config.JSON") && !isKeepIfExistsPath("data/config.json") && !isKeepIfExistsPath("Sonic3AIR.exe"));
 		report("update: the single top folder of a package is stripped", stripPackageFolder("Sonic3Airnet/data/a.txt", true) == "data/a.txt" && stripPackageFolder("other/a.txt", true).empty() && stripPackageFolder("data/a.txt", false) == "data/a.txt");
 

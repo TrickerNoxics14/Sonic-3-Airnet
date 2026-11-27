@@ -30,7 +30,7 @@ const root = path.resolve(here, '..', '..');
 const logDir = path.join(root, 'checks', 'last_logs');
 fs.mkdirSync(logDir, { recursive: true });
 const args = process.argv.slice(2);
-const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,K,O,N').split(',');
+const only = (args.includes('--only') ? args[args.indexOf('--only') + 1] : 'A,B,C,P,L,T,M,K,O,S,N').split(',');
 const withNative = args.includes('--native');
 const webDir = args.includes('--web-dir') ? path.resolve(args[args.indexOf('--web-dir') + 1]) : path.join(root, 'web_build');
 
@@ -1472,6 +1472,91 @@ async function sessionO() {
 	} finally { await h.close(); await R.stop(); }
 }
 
+// Session S: the remastered music in the browser: the page downloads it (in parts) before the first start and keeps it for the next start; a failed download
+// offers to try again or to play with the original music, and the download can still be made while the game runs (what the Options menu uses)
+async function sessionS() {
+	console.log('--- session S: the remastered music in the browser (download before the first start, kept, a failed download)');
+	const R = await startLobbyRelay();
+	const h = await startHarness({ webDir, instances: 2, seeds: [0x53, 0x54], basePort: 9530 });
+	const storageIdle = (inst) => waitFor(async () => await inst.eval(`!(Module.__rmxSyncState && Module.__rmxSyncState.running)`).catch(() => false), 120000, 250);
+	try {
+		const [a, b] = h.instances;
+		const query = relayQuery(R.ports.port);
+
+		// S1: the first start downloads the music, then the game loads it
+		a.forgetLogs();
+		await a.openGame(h.baseURL, query, { pageFlow: true });
+		const onBar = await waitFor(async () => /remastered music/i.test(await a.eval(`document.getElementById('status').innerText`).catch(() => '')) || a.hasLog(/Music: the remastered music is ready/), 20000, 100);
+		await sleep(300);
+		await shot(a, 'S_music_loading');
+		const ready = await a.waitLog(/Music: the remastered music is ready \(131677405 bytes\)/, 180000);
+		const loaded = await a.waitLog(/Audio: remastered soundtrack loaded \(\d+ tracks\)/, 90000);
+		const stored = await a.eval(`FS.analyzePath('/sonic3air/savedata/audioremaster.bin', true).exists ? FS.stat('/sonic3air/savedata/audioremaster.bin').size : 0`).catch(() => -1);
+		check('S1', 'the first start loads the remastered music with the game (on the loading bar, no screen of its own), in parts (131677405 bytes, into the browser storage), and the game uses it', !!onBar && !!ready && !!loaded && stored === 131677405 && !(await a.eval(`!!document.querySelector('.music_download')`).catch(() => true)), `${onBar ? 'on the loading bar' : 'not on the loading bar'} | ${ready ?? 'no download'} | ${loaded ?? 'not loaded'} | stored ${stored}`);
+
+		// S2: the next start uses the stored music, no new download
+		await storageIdle(a);
+		a.forgetLogs();
+		await a.navigate(`${h.baseURL}/sonic3air_web.html${query}`);
+		const loaded2 = await a.waitLog(/Audio: remastered soundtrack (loaded|not found)/, 120000);
+		check('S2', 'the next start uses the music kept in the browser: loaded at once, nothing downloaded again', !!loaded2 && /loaded/.test(loaded2) && !a.hasLog(/Music: the remastered music is ready/), loaded2 ?? 'the game did not start');
+
+		// S3: a failed download (part 2 fails once) says so and offers "Try again" and "Play with the original music"
+		await b.addScript(`(() => {
+			const original = window.fetch;
+			let failed = false;
+			window.fetch = function (input, init) {
+				const url = String((input && input.url) || input);
+				if (!failed && /audioremaster\\.part2/.test(url)) { failed = true; return Promise.reject(new TypeError('network error (test)')); }
+				return original.apply(this, arguments);
+			};
+		})();`);
+		b.forgetLogs();
+		await b.openGame(h.baseURL, query, { pageFlow: true });
+		const failed = await b.waitLog(/Music: the download failed/, 120000);
+		await sleep(500);
+		await waitFor(async () => await b.eval(`!document.getElementById('musicProblem').classList.contains('hidden')`).catch(() => false), 10000, 100);
+		const failScreen = await b.eval(`({ shown: !document.getElementById('musicProblem').classList.contains('hidden'), buttons: document.querySelectorAll('#musicActions button').length, text: document.getElementById('musicStatus').innerText })`).catch(() => ({}));
+		await shot(b, 'S_music_failed');
+		check('S3', 'a failed download says what happened and offers "Try again" and "Play with the original music"; no half file is kept', !!failed && failScreen.shown && failScreen.buttons === 2 && /could not be loaded/.test(failScreen.text ?? '') && !(await b.eval(`FS.analyzePath('/sonic3air/savedata/audioremaster.bin', true).exists`).catch(() => true)), `${failed ?? 'no failure'} | ${JSON.stringify(failScreen)}`);
+
+		// S4: "Play with the original music" starts the game without it
+		b.forgetLogs();
+		await b.eval(`document.querySelector('.musicSkip').click(); 1`);
+		const notFound = await b.waitLog(/Audio: remastered soundtrack (loaded|not found)/, 90000);
+		check('S4', '"Play with the original music" starts the game with the original music', !!notFound && /not found/.test(notFound) && b.hasLog(/Music: the player starts with the original music/), notFound ?? 'the game did not start');
+
+		// S5: while the game runs, the download the Options menu starts works (the page's downloader, in parts)
+		b.forgetLogs();
+		const later = await b.eval(`airnetMusic.start().then((ok) => ok && airnetMusic.state)`).catch((e) => String(e));
+		const laterFile = await b.eval(`FS.analyzePath('/sonic3air/data/audioremaster.bin').exists && FS.stat('/sonic3air/data/audioremaster.bin').size`).catch(() => 0);
+		check('S5', 'the download of the Options menu works while the game runs: the music ends up where the game looks for it', later === 2 && laterFile === 131677405, `state ${later}, linked file ${laterFile}`);
+		await storageIdle(b);
+	} finally { await h.close(); await R.stop(); }
+}
+
+// Session WM: the Windows game loads the remastered music that its package brings as data/audioremaster.pak (the in-game updater refuses large .bin files)
+async function sessionWM() {
+	console.log('--- session WM: the Windows game loads the bundled remastered music (data/audioremaster.pak)');
+	const pak = path.join(root, 'sonic3air_online_stable_source', 'Oxygen', 'sonic3air', 'data', 'audioremaster.pak');
+	const cache = path.join(root, 'music_cache', 'audioremaster.bin');
+	if (!fs.existsSync(cache)) { check('WM', 'the remastered music is in music_cache (run checks\\get_remastered_music.ps1 first)', false); return; }
+	if (fs.existsSync(pak)) throw new Error(`${pak} exists already: refusing to touch it`);
+	fs.copyFileSync(cache, pak);
+	try {
+		await withNativeGame({ S3AIR_NO_SERVER: '1' }, '_nativeMusic', async (native) => {
+			let log = '';
+			const end = Date.now() + 90000;
+			while (Date.now() < end) {
+				log = native.mainLog();
+				if (/Audio: remastered soundtrack (loaded|not found)/.test(log)) break;
+				await sleep(500);
+			}
+			check('WM', 'the Windows game finds data/audioremaster.pak and loads the remastered soundtrack from it', /Loaded the data package audioremaster\.bin from audioremaster\.pak/.test(log) && /Audio: remastered soundtrack loaded/.test(log), log.split('\n').filter((l) => /audioremaster|remastered/i.test(l)).slice(-3).join(' | ') || 'no line about the music');
+		});
+	} finally { fs.rmSync(pak, { force: true }); }
+}
+
 /** Host opens a public lobby, the friend joins it by QUICK JOIN. Both pages must already be in the main menu. Returns the listing. */
 async function openAndQuickJoin(host, friend, R) {
 	host.forgetLogs();
@@ -1919,8 +2004,12 @@ try {
 	if (only.includes('M')) await sessionM();
 	if (only.includes('K')) await sessionK();
 	if (only.includes('O')) await sessionO();
+	if (only.includes('S')) await sessionS();
 	if (only.includes("N")) {
 		if (withNative) await sessionN(relay); else console.log('--- session N skipped (add --native to run it)');
+	}
+	if (only.includes('N') || only.includes('WM')) {
+		if (withNative) await sessionWM(); else console.log('--- session WM skipped (add --native to run it)');
 	}
 	if (only.includes('N') || only.includes('W')) {
 		if (withNative) await sessionW(); else console.log('--- session W skipped (add --native to run it)');

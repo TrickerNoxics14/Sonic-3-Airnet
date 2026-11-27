@@ -23,14 +23,14 @@ You need your own copy of the **Sonic 3 & Knuckles** ROM (`Sonic_Knuckles_wSonic
 ### In the browser
 
 1. Open **[trickernoxics14.github.io/Sonic-3-Airnet](https://trickernoxics14.github.io/Sonic-3-Airnet/)** and choose *Play now*.
-2. Select your ROM file when asked. It is stored in that browser only.
+2. Select your ROM file when asked. It is stored in that browser only. The first start also loads the remastered music (126 MB, once).
 3. Choose **Online Lobby** in the main menu: create a lobby, use Quick Join, or enter a friend's code.
 
 ### On Windows
 
 1. Download **Sonic3Airnet.zip** from the [latest release](https://github.com/TrickerNoxics14/Sonic-3-Airnet/releases/latest) and unzip it.
 2. Put your ROM in `%APPDATA%\Sonic3AIR\` (press Win+R, type `%APPDATA%\Sonic3AIR`, press Enter).
-3. Run `Sonic3AIR.exe` and choose **Online** in the main menu.
+3. Run `Sonic3AIR.exe` and choose **Online** in the main menu. The remastered music is included.
 
 Everybody in one lobby needs the same game version. To play with browser players, turn mods off on Windows.
 

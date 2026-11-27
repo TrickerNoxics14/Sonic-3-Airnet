@@ -262,7 +262,7 @@ function Get-CompressedParts([byte[]]$bytes, [string]$text)
 }
 
 # R1-R5 on one piece of content (a file, or the inflated content of a compressed part); $label names it in the findings
-function Add-ContentFindings($findings, [string]$label, [string]$text, $variants)
+function Add-ContentFindings($findings, [string]$label, [string]$text, $variants, [switch]$KnownPublicContent)
 {
 	foreach ($v in $variants)
 	{
@@ -270,11 +270,45 @@ function Add-ContentFindings($findings, [string]$label, [string]$text, $variants
 		if ($at -ge 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = $v.Rule; What = "$($v.Label) ($($v.Encoding)) at byte offset $at" }) }
 	}
 	$mails = New-Object System.Collections.ArrayList
-	Find-Emails $text $mails
+	# (any address-shaped text: not for the parts of the official remastered soundtrack, proven by its SHA-256 below: 126 MB of compressed audio hold "x@c.Rt"-like noise
+	#  by chance, and a file identical to a public download holds nothing of this machine; the builder's own address and every other rule still apply to it)
+	if (-not $KnownPublicContent) { Find-Emails $text $mails }
 	if ($mails.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = "R4"; What = "an e-mail address ($($mails.Count) time(s), first at byte offset $($mails[0]))" }) }
 	$tokens = New-Object System.Collections.ArrayList
 	Find-Tokens $text $tokens
 	if ($tokens.Count -gt 0) { [void]$findings.Add([pscustomobject]@{ File = $label; Rule = "R5"; What = "an access token or private key ($($tokens.Count) time(s), first at byte offset $($tokens[0]))" }) }
+}
+
+# The parts of the official remastered soundtrack that build_web.ps1 publishes (audioremaster.json lists them): known public content when, put together, they are byte for
+# byte the official file, whose SHA-256 get_remastered_music.ps1 pins. Returns their names (relative to the folder), or nothing.
+function Get-KnownPublicParts([string]$Folder)
+{
+	$listFile = Join-Path $Folder "audioremaster.json"
+	$pinScript = Join-Path $PSScriptRoot "get_remastered_music.ps1"
+	if (-not (Test-Path -LiteralPath $listFile) -or -not (Test-Path -LiteralPath $pinScript)) { return @() }
+	$pin = [regex]::Match((Get-Content -LiteralPath $pinScript -Raw), '\$expectedSha256\s*=\s*"([0-9A-Fa-f]{64})"')
+	if (-not $pin.Success) { return @() }
+	try { $list = Get-Content -LiteralPath $listFile -Raw | ConvertFrom-Json } catch { return @() }
+	$names = @($list.parts | ForEach-Object { [string]$_.file })
+	if ($names.Count -eq 0 -or @($names | Where-Object { $_ -notmatch '^audioremaster\.part\d+$' }).Count -gt 0) { return @() }
+	$sha = [Security.Cryptography.SHA256]::Create()
+	try
+	{
+		$buffer = New-Object byte[] (4MB)
+		foreach ($name in $names)
+		{
+			$path = Join-Path $Folder $name
+			if (-not (Test-Path -LiteralPath $path)) { return @() }
+			$stream = [IO.File]::OpenRead($path)
+			try { while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) { [void]$sha.TransformBlock($buffer, 0, $read, $null, 0) } }
+			finally { $stream.Dispose() }
+		}
+		[void]$sha.TransformFinalBlock($buffer, 0, 0)
+		$hash = -join ($sha.Hash | ForEach-Object { $_.ToString("x2") })
+	}
+	finally { $sha.Dispose() }
+	if ($hash -ne $pin.Groups[1].Value.ToLower()) { return @() }
+	return $names
 }
 
 function Test-RomHeader([string]$text)
@@ -306,6 +340,7 @@ function Invoke-LeakScan([string]$Folder, $Needles)
 	$files = @($items | Where-Object { -not $_.IsDir })
 	if ($files.Count -eq 0) { [void]$findings.Add([pscustomobject]@{ File = $Folder; Rule = "R8"; What = "the folder holds no file (a scan of nothing proves nothing)" }); return $result }
 	$variants = Get-Variants $Needles
+	$knownPublic = Get-KnownPublicParts $Folder
 	foreach ($item in $items)
 	{
 		$rel = $item.Rel
@@ -332,7 +367,7 @@ function Invoke-LeakScan([string]$Folder, $Needles)
 		$text = $latin1.GetString($bytes)
 		$header = Test-RomHeader $text
 		if ($header -ge 0) { [void]$findings.Add([pscustomobject]@{ File = $rel; Rule = "R6"; What = "a Mega Drive ROM header at byte offset $header" }) }
-		Add-ContentFindings $findings $rel $text $variants
+		Add-ContentFindings $findings $rel $text $variants -KnownPublicContent:($knownPublic -contains $rel)
 		foreach ($part in (Get-CompressedParts $bytes $text))
 		{
 			$result.Parts++
@@ -414,6 +449,9 @@ if ($SelfTest)
 		# one leak per fixture; the expected rule must be among the findings of that fixture
 		$cases = @(
 			@("R1", "user name in a script (text)", { param($d) [IO.File]::AppendAllText((Join-Path $d "app.js"), "// built by $fakeUser") }),
+			# a made-up "soundtrack part" is not the official one (its SHA-256 differs), so it gets no exception: address-shaped text in it is caught
+			@("R4", "an address in a part that only claims to be the official soundtrack", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "audioremaster.part1"), (Join-Bytes (New-Random 200) (Get-Bytes "zz.fake@zzmailhost.net" "utf8") (New-Random 200))); [IO.File]::WriteAllText((Join-Path $d "audioremaster.json"), '{ "file": "audioremaster.bin", "size": 422, "parts": [ { "file": "audioremaster.part1", "size": 422 } ] }') }),
+			@("R1", "user name in a part that only claims to be the official soundtrack", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "audioremaster.part1"), (Join-Bytes (New-Random 200) (Get-Bytes $fakeUser "utf8") (New-Random 200))); [IO.File]::WriteAllText((Join-Path $d "audioremaster.json"), '{ "file": "audioremaster.bin", "size": 422, "parts": [ { "file": "audioremaster.part1", "size": 422 } ] }') }),
 			@("R1", "user name in different capitals", { param($d) [IO.File]::AppendAllText((Join-Path $d "app.js"), "// built by " + $fakeUser.ToUpper()) }),
 			@("R1", "user name inside the wasm", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "app.wasm"), (Join-Bytes $wasm[0..9999] (Get-Bytes $fakeUser "utf8") $wasm[10000..39999])) }),
 			@("R1", "user name as UTF-16 in the data package", { param($d) [IO.File]::WriteAllBytes((Join-Path $d "app.data"), (Join-Bytes $data[0..999] (Get-Bytes $fakeUser "utf16") $data[1000..59999])) }),

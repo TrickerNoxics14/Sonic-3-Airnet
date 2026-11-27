@@ -65,7 +65,7 @@ while (-not (Test-Path "saves\scripts.bin") -and $t -lt 90) { Start-Sleep 1; $t+
 Start-Sleep 2
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path "saves\scripts.bin")) { throw "compiled scripts were not written" }
-# the remastered music (audioremaster.bin, 130 MB) is NOT part of the web build
+# (the remastered music is not in this package: it comes in parts, see step 4)
 $packager = Join-Path $EmsdkDir "upstream\emscripten\tools\file_packager.py"
 & $env:EMSDK_PYTHON $packager (Join-Path $OutDir "sonic3air.data") "--js-output=$(Join-Path $OutDir 'loader.js')" --preload `
 	config.json@/sonic3air/config.json audiodata.bin@/sonic3air/data/audiodata.bin enginedata.bin@/sonic3air/data/enginedata.bin `
@@ -81,6 +81,42 @@ Pop-Location
 # 3. the page
 Copy-Item (Join-Path $cmakeSrc "dist\*") $OutDir -Force
 Remove-Item -Recurse -Force $work
+
+# 4. the remastered music (audioremaster.bin, 126 MB): the page downloads it once before the first start and keeps it in the browser. GitHub refuses files over
+#    100 MB, so it is published in three parts with a small description (sizes and SHA-256) that the page reads first.
+$music = & (Join-Path $PSScriptRoot "get_remastered_music.ps1")
+$musicSize = (Get-Item -LiteralPath $music).Length
+$partCount = 3
+$partSize = [long][Math]::Ceiling($musicSize / $partCount)
+$parts = @()
+$musicStream = [IO.File]::OpenRead($music)
+try
+{
+	$buffer = New-Object byte[] (4MB)
+	for ($k = 1; $k -le $partCount; ++$k)
+	{
+		$name = "audioremaster.part$k"
+		$output = [IO.File]::Create((Join-Path $OutDir $name))
+		$left = [Math]::Min($partSize, $musicSize - $musicStream.Position)
+		$written = 0L
+		try
+		{
+			while ($left -gt 0)
+			{
+				$read = $musicStream.Read($buffer, 0, [int][Math]::Min($buffer.Length, $left))
+				if ($read -le 0) { throw "audioremaster.bin ended too early" }
+				$output.Write($buffer, 0, $read)
+				$left -= $read
+				$written += $read
+			}
+		}
+		finally { $output.Dispose() }
+		$parts += [ordered]@{ file = $name; size = $written }
+	}
+}
+finally { $musicStream.Dispose() }
+$musicInfo = [ordered]@{ file = "audioremaster.bin"; size = $musicSize; sha256 = (Get-FileHash -LiteralPath $music -Algorithm SHA256).Hash.ToLower(); parts = $parts }
+[IO.File]::WriteAllText((Join-Path $OutDir "audioremaster.json"), ($musicInfo | ConvertTo-Json -Depth 4))
 
 # guard: the output goes to a public page. checks\web_leak_guard.ps1 reads EVERY file of it in full (text and binary, .wasm and .data too) and fails the build when it finds the
 # Windows user name or computer name, a folder of this machine (the workspace, the profile, AppData, Temp, the emsdk), a <drive>:\Users path, an e-mail address, a token, a ROM

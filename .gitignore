@@ -67,3 +67,4 @@ states/
 /checks/review_fixes_report.txt
 /checks/local_stable_report*.txt
 /checks/rename_verify*.log
+*.pak

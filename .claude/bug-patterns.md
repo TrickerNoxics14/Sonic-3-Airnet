@@ -798,3 +798,17 @@ stored searches to catch new copies early. Keep entries short; edit freely.
 - Search: `grep -nE 'hint\(1[0-9]{2}|statusLine\(1[0-9]{2}|Recti\(anchorX, 1[0-9]{2}' sonic3air_online_stable_source/Oxygen/sonic3air/source/sonic3air/menu/LobbyMenu.cpp`
 - Siblings: LobbyMenu.cpp HOME hint + Playing as fixed (follow the entries) · LobbyMenu.cpp CREATE hint fixed (same entries in both builds, made to follow anyway) · LobbyMenu.cpp LAN hint fixed (Windows only, fitted; made to follow) · LobbyMenu.cpp SETTINGS status + hint fixed (Windows has LOBBY SERVER too, fitted with 10 px; made to follow)
 - Guard: Lobby: layout log line; checks K5 (browser) and P7c (Windows game, run_lobby_checks.ps1 -Only P7): text starts below the entries and ends above 213
+
+## 2026-11-27 · download-url-the-host-never-serves · cpp
+- Seed: RemasteredMusicDownload.cpp (web) and sonic3air_web.html downloadRemastered(): fetch('audioremaster.bin') next to the page; the page never published it (GitHub Pages: 404), sonic3air.org sends no CORS header
+- Broken assumption: the web build is served from a host that has audioremaster.bin next to the page (the upstream port's host did)
+- Search: `grep -rn "audioremaster" sonic3air_online_stable_source/Oxygen/sonic3air/source sonic3air_online_stable_source/Oxygen/sonic3air/build/_emscripten/dist`
+- Siblings: RemasteredMusicDownload.cpp web startDownload fixed (the page's downloader (parts, straight into storage)) · sonic3air_web.html downloadRemastered + Extra Downloads UI fixed (removed (hidden, its buttons called functions that did not exist)) · RemasteredMusicDownload.cpp Windows URL sonic3air.org not a bug (native download, no CORS)
+- Guard: web_net session S (S1-S5): the page downloads the published parts, the game loads them, the Options path works while the game runs
+
+## 2026-11-27 · leak-guard-address-shapes-in-audio-noise · powershell
+- Seed: checks/web_leak_guard.ps1 R4 on audioremaster.part1-3: 126 MB of compressed audio contain address-shaped bytes (x@c.Rt) by chance
+- Broken assumption: address-shaped bytes in a published file come from this machine
+- Search: `powershell -File checks\web_leak_guard.ps1 -Dir web_build`
+- Siblings: web_leak_guard.ps1 Get-KnownPublicParts fixed (only parts that together are byte for byte the official file (SHA-256 pinned in get_remastered_music.ps1) skip the generic address search; the builder's own address and R1-R9 still apply) · release zip scan of the upscaler shaders' licence addresses not a bug (real third-party addresses, already known)
+- Guard: self test: a fake part with the wrong hash is still caught by R4 and R1 (45 fixtures)

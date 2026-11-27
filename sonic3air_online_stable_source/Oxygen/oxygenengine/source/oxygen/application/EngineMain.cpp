@@ -658,6 +658,15 @@ bool EngineMain::loadFilePackageByIndex(size_t index, bool forceReload)
 	// First try loading from game installation
 	const std::wstring gameDataBasePath = config.mGameDataPath + L"/";
 	PackedFileProvider* provider = PackedFileProvider::createPackedFileProvider(gameDataBasePath + dataPackage.mFilename);
+	if (nullptr == provider && dataPackage.mFilename.size() > 4 && dataPackage.mFilename.compare(dataPackage.mFilename.size() - 4, 4, L".bin") == 0)
+	{
+		// The same package named ".pak" in the game installation: Sonic 3 AirNet ships the remastered soundtrack as "audioremaster.pak", because the in-game updater
+		// (also of older versions) refuses any large ".bin" file in an update package (it could be a ROM)
+		const std::wstring pakName = dataPackage.mFilename.substr(0, dataPackage.mFilename.size() - 4) + L".pak";
+		provider = PackedFileProvider::createPackedFileProvider(gameDataBasePath + pakName);
+		if (nullptr != provider)
+			RMX_LOG_INFO("Loaded the data package " << WString(dataPackage.mFilename).toStdString() << " from " << WString(pakName).toStdString());
+	}
 	if (nullptr == provider)
 	{
 		// Then try loading from save data (e.g. downloaded packages)

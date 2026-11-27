@@ -39,6 +39,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $engineData "oxygen_icon.png"))) { t
 Copy-Item (Join-Path $engineData "*") (Join-Path $out "data") -Recurse -Force
 if (-not (Test-Path -LiteralPath (Join-Path $out "data\oxygen_icon.png"))) { throw "Package is missing data\oxygen_icon.png (engine data)" }
 Copy-Item (Join-Path $game "oxygenproject.json") $out
+# The remastered soundtrack (126 MB, the owner's choice: music from the first start, no download), as data\audioremaster.pak: the game loads it under that
+# name (EngineMain::loadFilePackageByIndex). Not ".bin": the in-game updater, also of older versions, refuses large .bin files (they could be ROMs), and the
+# game removes a data\audioremaster.bin at start as an old official file (main.cpp).
+$music = & (Join-Path $PSScriptRoot "get_remastered_music.ps1")
+Copy-Item -LiteralPath $music -Destination (Join-Path $out "data\audioremaster.pak")
 
 # Settings for players: normal start, no developer save state
 $config = Get-Content (Join-Path $game "config.json") -Raw

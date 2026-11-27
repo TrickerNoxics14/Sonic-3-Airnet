@@ -79,6 +79,7 @@ void AudioOutBase::reloadRemasteredSoundtrack()
 	mAudioCollection.clearPackage(AudioCollection::Package::REMASTERED);
 	mAudioCollection.loadFromJson(L"data/audio/remastered", L"audio_replacements.json", AudioCollection::Package::REMASTERED);
 	mLoadedRemasteredSoundtrack = (mAudioCollection.getNumSourcesByPackageType(AudioCollection::Package::REMASTERED) != 0);
+	RMX_LOG_INFO("Audio: remastered soundtrack " << (mLoadedRemasteredSoundtrack ? "loaded" : "not found") << " (" << mAudioCollection.getNumSourcesByPackageType(AudioCollection::Package::REMASTERED) << " tracks)");		// (the automated checks read this)
 	determineActiveSourceRegistrations();
 }
 

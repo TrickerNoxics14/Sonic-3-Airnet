@@ -22,6 +22,13 @@
 }
 @keyframes romdrift { to { background-position: 800px 448px; } }
 @media (prefers-reduced-motion: reduce) { .file_select { animation: none; } }
+/* The remastered music loads with the game (the loading bar); only when that fails, this box offers what to do */
+#musicProblem { max-width: 560px; margin: 24px 20px; padding: 20px 22px; background: #000000; border: 2px solid #fc0000; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #ffffff; }
+#musicStatus { margin: 0 0 14px; line-height: 1.5; font-weight: 600; }
+button.fileSelector { font-family: inherit; }
+.musicSkip { background: none; border: none; padding: 12px 6px; margin-left: 14px; color: #b9c3f2; font: inherit; text-decoration: underline; cursor: pointer; }
+.musicSkip:hover { color: #ffffff; }
+.musicSkip:focus-visible { outline: 3px solid #ffe07c; outline-offset: 2px; }
 .file_select.dragging .rom-box { outline: 4px dashed #ffe07c; outline-offset: 8px; }
 .rom-box { width: 100%; max-width: 560px; background: #000000; box-shadow: 8px 8px 0 #00006c; padding: 26px 28px 24px; image-rendering: auto; }
 .rom-logo { display: block; width: 360px; max-width: 100%; height: auto; margin: 0 0 20px; image-rendering: pixelated; }
@@ -65,8 +72,7 @@ input[type="file"] {display: none;}
 .fileSelector:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 #00006c; }
 .fileSelector:focus-visible, input#fileSelector:focus-visible + .fileSelector { outline: 3px solid #ffe07c; outline-offset: 4px; }
 .restart{text-align:center;font-size: 1em;}
-.extraDownloads{display:inline-block;}
-.restart > button,.extraDownloads > button,.extraDownloadsSection > button {
+.restart > button {
   display: inline-block;
   color: white;
   background: #222;
@@ -81,13 +87,6 @@ input[type="file"] {display: none;}
   cursor: pointer;
   text-shadow: 1px 1px #555;
   font-size: 32px;
-}
-.extraDownloadsSection{
-	text-align: center;
-}
-.extraDownloadsProgress{
-	text-align:center;
-	font-size: 0.9em;
 }
 #root{
 	color: black;
@@ -236,18 +235,14 @@ function onGameExit(){
 
 function onDownloadsComplete(){
 	FS.chdir("/sonic3air");
-	hasRemasteredAudio = (FS.analyzePath("/sonic3air/savedata/audioremaster.bin", true).exists === true);
-	if(hasRemasteredAudio === true){
-		FS.symlink('/sonic3air/savedata/audioremaster.bin','/sonic3air/data/audioremaster.bin');
-	}
+	beginRemasteredMusic();		// (the music loads now, also while a new player picks the ROM)
 	if(FS.analyzePath("/sonic3air/savedata/Sonic_Knuckles_wSonic3.bin", true).exists === true){
 		//Everything exists
 		var internalFolder = FS.analyzePath("/sonic3air/___internal/");
 		if(!internalFolder.exists){
 			FS.mkdir('/sonic3air/___internal/');
 		}
-		hidePageUI();
-		startGame();
+		startGameWhenReady();
 	}
 	else{
 		//No ROM, display file selector
@@ -270,45 +265,184 @@ function hidePageUI(){
 	}
 }
 
-async function downloadRemastered(){
-	let extraBits = document.getElementsByClassName('extraDownloadsSection');
-	for (var i = 0; i < extraBits.length; i++) {
-		extraBits[i].classList.add('hidden');
-	}
-	
-	extraBits = document.getElementsByClassName('extraDownloadsProgress');
-	for (var i = 0; i < extraBits.length; i++) {
-		extraBits[i].classList.remove('hidden');
-	}
-	
-	let progressBar = document.getElementById('extraProgress');
-	let statusText = document.getElementById('extraStatus');
-	progressBar.value = 0;
-	let response = await fetch('audioremaster.bin');
-	const reader = response.body.getReader();
-	const totalSize = +response.headers.get('Content-Length');
-	if(totalSize > 0){
-		let file = FS.open('/sonic3air/savedata/audioremaster.bin','w+');
-		for(currentSize = 0; currentSize < totalSize;) {
-		  const {done, value} = await reader.read();
-		
-		  if (done) {
-			  progressBar.value = 100;
-		    break;
-		  }
-		
-		  FS.write(file, value, 0, value.length);
-		  currentSize += value.length;
-		  progressBar.value = currentSize * 100 / totalSize;
+// ---- The remastered music (audioremaster.bin, 126 MB) ----
+// The page has it in parts (GitHub takes no file over 100 MB); audioremaster.json lists them with their sizes. It is downloaded once, before the first start, straight into
+// the browser's storage (never into the game's own memory), and linked to where the game looks for it. The game's Options menu uses the same download (airnetMusic).
+var MUSIC_FILE = '/sonic3air/savedata/audioremaster.bin';
+var MUSIC_LINK = '/sonic3air/data/audioremaster.bin';
+// state: 0 = not there, 1 = downloading, 2 = there, 3 = the download failed (error says why)
+var airnetMusic = { state: 0, bytes: 0, total: 0, error: '', running: null, abort: null };
+
+function linkRemasteredMusic(){
+	if (FS.analyzePath(MUSIC_FILE, true).exists !== true)
+		return false;
+	if (FS.analyzePath(MUSIC_LINK, false).exists !== true)
+		FS.symlink(MUSIC_FILE, MUSIC_LINK);
+	hasRemasteredAudio = true;
+	airnetMusic.state = 2;
+	return true;
+}
+
+// One write of the browser storage, in the same queue as the game's own saves (one sync at a time, see FileIO.cpp)
+function requestStorageSync(){
+	var state = Module.__rmxSyncState || (Module.__rmxSyncState = { running: false, again: false });
+	var run = function(){
+		state.running = true;
+		state.again = false;
+		FS.syncfs(false, function(err){
+			if (err) console.error('FS.syncfs failed:', err);
+			state.running = false;
+			if (state.again) run();
+		});
+	};
+	if (state.running) state.again = true; else run();
+}
+
+airnetMusic.start = function(onProgress){
+	if (airnetMusic.running)
+		return airnetMusic.running;
+	var controller = new AbortController();
+	airnetMusic.abort = controller;
+	airnetMusic.running = (async function(){
+		var temp = MUSIC_FILE + '.download';
+		var stream = null;
+		airnetMusic.state = 1;
+		airnetMusic.bytes = 0;
+		airnetMusic.error = '';
+		try {
+			var infoResponse = await fetch('audioremaster.json', { cache: 'no-cache', signal: controller.signal });
+			if (!infoResponse.ok) throw new Error('the list of parts: HTTP ' + infoResponse.status);
+			var info = await infoResponse.json();
+			airnetMusic.total = info.size;
+			stream = FS.open(temp, 'w');
+			FS.ftruncate(stream.fd, info.size);		// (the whole size at once, so the file does not grow step by step)
+			var position = 0;
+			for (var i = 0; i < info.parts.length; ++i) {
+				var response = await fetch(info.parts[i].file, { signal: controller.signal });
+				if (!response.ok) throw new Error('part ' + (i + 1) + ': HTTP ' + response.status);
+				var reader = response.body.getReader();
+				var partBytes = 0;
+				for (;;) {
+					var chunk = await reader.read();
+					if (chunk.done) break;
+					FS.write(stream, chunk.value, 0, chunk.value.length, position);
+					position += chunk.value.length;
+					partBytes += chunk.value.length;
+					airnetMusic.bytes = position;
+					if (onProgress) onProgress();
+				}
+				if (partBytes !== info.parts[i].size) throw new Error('part ' + (i + 1) + ' has ' + partBytes + ' bytes instead of ' + info.parts[i].size);
+			}
+			FS.close(stream);
+			stream = null;
+			if (position !== info.size) throw new Error('got ' + position + ' bytes instead of ' + info.size);
+			FS.rename(temp, MUSIC_FILE);
+			linkRemasteredMusic();
+			requestStorageSync();
+			console.log('Music: the remastered music is ready (' + info.size + ' bytes)');
+		} catch (e) {
+			if (stream) { try { FS.close(stream); } catch (x) {} }
+			try { FS.unlink(temp); } catch (x) {}
+			var stopped = controller.signal.aborted;
+			airnetMusic.state = stopped ? 0 : 3;
+			airnetMusic.error = stopped ? '' : String((e && e.message) || e);
+			console.warn('Music: the download ' + (stopped ? 'was stopped' : ('failed: ' + airnetMusic.error)));
 		}
-		FS.close(file);
-		statusText.innerText = "Download complete! Restarting game...";
+		airnetMusic.running = null;
+		airnetMusic.abort = null;
+		if (onProgress) onProgress();
+		return airnetMusic.state === 2;
+	})();
+	return airnetMusic.running;
+};
+
+airnetMusic.cancel = function(){
+	if (airnetMusic.abort) airnetMusic.abort.abort();
+};
+
+// The music is part of loading the game: it starts as soon as the game's own files are there, on the same loading bar (and while a new player picks the ROM),
+// and the game starts when both are done. (?music=skip leaves it out, for the automated checks.)
+var musicLoading = null;		// the download running for the start of the game, or null
+function isMusicSkipped(){ return /[?&]music=skip(&|$)/.test(location.search); }
+function megabytes(bytes){ return Math.round(bytes / 1048576); }
+
+function showMusicProgress(){
+	var romNote = document.getElementById('romMusicNote');
+	if (airnetMusic.state === 1) {
+		var part = (airnetMusic.total > 0) ? (megabytes(airnetMusic.bytes) + ' of ' + megabytes(airnetMusic.total) + ' MB') : '';
+		statusElement.innerText = 'Loading the remastered music... ' + part;
+		if (airnetMusic.total > 0) {
+			progressElement.max = airnetMusic.total;
+			progressElement.value = airnetMusic.bytes;
+			progressElement.hidden = false;
+		}
+		spinnerElement.hidden = false;
+		spinnerElement.style.display = '';
+		if (romNote) { romNote.hidden = false; romNote.innerText = 'The remastered music is loading meanwhile (' + part + ').'; }
 	}
-	else{
-		statusText.innerText = "Download failed to start. Restarting game...";
+	else if (romNote) {
+		romNote.hidden = (airnetMusic.state !== 2 && airnetMusic.state !== 3);
+		romNote.innerText = (airnetMusic.state === 2) ? 'The remastered music is ready.' : 'The remastered music could not be loaded; you can still play.';
 	}
-	setTimeout(()=>location.reload(), 2000);
-	await sleep(2000);
+}
+
+function beginRemasteredMusic(){
+	if (isMusicSkipped() || linkRemasteredMusic())
+		return;
+	if (!musicLoading)
+		musicLoading = airnetMusic.start(showMusicProgress);
+}
+
+function setLoadingBarVisible(visible){
+	var uiElements = document.getElementsByClassName('pageUI');
+	for (var i = 0; i < uiElements.length; i++) {
+		uiElements[i].classList.remove('hidden');
+		uiElements[i].style.display = visible ? '' : 'none';
+	}
+}
+
+function showMusicProblem(visible){
+	var problem = document.getElementById('musicProblem');
+	if (!problem) return;
+	problem.classList.toggle('hidden', !visible);
+	if (visible) {
+		document.getElementById('musicStatus').innerText = 'The remastered music could not be loaded (' + airnetMusic.error + '). Check the connection and try again, or play with the original music for now: it can be loaded later in Options.';
+		problem.querySelector('button').focus();
+	}
+}
+
+// After the ROM: the game starts when the music is there too (the loading bar shows it while it is still on its way)
+async function startGameWhenReady(){
+	var fileElement = document.getElementsByClassName('file_select');
+	if (fileElement.length > 0) fileElement[0].remove();
+	showMusicProblem(false);
+	beginRemasteredMusic();
+	if (musicLoading) {
+		setLoadingBarVisible(true);
+		showMusicProgress();
+		var ok = await musicLoading;
+		musicLoading = null;
+		if (!ok) {
+			spinnerElement.style.display = 'none';
+			statusElement.innerText = 'The remastered music did not load.';
+			progressElement.hidden = true;
+			showMusicProblem(true);		// ("Try again" or "Play with the original music for now")
+			return;
+		}
+	}
+	hidePageUI();
+	startGame();
+}
+
+function retryRemasteredMusic(){
+	startGameWhenReady();
+}
+
+function skipRemasteredMusic(){
+	console.log('Music: the player starts with the original music');
+	showMusicProblem(false);
+	hidePageUI();
+	startGame();
 }
 
 function installS3kFile(fileInput) {
@@ -339,14 +473,12 @@ function installS3kFile(fileInput) {
 		//But that shouldn't happen because we wouldn't be calling this if it already existed.
         Module['FS_createDataFile']('/sonic3air/savedata/', 'Sonic_Knuckles_wSonic3.bin', data, true, true, true);
 		FS.syncfs(function (err) {
-			hidePageUI();
-			
 			//Save into IndexedDB
 			var internalFolder = FS.analyzePath("/sonic3air/___internal/");
 			if(!internalFolder.exists){
 				FS.mkdir('/sonic3air/___internal/');
 			}
-			startGame();
+			startGameWhenReady();
   		});
     };
     fr.readAsArrayBuffer(file);
@@ -493,6 +625,7 @@ function fileManagerExportFile(filePath){
 		<label for="fileSelector" class="fileSelector" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('fileSelector').click();}">Choose ROM file</label>
 		<input id="fileSelector" class="fileSelector" type="file" onChange="installS3kFile(this);"/>
 		<p class="quiet">Or drop the file anywhere on this page.</p>
+		<p class="quiet" id="romMusicNote" role="status" hidden></p>
 	</div>
 	<div class="rom-cast" aria-hidden="true"><img src="ui_sonic.png" width="40" height="40" alt=""><img src="ui_tails.png" width="40" height="40" alt=""></div>
 </div>
@@ -504,27 +637,15 @@ function fileManagerExportFile(filePath){
 	<input id="fileUploadInput" type="file" onChange="addFile(this);"/>
 	<button type="button" onclick="cancelFileSelect()" class="cancelButton">Cancel</button>
 </div>
-<div class="restart hidden">
-	<button type="button" onclick="location.reload()">Restart Game</button>
-	<div class="extraDownloads hidden">
-		<button type="button" onclick="showExtraDownloads()">Extra Downloads</button> 
+<div id="musicProblem" class="hidden" role="alert">
+	<p id="musicStatus"></p>
+	<div id="musicActions">
+		<button type="button" class="fileSelector" onclick="retryRemasteredMusic()">Try again</button>
+		<button type="button" class="musicSkip" onclick="skipRemasteredMusic()">Play with the original music for now</button>
 	</div>
 </div>
-<div class="extraDownloadsSection hidden">
-	<div style="margin:1em;">On other platforms, Sonic 3 A.I.R. includes remastered music which is enabled by default. 
-	None of the compositions have been altered, but instead the music is played back in higher quality 
-	than the original MegaDrive or Genesis console was capable of. On this device the remastered music 
-	is not included by default and you can install it here. Installing this may reduce the stability 
-	of the game on devices with low memory causing stuttering or the game to no longer load at all.</div>
-	<br/>
-	<button type="button" onclick="hideExtraDownloads()">Go Back</button> 
-	<br/>
-	<button type="button" onclick="downloadRemastered()">Install Anyway</button>
-</div>
-<div class="extraDownloadsProgress hidden">
-	<!-- I could have just reused the emscripten progress stuff above, but it may benefit me later to keep it separate. -->
-	<div id=extraStatus>Downloading...</div>
-	<div><progress id=extraProgress max=100 value=0></progress></div>
+<div class="restart hidden">
+	<button type="button" onclick="location.reload()">Restart Game</button>
 </div>
 <div id="root" class="hidden"></div>
 <div id="gameView" class="emscripten_border">

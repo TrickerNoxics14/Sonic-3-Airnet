@@ -43,6 +43,9 @@ start the game copies it into  %APPDATA%\Sonic3AIR\mods  and switches it on,
 and at every start it repairs that copy so that it matches this folder. If you
 switch it off in the Mods menu, it stays off.
 
+The remastered soundtrack of Sonic 3 A.I.R. is included (data\audioremaster.pak);
+Options > Audio switches between it and the original music.
+
 This build is based on the official stable Sonic 3 A.I.R. 26.03.28.0.
 
 

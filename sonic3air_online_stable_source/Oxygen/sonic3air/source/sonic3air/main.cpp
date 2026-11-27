@@ -71,6 +71,7 @@ int main(int argc, char** argv)
 #if defined(PLATFORM_WINDOWS)
 	// Check if the user has an old version of "audioremaster.bin", and remove it if that's the case
 	//  -> As the newer installations don't include that file, it is most likely an out-dated one, and could cause problems (at least an assert) down the line
+	//     (Sonic 3 AirNet ships the remastered soundtrack as "data/audioremaster.pak", see EngineMain::loadFilePackageByIndex)
 	if (FTX::FileSystem->exists(L"data/audioremaster.bin"))
 		FTX::FileSystem->removeFile(L"data/audioremaster.bin");
 #endif
